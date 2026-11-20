@@ -174,7 +174,45 @@ implementation followed and shipped as v0.7.0.
 | Were all zone-context gaps caught by the original nine-gap review? | No — Issue #812's audit found four more (dashboard first-load, Repairs `entries[0]`, zero log attribution, non-deterministic registry fallback order); Issue #911 later closed the remainder — every scheduled/event coordinator callback and every `api.py` REST handler are now zone-scoped too. | [Gap 10](#gap-10--residual-zone-context-gaps-found-by-issue-812s-audit) |
 | Does every zone send its own copy of the daily briefing notification? | It used to — Issue #817 Part 3/4 added a per-zone mute (`CONF_BRIEFING_NOTIFICATIONS_ENABLED`), defaulting only the stably-first zone to notifying, plus made the dashboard's Regenerate button stop force-sending a real push/email. | [Gap 10e](#10e--every-zone-independently-sent-its-own-daily-briefing-notification-issue-817-part-34) |
 | Did 10c's zone-attribution fix cover every log call site? | No — it wrapped only 7 sites (update cycle, briefing send, 5 service handlers). Issue #911 found ~13 unwrapped coordinator.py callbacks (door/window, occupancy, thermostat/fan listeners, pre-cool, etc.) plus all ~20 `api.py` REST handlers, still leaking cross-zone warnings — now fixed. | [Gap 10f](#10f--remaining-zone-attribution-gaps-closed-coordinator-callbacks-and-apipy-issue-911) |
+| Are AI settings per zone? | No: install-wide since 0.9.51 (Issue #1336). The same AI values are copied to every zone's entry (saving the AI step in any zone writes all of them), one shared AI client and skill registry serve every zone (`hass.data[f"{DOMAIN}_ai"]`), and config entry migration v21 unified the old per-zone settings once (stably-first configured zone wins; differing values backed up under `ai_settings_backup_1336`; an `ai_settings_unified` Repairs notice names the kept zone). Reports and context stay per zone. | [AI settings are install-wide](#ai-settings-are-install-wide-issue-1336) |
 | Is the AI investigation history per zone? | Yes, since 0.9.6 (Issue #1415). It was one file per install while each zone saved its whole list into it, so the last zone to save erased the others' reports and every zone showed all zones' reports after a restart. Now `climate_advisor_investigation_reports_<entry_id>.json` (in `ENTRY_SCOPED_FILES`, deleted with the zone); the old shared file is copied to every zone once and removed. | [State Persistence: restore table](state-persistence.md#restore-across-the-date-boundary-issues-1349-1354-1360) |
+
+## AI settings are install-wide (Issue #1336)
+
+**What the occupant experiences.** AI settings are set once for the whole home. The AI
+settings step in any zone's options says the settings apply to all zones, and saving it
+there sets every zone. Once AI is on, the Investigator is available on every zone's
+dashboard. The daily request limits count across all zones together, and every zone's AI
+status shows the same numbers. Each investigation still looks only at its own zone and is
+saved in that zone's report history.
+
+This is the one deliberate exception to "a zone is a config entry with its own settings":
+the AI provider (an AI Task entity, or the deprecated built-in Claude key) is a household
+choice, not a thermostat one. Zones are **not** restructured; there is still no
+install-level config entry.
+
+| Piece | How it works | Reused, not added |
+|---|---|---|
+| **Values on every entry** | The AI keys (`ai_settings_sync.AI_SHARED_KEYS`) are kept identical on every zone's entry `data`, so every per-zone reader (`__init__.py`, `coordinator.py`, `api.py`, `ai_skills*.py`, `claude_api.py`, `diagnostics.py`) keeps working unchanged | No `Store` file, no second source of truth |
+| **Save** | The existing `ai_settings` options step writes its own entry through `_commit_section` (raising the usual `reload_needed_<entry_id>` issue), then `ai_settings_sync.async_copy_to_other_entries()` writes the same values to every other Climate Advisor entry. Values take effect on reload (Issue #573); reloading the edited zone refreshes the shared client | The existing step and reload issue; no update listener |
+| **A zone added later** | Copies the AI keys from an existing zone | — |
+| **Shared client** | `hass.data[f"{DOMAIN}_ai"] = {"client": ClaudeAPIClient, "skills": AISkillRegistry}`, kept outside `hass.data[DOMAIN]` so the zone count and `zone_registry.iter_coordinators` are unchanged. `coordinator.claude_client` / `coordinator.ai_skills` point at it. Created when `is_ai_configured(entry.data)`; each zone's setup or reload calls `update_config()`; the last zone to unload removes it, in the same `if not hass.data[DOMAIN]:` block that removes the panel | The existing circuit breaker, counters and history, now install-wide |
+| **Migration v21** | Once, on the first start of 0.9.51: sets `ai_provider` per entry (`provider_of`: a key keeps `builtin_claude`, else `ha_ai_task`), turns `high` reasoning into `medium`, and unifies with `pick_install_ai_values()` over every entry's original values in `hass.config_entries.async_entries(DOMAIN)` order | The stable zone order shared by `get_default_coordinator()`, `list_zones()` and `default_briefing_notifications_enabled()` |
+| **Notices** | `ai_settings_unified` (placeholder `zone`) when configured zones disagreed; `builtin_claude_deprecated` while any configured entry uses built-in Claude. Both install-wide, fixed ids | The `zone_resolution_ambiguous` fixed-id pattern (`zone_registry.py`) |
+
+**What happens to existing per-zone AI settings** (migration v21):
+
+| Before upgrade | After |
+|---|---|
+| No zone has AI configured | Nothing changes |
+| Exactly one zone has AI on (the owner's case: 1 of 7 zones) | Its settings are copied to every zone; the Investigator appears on every zone's dashboard |
+| Several zones have AI on, same values | Kept as they are |
+| Several zones have AI on, different values | The stably-first configured zone's values win. Every zone whose own values differed keeps them under `ai_settings_backup_1336` (nothing is lost). One `ai_settings_unified` Repairs notice: "AI settings now apply to all zones; Climate Advisor kept <zone>'s settings" |
+
+Tests (owned by the backend and config-flow lanes): unit tests for the merge rules (none,
+one, same, different); real-HA tier with two zones (saving in zone A writes zone B's entry,
+one shared client, unloading one zone keeps it and unloading the last removes it, and the
+zone-removal cleanup test still passes). Detail: [AI Integration Brief](ai-integration.md#install-wide-settings-and-the-shared-client).
 
 ## Scope
 

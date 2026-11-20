@@ -22,9 +22,14 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.start import async_at_started
 
-from . import i18n, log_capture, zone_registry
+from . import ai_settings_sync, i18n, log_capture, zone_registry
 from .api import API_VIEWS, ZONELESS_VIEWS
 from .const import (
+    AI_PROVIDER_BUILTIN_CLAUDE,
+    AI_REASONING_HIGH,
+    AI_REASONING_MEDIUM,
+    AI_SETTINGS_BACKUP_KEY,
+    AI_SHARED_DATA_KEY,
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
     CONF_AI_ENABLED,
@@ -37,6 +42,7 @@ from .const import (
     CONF_AI_MAX_TOKENS,
     CONF_AI_MODEL,
     CONF_AI_MONTHLY_BUDGET,
+    CONF_AI_PROVIDER,
     CONF_AI_REASONING_EFFORT,
     CONF_AI_TEMPERATURE,
     CONF_AUTOMATION_GRACE_NOTIFY,
@@ -99,6 +105,8 @@ from .const import (
     ENTRY_SCOPED_FILES,
     FAN_MODE_BOTH,
     FAN_MODE_WHOLE_HOUSE,
+    ISSUE_AI_SETTINGS_UNIFIED,
+    ISSUE_BUILTIN_CLAUDE_DEPRECATED,
     PANEL_FRONTEND_PATH,
     PANEL_URL,
     TEMP_SOURCE_CLIMATE_FALLBACK,
@@ -447,7 +455,129 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         )
         _LOGGER.info("Migration to version 20 complete")
 
+    if config_entry.version == 20:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 20 to 21")
+        new_data = _migrate_ai_settings_v21(hass, config_entry)
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, version=21, unique_id=config_entry.unique_id
+        )
+        _LOGGER.info("Migration to version 21 complete")
+
     return True
+
+
+def _ai_v21_values(values: dict) -> dict:
+    """Issue #1336: a set of AI values in their v21 form — the provider named, ``high`` reasoning as ``medium``."""
+    out = dict(values)
+    if out:
+        out[CONF_AI_PROVIDER] = ai_settings_sync.provider_of(out)
+    if out.get(CONF_AI_REASONING_EFFORT) == AI_REASONING_HIGH:
+        out[CONF_AI_REASONING_EFFORT] = AI_REASONING_MEDIUM
+    return out
+
+
+def _ai_named_provider(values: dict) -> dict:
+    """Issue #1336: AI values with only the new ``ai_provider`` key filled in.
+
+    Used to decide whether a zone's own originals need a backup: naming the provider is not a change the
+    occupant made, so it alone does not create a second copy of the zone's settings (and key).
+    """
+    out = dict(values)
+    if out:
+        out[CONF_AI_PROVIDER] = ai_settings_sync.provider_of(out)
+    return out
+
+
+def _migrate_ai_settings_v21(hass: HomeAssistant, config_entry: ConfigEntry) -> dict:
+    """The v20 -> v21 data of one zone (Issue #1336): AI settings become install-wide.
+
+    Occupant view: a zone's AI settings now apply to every zone. When exactly one zone had AI on, every zone
+    gets its settings (and the Investigator); when several had different settings, the stably-first zone's
+    are kept and a Repairs notice says so. A zone with a Claude key stays on built-in Claude; others get Home
+    Assistant AI Task. Reasoning "high" becomes "medium".
+
+    Nothing stored is lost: ``ai_settings_sync.unified_entry_data`` backs up a zone's own original AI values
+    under ``AI_SETTINGS_BACKUP_KEY`` whenever they differ from the values it now holds. Every zone is judged by
+    its ORIGINAL values (the backup once it has one), so the outcome does not depend on which zone migrates
+    first.
+    """
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not isinstance(entries, list) or not entries:
+        entries = [config_entry]
+    # The data of this entry as it is now (earlier hops may have changed it); siblings as stored.
+    entries_data = [config_entry.data if e.entry_id == config_entry.entry_id else e.data for e in entries]
+    values, conflict = ai_settings_sync.pick_install_ai_values(entries_data, _ai_v21_values)
+
+    if values is None:
+        # No zone has AI configured: this zone's own values, in their v21 form.
+        own = ai_settings_sync.extract_ai_values(config_entry.data)
+        new_data = (
+            ai_settings_sync.unified_entry_data(config_entry.data, _ai_v21_values(own), _ai_named_provider)
+            if own
+            else dict(config_entry.data)
+        )
+        _LOGGER.info("AI settings migrated: no zone has AI configured — zone keeps its own values")
+        return new_data
+
+    install_values = _ai_v21_values(values)
+    new_data = ai_settings_sync.unified_entry_data(config_entry.data, install_values, _ai_named_provider)
+    winner = next(
+        (
+            e
+            for e in entries
+            if ai_settings_sync.is_ai_configured(
+                ai_settings_sync.original_ai_values(
+                    config_entry.data if e.entry_id == config_entry.entry_id else e.data
+                )
+            )
+        ),
+        config_entry,
+    )
+    winner_title = str(getattr(winner, "title", None) or winner.entry_id)
+    _LOGGER.info(
+        "AI settings migrated: install-wide values from zone %s provider=%s backed_up=%s conflict=%s",
+        winner_title,
+        install_values.get(CONF_AI_PROVIDER),
+        AI_SETTINGS_BACKUP_KEY in new_data,
+        conflict,
+    )
+    if conflict:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            ISSUE_AI_SETTINGS_UNIFIED,
+            is_fixable=False,
+            is_persistent=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_AI_SETTINGS_UNIFIED,
+            translation_placeholders={"zone": winner_title},
+        )
+    return new_data
+
+
+def _update_builtin_claude_deprecation_issue(hass: HomeAssistant) -> None:
+    """Raise the install-wide "built-in Claude is deprecated" Repairs notice while any zone uses it (Issue #1336).
+
+    Deleted otherwise, so it clears on the setup after the occupant switches to Home Assistant AI Task.
+    """
+    entries = hass.config_entries.async_entries(DOMAIN)
+    uses_builtin = isinstance(entries, list) and any(
+        ai_settings_sync.is_ai_configured(e.data) and ai_settings_sync.provider_of(e.data) == AI_PROVIDER_BUILTIN_CLAUDE
+        for e in entries
+    )
+    if uses_builtin:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            ISSUE_BUILTIN_CLAUDE_DEPRECATED,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_BUILTIN_CLAUDE_DEPRECATED,
+        )
+        _LOGGER.warning("Built-in Claude is deprecated: choose a Home Assistant AI Task entity in the AI settings")
+    else:
+        ir.async_delete_issue(hass, DOMAIN, ISSUE_BUILTIN_CLAUDE_DEPRECATED)
 
 
 def _resolve_zone_coordinator(hass: HomeAssistant, call) -> ClimateAdvisorCoordinator:
@@ -560,6 +690,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # notice raised by ClimateAdvisorOptionsFlow._commit_section(). Entry-scoped
     # (Issue #812) so this only clears THIS zone's own notice.
     ir.async_delete_issue(hass, DOMAIN, f"reload_needed_{entry.entry_id}")
+
+    # Issue #1336: the deprecation notice follows the install's current AI provider.
+    _update_builtin_claude_deprecation_issue(hass)
 
     # Defer weather entity validation until HA is fully started so all
     # entities are loaded — avoids false "not found" on startup race.
@@ -903,6 +1036,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # of finding a stale "already registered" flag from this now-torn-down
         # instance.
         hass.data.pop(_PANEL_HASS_DATA_KEY, None)
+        # Issue #1336: the install-wide AI client goes with the last zone, like the panel.
+        hass.data.pop(AI_SHARED_DATA_KEY, None)
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     return unload_ok

@@ -146,7 +146,7 @@ async def test_german_install_reads_german_names_states_flow_words_and_errors(ma
         ("temperature_sources", {"outdoor_temp_source", "indoor_temp_source", "thermostat_companion"}),
         ("sensors", {"fan_mode", "hvac_fan_restrict"}),
         ("scheduler_edit", {"weekday"}),
-        ("ai_settings", {"ai_reasoning_effort"}),
+        ("ai_settings", {"ai_reasoning_effort", "ai_provider"}),
         ("advanced", {"prediction_engine"}),
     ],
 )

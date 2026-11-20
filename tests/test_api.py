@@ -131,8 +131,8 @@ class TestAPIViewList:
 
     def test_correct_count(self):
         assert (
-            len(API_VIEWS) == 24
-        )  # Issue #1230 R1: + PredictionAccuracyView; R3b: + TimelineView; R6: + NightStrategyView
+            len(API_VIEWS) == 25
+        )  # Issue #1230 R1: + PredictionAccuracyView; R3b: + TimelineView; R6: + NightStrategyView; #1336: + AILimits
 
     def test_all_are_callable(self):
         for view_cls in API_VIEWS:

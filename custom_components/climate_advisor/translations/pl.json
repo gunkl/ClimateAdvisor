@@ -169,7 +169,7 @@
           "notifications": "Powiadomienia",
           "advanced": "Uczenie się i zachowanie",
           "classification_thresholds": "Progi typów dnia",
-          "ai_settings": "Ustawienia Claude AI",
+          "ai_settings": "Ustawienia AI",
           "github_settings": "Integracja z GitHub"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "Ustawienia AI",
-        "description": "Skonfiguruj integrację z Claude AI do inteligentnej analizy i raportowania.\nStan klucza API: {key_status}",
+        "description": "Te ustawienia dotyczą wszystkich stref.\n\nWybierz encję Zadanie AI z dowolnej integracji AI w Home Assistant albo zostaw puste, aby użyć encji preferowanej przez Home Assistant.\n\nWbudowany Claude jest przestarzały i zostanie usunięty. Aby dalej korzystać z Claude, dodaj integrację Anthropic w Home Assistant, dodaj do niej Zadanie AI i wybierz tutaj tę encję.\n\nDostawca AI potrzebuje okna kontekstu co najmniej 16k tokenów i limitu odpowiedzi co najmniej 8192 tokenów, z rozumowaniem ustawionym na średnie.\n\nKlucz API (tylko wbudowany Claude): {key_status}",
         "data": {
           "ai_enabled": "Włącz funkcje AI",
+          "ai_provider": "Dostawca AI",
+          "ai_task_entity": "Encja Zadanie AI",
           "ai_api_key": "Klucz API Claude",
           "ai_model": "Model AI",
           "ai_reasoning_effort": "Wysiłek rozumowania",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "Główny przełącznik wszystkich funkcji opartych na AI. Po wyłączeniu Climate Advisor używa tylko wbudowanej, zaprogramowanej logiki.",
-          "ai_api_key": "Twój klucz API Anthropic. Uzyskasz go na console.anthropic.com. Zostaw puste, aby zachować obecny klucz.",
-          "ai_model": "Którego modelu Claude używać. Zalecany jest Sonnet jako dobry kompromis między kosztem a jakością.",
-          "ai_reasoning_effort": "Ile wysiłku rozumowania wkłada Claude. Wyżej = lepsza analiza, ale wyższy koszt.",
-          "ai_max_tokens": "Maksymalna długość odpowiedzi AI w tokenach (256–16384).",
-          "ai_temperature": "Steruje losowością. 0 = deterministycznie, 1,0 = najbardziej kreatywnie. Zalecane: 0,3.",
-          "ai_monthly_budget": "Maksymalne szacowane miesięczne wydatki w dolarach amerykańskich. Ustaw 0 dla braku limitu.",
+          "ai_provider": "Zadanie AI w Home Assistant korzysta z integracji AI skonfigurowanej w Home Assistant. Wbudowany Claude jest przestarzały i zostanie usunięty.",
+          "ai_task_entity": "Encja Zadanie AI, której należy użyć. Zostaw puste, aby użyć preferowanej encji Zadanie AI w Home Assistant. Nieużywane przez wbudowanego Claude.",
+          "ai_api_key": "Tylko wbudowany Claude. Twój klucz API Anthropic. Uzyskasz go na console.anthropic.com. Zostaw puste, aby zachować obecny klucz.",
+          "ai_model": "Tylko wbudowany Claude. Którego modelu Claude używać. Zalecany jest Sonnet jako dobry kompromis między kosztem a jakością.",
+          "ai_reasoning_effort": "Tylko wbudowany Claude. Ile wysiłku rozumowania wkłada Claude. Wyżej = lepsza analiza, ale wyższy koszt.",
+          "ai_max_tokens": "Tylko wbudowany Claude. Maksymalna długość odpowiedzi AI w tokenach (256–16384).",
+          "ai_temperature": "Tylko wbudowany Claude. Steruje losowością. 0 = deterministycznie, 1,0 = najbardziej kreatywnie. Zalecane: 0,3.",
+          "ai_monthly_budget": "Tylko wbudowany Claude. Maksymalne szacowane miesięczne wydatki w dolarach amerykańskich. Ustaw 0 dla braku limitu.",
           "ai_auto_requests_per_day": "Maksymalna liczba automatycznych zapytań AI dziennie (zerowana o północy).",
           "ai_manual_requests_per_day": "Maksymalna liczba zapytań AI wywołanych przez użytkownika dziennie (zerowana o północy).",
           "ai_investigator_enabled": "Włącz agenta analitycznego (wymaga włączonego AI). Wykonuje głęboką analizę z wielu źródeł, aby znaleźć niespójności i problemy z danymi.",
           "ai_investigator_requests_per_day": "Maksymalna liczba uruchomień analizy dziennie. Każda analiza korzysta z rozszerzonego rozumowania. Zerowane o północy."
         }
+      },
+      "ai_limits_warning": {
+        "title": "Limity dostawcy AI są za niskie",
+        "description": "Ustawienia AI zostały zapisane. Niektóre limity dostawcy AI są za niskie, więc raporty AI mogą zostać ucięte albo się nie udać:\n\n{checks}\n\nZwiększ je w opcjach Zadania AI tej integracji. Climate Advisor potrzebuje okna kontekstu co najmniej 16k tokenów i limitu odpowiedzi co najmniej 8192 tokenów. Zatwierdź, aby kontynuować."
       },
       "github_settings": {
         "title": "Integracja z GitHub",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "Niejednoznaczny wybór strefy",
       "description": "Climate Advisor ma więcej niż jedną strefę, a żądanie nie wskazało, której strefy dotyczy: {request}. Wynik: {outcome}. Cokolwiek je wysłało (skrypt, automatyzacja, narzędzie wiersza poleceń lub stara karta przeglądarki), może pokazywać informacje innej strefy.\n\nAby to naprawić, dodaj do tego żądania `?zone=ENTRY_ID`, gdzie ENTRY_ID to `entry_id` strefy wymienione przez `GET /api/climate_advisor/status`. Pulpity Climate Advisor już to robią. To powiadomienie zniknie przy następnym uruchomieniu Climate Advisor."
+    },
+    "builtin_claude_deprecated": {
+      "title": "Wbudowany Claude jest przestarzały",
+      "description": "AI w Climate Advisor korzysta z wbudowanego Claude, który jest przestarzały i zostanie usunięty w przyszłej wersji. Po jego usunięciu raporty AI przestaną działać.\n\nJak przejść:\n1. Dodaj integrację Anthropic w Home Assistant (lub inną integrację AI) i dodaj do niej Zadanie AI.\n2. W opcjach Zadania AI wyłącz zalecane ustawienia modelu, a następnie ustaw maksymalną liczbę tokenów na 8192 lub więcej i wysiłek myślenia na średni.\n3. W opcjach Climate Advisor otwórz Ustawienia AI, wybierz Zadanie AI w Home Assistant i wskaż tę encję. Dotyczy to wszystkich stref.\n\nTo powiadomienie zniknie przy następnym uruchomieniu Climate Advisor, gdy żadna strefa nie będzie korzystać z wbudowanego Claude."
+    },
+    "ai_settings_unified": {
+      "title": "Ustawienia AI dotyczą teraz wszystkich stref",
+      "description": "Ustawienia AI są teraz wspólne dla wszystkich stref. Twoje strefy miały różne ustawienia AI, więc Climate Advisor zachował ustawienia strefy {zone} i użył ich dla każdej strefy. Dzienne limity żądań AI liczą się teraz łącznie dla wszystkich stref.\n\nAby je zmienić, otwórz Ustawienia AI w opcjach dowolnej strefy."
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}, tylko ogrzewanie)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}, tylko gdy {entity} jest włączone)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, tylko chłodzenie, tylko gdy {entity} jest włączone)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, tylko ogrzewanie, tylko gdy {entity} jest włączone)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, tylko ogrzewanie, tylko gdy {entity} jest włączone)",
+    "ai_limit_output": "{integration}: limit odpowiedzi ({setting}) wynosi {value} tokenów; potrzeba co najmniej {required}.",
+    "ai_limit_context": "{integration}: okno kontekstu ({setting}) wynosi {value} tokenów; potrzeba co najmniej {required}.",
+    "ai_limit_combined": "{integration}: okno kontekstu ({setting}) wynosi {value} tokenów. Mieści zarówno pytanie, jak i odpowiedź, więc potrzeba co najmniej {required}.",
+    "ai_limit_builtin_output": "Wbudowany Claude: Maksymalna długość odpowiedzi wynosi {value} tokenów; potrzeba co najmniej {required}."
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "Niski",
-        "medium": "Średni",
-        "high": "Wysoki"
+        "medium": "Średni"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Zadanie AI w Home Assistant",
+        "builtin_claude": "Wbudowany Claude (przestarzały)"
       }
     },
     "suggestion_action": {

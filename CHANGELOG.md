@@ -3,6 +3,33 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.51] — 2026-11-20
+
+### Added
+- #1336: use your own AI provider. The AI Investigator can now run on any AI provider you have set up in Home Assistant, such as OpenAI, Google Gemini, Anthropic, OpenRouter, Ollama or Nabu Casa Cloud. A local Ollama model keeps your house data at home.
+  - Choose the provider's AI Task entity in Climate Advisor's AI settings, or leave the field empty to use Home Assistant's preferred AI Task entity. Climate Advisor no longer needs its own API key for this.
+  - Set the provider to an output limit of at least 8192 tokens and medium reasoning. A context window that holds both question and answer (Ollama) needs at least 24k; 32768 is suggested.
+  - Before an investigation runs, Climate Advisor checks the provider's limits where Home Assistant stores them. If they look too small, it says which setting to raise and offers *Run anyway*. It never blocks.
+  - If a report fails at the provider's limit or comes back cut short, you are told which setting to raise.
+  - On this path the report appears all at once instead of streaming, and there are no cost figures. The provider account is now the record of spending.
+
+### Changed
+- AI settings now apply to the whole install instead of each zone. Saving them in any zone saves them for every zone.
+  - On upgrade, the settings of the first zone with AI turned on are used for every zone.
+  - If zones had different AI settings, each zone's old values are kept in a backup, and a Repairs notice says whose settings were kept.
+- Reasoning effort offers Low and Medium only. A saved High becomes Medium.
+
+### Deprecated
+- Built-in Claude, where you paste a Claude API key into Climate Advisor, still works but will be removed in a later release. To move:
+  1. Add Home Assistant's Anthropic integration and give it an AI Task entity.
+  2. Untick *Recommended model settings* and set max tokens to at least 8192. The default is 3000.
+  3. Choose that entity in Climate Advisor's AI settings.
+
+  A Repairs notice reminds you while built-in Claude is in use.
+
+### Notes
+- The config entry moves to version 21. Downgrading is not supported.
+
 ## [0.9.50] — 2026-11-20
 
 ### Changed (CI only; nothing changes in your house)

@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Zwiększ go w ustawieniach tej integracji w Home Assistant. Jeśli mimo to uruchomisz, raport może być niekompletny lub się nie udać.",
+  "ai.limits.cancel": "Anuluj",
+  "ai.limits.cancelled": "Analiza anulowana.",
+  "ai.limits.check": "{kind, select, output {Limit wyjścia} context {Okno kontekstu} other {Wspólne okno kontekstu (wejście i wyjście)}}: {setting} w {integration} wynosi {value}; potrzeba co najmniej {required}.",
+  "ai.limits.checking": "Sprawdzanie limitów dostawcy AI…",
+  "ai.limits.run_anyway": "Uruchom mimo to",
+  "ai.limits.title": "Limity tego dostawcy AI wyglądają na zbyt małe do analizy",
+  "ai.limits.unreadable": "Nie można sprawdzić limitów tego dostawcy; potrzebne są okno kontekstu 16k tokenów i limit wyjścia 8k tokenów.",
+  "ai.notice.ai_context_limit": "Dane do tego raportu nie zmieściły się w oknie kontekstu modelu AI. Użyj modelu z oknem kontekstu co najmniej {context} tokenów ({combined}, gdy wejście i wyjście dzielą jedno okno, jak num_ctx w Ollama) albo wybierz krótszy okres.",
+  "ai.notice.ai_output_limit": "Dostawca AI zatrzymał się na limicie wyjścia, zanim raport był gotowy. Zwiększ maksymalną liczbę tokenów do co najmniej {required} w ustawieniach tej integracji.",
+  "ai.notice.ai_provider_error": "Dostawca AI zwrócił błąd, więc nie udało się napisać raportu. Sprawdź tę integrację w Home Assistant i spróbuj ponownie.",
+  "ai.notice.ai_report_cut_short": "Raport wrócił niekompletny: brakuje niektórych sekcji. {has_setting, select, yes {Zwiększ {setting} w {integration} do co najmniej {required}, a potem uruchom go ponownie.} other {Zwiększ limit wyjścia dostawcy AI do co najmniej {required} tokenów w ustawieniach tej integracji, a potem uruchom go ponownie.}}",
+  "ai.notice.ai_task_no_entity": "Nie wybrano encji AI Task, a Home Assistant nie ma preferowanej. Wybierz encję AI Task w ustawieniach AI Climate Advisor albo ustaw domyślną w Ustawienia > System > AI.",
+  "ai.status_gathering": "Zbieranie danych systemu…",
+  "ai.status_provider": "Oczekiwanie, aż dostawca AI napisze raport…",
+  "ai.status_sending": "Wysyłanie danych do dostawcy AI…"
+}

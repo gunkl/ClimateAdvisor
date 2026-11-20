@@ -169,7 +169,7 @@
           "notifications": "Notificaties",
           "advanced": "Leren en gedrag",
           "classification_thresholds": "Drempels voor dagtypen",
-          "ai_settings": "Claude AI-instellingen",
+          "ai_settings": "AI-instellingen",
           "github_settings": "GitHub-koppeling"
         }
       },
@@ -451,9 +451,11 @@
       },
       "ai_settings": {
         "title": "AI-instellingen",
-        "description": "Stel de Claude AI-koppeling in voor slimme analyses en rapportage.\nStatus API-sleutel: {key_status}",
+        "description": "Deze instellingen gelden voor alle zones.\n\nKies een AI-taak-entiteit van een AI-integratie in Home Assistant, of laat het leeg om de voorkeursentiteit van Home Assistant te gebruiken.\n\nIngebouwde Claude is verouderd en wordt verwijderd. Wil je Claude blijven gebruiken, voeg dan de Anthropic-integratie van Home Assistant toe, voeg er een AI-taak aan toe en kies die entiteit hier.\n\nDe AI-aanbieder heeft een contextvenster van minstens 16k tokens nodig en een uitvoerlimiet van minstens 8192 tokens, met redeneren op gemiddeld.\n\nAPI-sleutel (alleen ingebouwde Claude): {key_status}",
         "data": {
           "ai_enabled": "AI-functies inschakelen",
+          "ai_provider": "AI-aanbieder",
+          "ai_task_entity": "AI-taak-entiteit",
           "ai_api_key": "Claude API-sleutel",
           "ai_model": "AI-model",
           "ai_reasoning_effort": "Denkinspanning",
@@ -467,17 +469,23 @@
         },
         "data_description": {
           "ai_enabled": "Hoofdschakelaar voor alle AI-functies. Indien uitgeschakeld gebruikt Climate Advisor alleen zijn ingebouwde geprogrammeerde logica.",
-          "ai_api_key": "Je Anthropic API-sleutel. Vraag er een aan op console.anthropic.com. Laat leeg om de bestaande sleutel te behouden.",
-          "ai_model": "Welk Claude-model wordt gebruikt. Sonnet wordt aanbevolen voor een goede balans tussen kosten en kwaliteit.",
-          "ai_reasoning_effort": "Hoeveel denkinspanning Claude levert. Hoger = betere analyse, maar hogere kosten.",
-          "ai_max_tokens": "Maximale lengte van AI-antwoorden in tokens (256-16384).",
-          "ai_temperature": "Bepaalt de willekeur. 0 = deterministisch, 1,0 = meest creatief. Aanbevolen: 0,3.",
-          "ai_monthly_budget": "Maximaal geschatte maandelijkse uitgaven in Amerikaanse dollars. Stel in op 0 voor geen limiet.",
+          "ai_provider": "Home Assistant AI-taak gebruikt een AI-integratie die je in Home Assistant hebt ingesteld. Ingebouwde Claude is verouderd en wordt verwijderd.",
+          "ai_task_entity": "De AI-taak-entiteit die gebruikt wordt. Laat leeg om de AI-taak-voorkeursentiteit van Home Assistant te gebruiken. Niet gebruikt door ingebouwde Claude.",
+          "ai_api_key": "Alleen ingebouwde Claude. Je Anthropic API-sleutel. Vraag er een aan op console.anthropic.com. Laat leeg om de bestaande sleutel te behouden.",
+          "ai_model": "Alleen ingebouwde Claude. Welk Claude-model wordt gebruikt. Sonnet wordt aanbevolen voor een goede balans tussen kosten en kwaliteit.",
+          "ai_reasoning_effort": "Alleen ingebouwde Claude. Hoeveel denkinspanning Claude levert. Hoger = betere analyse, maar hogere kosten.",
+          "ai_max_tokens": "Alleen ingebouwde Claude. Maximale lengte van AI-antwoorden in tokens (256-16384).",
+          "ai_temperature": "Alleen ingebouwde Claude. Bepaalt de willekeur. 0 = deterministisch, 1,0 = meest creatief. Aanbevolen: 0,3.",
+          "ai_monthly_budget": "Alleen ingebouwde Claude. Maximaal geschatte maandelijkse uitgaven in Amerikaanse dollars. Stel in op 0 voor geen limiet.",
           "ai_auto_requests_per_day": "Maximaal aantal automatische AI-verzoeken per dag (wordt om middernacht gereset).",
           "ai_manual_requests_per_day": "Maximaal aantal door de gebruiker gestarte AI-verzoeken per dag (wordt om middernacht gereset).",
           "ai_investigator_enabled": "Schakel de onderzoeksagent in (vereist dat AI is ingeschakeld). Voert een diepgaande analyse over meerdere bronnen uit om tegenstrijdigheden en dataproblemen te vinden.",
           "ai_investigator_requests_per_day": "Maximaal aantal onderzoeksruns per dag. Elk onderzoek gebruikt uitgebreid denken. Wordt om middernacht gereset."
         }
+      },
+      "ai_limits_warning": {
+        "title": "Limieten van AI-aanbieder te laag",
+        "description": "Je AI-instellingen zijn opgeslagen. Sommige limieten van de AI-aanbieder zijn te laag, waardoor AI-rapporten afgekapt kunnen worden of mislukken:\n\n{checks}\n\nVerhoog ze in de opties van de AI-taak van die integratie. Climate Advisor heeft een contextvenster van minstens 16k tokens en een uitvoerlimiet van minstens 8192 tokens nodig. Verstuur om verder te gaan."
       },
       "github_settings": {
         "title": "GitHub-koppeling",
@@ -557,6 +565,14 @@
     "zone_resolution_ambiguous": {
       "title": "Zone niet eenduidig",
       "description": "Climate Advisor heeft meer dan één zone en een verzoek gaf niet aan voor welke zone het bedoeld was: {request}. Resultaat: {outcome}. Wat het ook verstuurde (een script, een automatisering, een opdrachtregelprogramma of een oud browsertabblad), het toont mogelijk de gegevens van een andere zone.\n\nVoeg om dit op te lossen `?zone=ENTRY_ID` toe aan dat verzoek, waarbij ENTRY_ID de `entry_id` van de zone is zoals vermeld door `GET /api/climate_advisor/status`. De Climate Advisor-dashboards doen dit al. Deze melding verdwijnt zodra Climate Advisor opnieuw start."
+    },
+    "builtin_claude_deprecated": {
+      "title": "Ingebouwde Claude is verouderd",
+      "description": "De AI van Climate Advisor gebruikt ingebouwde Claude. Die is verouderd en wordt in een toekomstige versie verwijderd. AI-rapporten werken daarna niet meer.\n\nZo stap je over:\n1. Voeg de Anthropic-integratie van Home Assistant (of een andere AI-integratie) toe en voeg er een AI-taak aan toe.\n2. Zet in de opties van de AI-taak de aanbevolen modelinstellingen uit en stel daarna het maximale aantal tokens in op 8192 of meer en de denkinspanning op gemiddeld.\n3. Open in de opties van Climate Advisor de AI-instellingen, kies Home Assistant AI-taak en selecteer die entiteit. Dit geldt voor alle zones.\n\nDeze melding verdwijnt zodra Climate Advisor start en geen enkele zone nog ingebouwde Claude gebruikt."
+    },
+    "ai_settings_unified": {
+      "title": "AI-instellingen gelden nu voor alle zones",
+      "description": "AI-instellingen worden nu door alle zones gedeeld. Je zones hadden verschillende AI-instellingen, dus Climate Advisor heeft de instellingen van {zone} behouden en voor elke zone gebruikt. De dagelijkse limieten voor AI-verzoeken tellen nu voor alle zones samen.\n\nOm ze te wijzigen, open je de AI-instellingen in de opties van een willekeurige zone."
     }
   },
   "common": {
@@ -573,7 +589,11 @@
     "schedule_summary_heat": "{name} — {days} {window} ({cost}, alleen verwarmen)",
     "schedule_summary_entity": "{name} — {days} {window} ({cost}, alleen als {entity} aan staat)",
     "schedule_summary_cool_entity": "{name} — {days} {window} ({cost}, alleen koelen, alleen als {entity} aan staat)",
-    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, alleen verwarmen, alleen als {entity} aan staat)"
+    "schedule_summary_heat_entity": "{name} — {days} {window} ({cost}, alleen verwarmen, alleen als {entity} aan staat)",
+    "ai_limit_output": "{integration}: de uitvoerlimiet ({setting}) is {value} tokens; er zijn minstens {required} nodig.",
+    "ai_limit_context": "{integration}: het contextvenster ({setting}) is {value} tokens; er zijn minstens {required} nodig.",
+    "ai_limit_combined": "{integration}: het contextvenster ({setting}) is {value} tokens. Het bevat zowel de vraag als het antwoord, dus er zijn minstens {required} nodig.",
+    "ai_limit_builtin_output": "Ingebouwde Claude: Maximale antwoordlengte is {value} tokens; er zijn minstens {required} nodig."
   },
   "entity": {
     "sensor": {
@@ -742,8 +762,13 @@
     "ai_reasoning_effort": {
       "options": {
         "low": "Laag",
-        "medium": "Gemiddeld",
-        "high": "Hoog"
+        "medium": "Gemiddeld"
+      }
+    },
+    "ai_provider": {
+      "options": {
+        "ha_ai_task": "Home Assistant AI-taak",
+        "builtin_claude": "Ingebouwde Claude (verouderd)"
       }
     },
     "suggestion_action": {

@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "请在 Home Assistant 中该集成的设置里将其提高。如果仍要运行，报告可能会被截断或失败。",
+  "ai.limits.cancel": "取消",
+  "ai.limits.cancelled": "调查已取消。",
+  "ai.limits.check": "{kind, select, output {输出上限} context {上下文窗口} other {输入输出共用的上下文窗口}}：{integration} 中的 {setting} 为 {value}；至少需要 {required}。",
+  "ai.limits.checking": "正在检查 AI 提供方的限制…",
+  "ai.limits.run_anyway": "仍然运行",
+  "ai.limits.title": "此 AI 提供方的限制对调查来说似乎太小",
+  "ai.limits.unreadable": "无法检查此提供方的限制；它需要 16k token 的上下文窗口和 8k token 的输出上限。",
+  "ai.notice.ai_context_limit": "此报告的数据超出了 AI 模型的上下文窗口。请使用上下文窗口至少为 {context} token 的模型（若输入和输出共用一个窗口，如 Ollama 的 num_ctx，则为 {combined}），或选择更短的时间范围。",
+  "ai.notice.ai_output_limit": "AI 提供方在报告完成前就达到了输出上限而停止。请在该集成的设置中将最大 token 数提高到至少 {required}。",
+  "ai.notice.ai_provider_error": "AI 提供方返回了错误，因此无法撰写报告。请在 Home Assistant 中检查该集成，然后重试。",
+  "ai.notice.ai_report_cut_short": "报告返回时被截断：缺少部分章节。{has_setting, select, yes {请将 {integration} 中的 {setting} 提高到至少 {required}，然后重新运行。} other {请在该集成的设置中将 AI 提供方的输出上限提高到至少 {required} token，然后重新运行。}}",
+  "ai.notice.ai_task_no_entity": "未选择 AI Task 实体，Home Assistant 也没有首选实体。请在 Climate Advisor 的 AI 设置中选择一个 AI Task 实体，或在“设置 > 系统 > AI”中设置默认实体。",
+  "ai.status_gathering": "正在收集系统数据…",
+  "ai.status_provider": "正在等待 AI 提供方撰写报告…",
+  "ai.status_sending": "正在将数据发送给 AI 提供方…"
+}

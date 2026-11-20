@@ -459,19 +459,79 @@
     flush();
     return { sections: sections, order: order, active: key };
   }
-  function renderProgress(content, acc) {
+  function renderProgress(content, acc, prefix) {
     var p = parseSections(acc);
-    if (!p.order.length) { content.innerHTML = '<div class="empty">' + esc(T('rep.writing')) + '</div>'; return; }
-    content.innerHTML = p.order.map(function (k) {
+    prefix = prefix || '';
+    if (!p.order.length) { content.innerHTML = prefix + '<div class="empty">' + esc(T('rep.writing')) + '</div>'; return; }
+    content.innerHTML = prefix + p.order.map(function (k) {
       var def = SECTIONS.filter(function (d) { return d.key === k; })[0]; if (!def) return '';
       return '<details open><summary><strong>' + esc(T('section.' + def.key)) + '</strong>' + (k === p.active ? ' <span class="sub">' + esc(T('rep.writing_short')) + '</span>' : '') + '</summary><div class="note">' + ND.md(p.sections[k] || '') + '</div></details>';
     }).join('');
   }
+  // ---------- AI provider limits and notices (Issue #1336) ----------
+  // Before a run, GET ai_limits (zone-scoped like ai_status). A readable limit that is too small shows a warning with
+  // Run anyway / Cancel; an unreadable one shows a one-line note and the run goes ahead; a failed request goes ahead
+  // silently. The check only ever warns. Error codes and the cut-short flag from the stream are shown as notices.
+  function A(key, params) { return CAI18N.t('ai.' + key, params); }
+  var AI_REQ = { output: 8192, context: 16384, combined: 24576 }; // const.AI_REQUIRED_* (docs/ai-integration.md)
+  var lastLimits = null;
+  function limitsIntegration(l) { return (l && l.integration) || (l && l.provider === 'builtin_claude' ? 'climate_advisor' : '\u2014'); }
+  function failedChecks(l) { return (l && Array.isArray(l.checks) ? l.checks : []).filter(function (c) { return c && c.ok === false; }); }
+  function checkLine(l, c) {
+    return A('limits.check', { kind: c.kind === 'output' || c.kind === 'context' ? c.kind : 'combined', setting: iso(String(c.setting || '')),
+      integration: iso(limitsIntegration(l)), value: Number(c.value) || 0, required: Number(c.required) || 0 });
+  }
+  // status lines: the catalog message for `key` (with `params`), else the backend's `text`
+  function aiStatusText(ev) {
+    return ev && ev.key && CAI18N.has(ev.key) ? CAI18N.tw({ key: ev.key, params: ev.params || {} }) : String((ev && ev.text) || '');
+  }
+  // the occupant notice for an AI_ERROR_* / AI_CUT_SHORT code, or null for no / an unknown code
+  function aiNotice(code) {
+    if (!code) return null;
+    if (code === 'ai_output_limit') return A('notice.ai_output_limit', { required: AI_REQ.output });
+    if (code === 'ai_context_limit') return A('notice.ai_context_limit', { context: AI_REQ.context, combined: AI_REQ.combined });
+    if (code === 'ai_report_cut_short') {
+      var c = failedChecks(lastLimits)[0];
+      return c ? A('notice.ai_report_cut_short', { has_setting: 'yes', setting: iso(String(c.setting || '')), integration: iso(limitsIntegration(lastLimits)), required: Number(c.required) || AI_REQ.output })
+        : A('notice.ai_report_cut_short', { has_setting: 'no', setting: '', integration: '', required: AI_REQ.output });
+    }
+    return CAI18N.has('ai.notice.' + code) ? A('notice.' + code) : null;
+  }
+  function cutShortCode(res) { return res && res.cut_short ? (res.cut_short_code || 'ai_report_cut_short') : null; }
+  // Resolves 'run' or 'cancel'. A note (unreadable limits) is returned for the caller to show while the run goes ahead.
+  async function preRunLimits(content) {
+    var l;
+    lastLimits = null;
+    try { l = await ND.api('ai_limits'); } catch (e) { return { go: 'run', note: '' }; } // the check never blocks
+    if (!l || typeof l !== 'object') return { go: 'run', note: '' };
+    lastLimits = l;
+    if (l.readable === false) return { go: 'run', note: A('limits.unreadable') };
+    var failed = l.ok === false ? failedChecks(l) : [];
+    if (!failed.length) return { go: 'run', note: '' };
+    return new Promise(function (resolve) {
+      var el = document.createElement('div');
+      el.className = 'banner warn'; el.setAttribute('role', 'alert');
+      el.innerHTML = '<div class="b-text"><strong>' + esc(A('limits.title')) + '</strong><ul>' +
+        failed.map(function (c) { return '<li>' + esc(checkLine(l, c)) + '</li>'; }).join('') + '</ul><div>' + esc(A('limits.advice')) + '</div></div>';
+      [['cancel', 'btn small', 'limits.cancel'], ['run', 'btn small primary', 'limits.run_anyway']].forEach(function (b) {
+        var c = document.createElement('button'); c.type = 'button'; c.className = b[1]; c.textContent = A(b[2]);
+        c.setAttribute('data-ai-limits', b[0]);
+        c.addEventListener('click', function () { el.remove(); resolve({ go: b[0], note: '' }); });
+        el.appendChild(c);
+      });
+      content.innerHTML = ''; content.appendChild(el);
+      var run = el.querySelector('[data-ai-limits="run"]'); if (run && run.focus) run.focus();
+    });
+  }
   async function runInvestigation() {
     var btn = $('run-report-btn'), loading = $('report-loading'), status = $('report-status'), content = $('report-content');
     var focus = $('investigation-focus').value.trim(), hours = parseInt($('report-time-window').value, 10) || 24, deep = $('investigation-deep').checked;
-    btn.disabled = true; btn.textContent = T('rep.running'); loading.hidden = false; loading.textContent = T('rep.connecting'); status.textContent = ''; content.innerHTML = ''; $('report-actions').hidden = true;
-    var acc = '';
+    btn.disabled = true; btn.textContent = T('rep.running'); loading.hidden = false; loading.textContent = A('limits.checking'); status.textContent = ''; content.innerHTML = ''; $('report-actions').hidden = true;
+    var pre = await preRunLimits(content);
+    if (pre.go !== 'run') { status.textContent = A('limits.cancelled'); reset('Investigate'); return; }
+    loading.hidden = false; loading.textContent = T('rep.connecting');
+    var acc = '', noteHtml = pre.note ? '<div class="note">' + esc(pre.note) + '</div>' : '';
+    if (noteHtml) content.innerHTML = noteHtml;
     try {
       var body = { hours: hours }; if (focus) body.focus = focus; if (deep) body.deep = true;
       var resp = await ND.stream('ai_investigate', body), reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
@@ -483,10 +543,10 @@
           if (evs[i].indexOf('data: ') !== 0) continue;
           var ev; try { ev = JSON.parse(evs[i].slice(6)); } catch (e) { continue; }
           if (ev.type === 'thinking') loading.textContent = T('rep.thinking', { text: ev.text.replace(/[\n]+/g, ' ').trim().slice(-180) });
-          else if (ev.type === 'status') loading.textContent = ev.text;
-          else if (ev.type === 'chunk') { var first = !acc.length; acc += ev.text; renderProgress(content, acc); if (first) loading.hidden = true; status.textContent = T('rep.receiving', { n: acc.length }); }
+          else if (ev.type === 'status') loading.textContent = aiStatusText(ev);
+          else if (ev.type === 'chunk') { var first = !acc.length; acc += ev.text; renderProgress(content, acc, noteHtml); if (first) loading.hidden = true; status.textContent = T('rep.receiving', { n: acc.length }); }
           else if (ev.type === 'done') {
-            var result = { success: ev.success !== false, source: ev.source || 'ai', data: ev.data || {}, error: ev.error || null, raw_response: ev.raw_response || acc, input_context: ev.input_context || '', truncated: !!ev.truncated, truncated_empty: !!ev.truncated_empty };
+            var result = { success: ev.success !== false, source: ev.source || 'ai', data: ev.data || {}, error: ev.error || null, raw_response: ev.raw_response || acc, input_context: ev.input_context || '', truncated: !!ev.truncated, truncated_empty: !!ev.truncated_empty, cut_short: !!ev.cut_short, cut_short_code: ev.cut_short_code || null, error_code: ev.error_code || null };
             currentReport = { reportType: 'investigation', timestamp: new Date().toISOString(), result: result, focus: focus };
             renderReport(currentReport);
             status.textContent = result.truncated_empty ? T('rep.truncated_empty_status')
@@ -496,22 +556,32 @@
           } else if (ev.type === 'error') throw new Error(ev.message || T('rep.failed'), { cause: ev });
         }
       }
-      if (!currentReport && acc) { content.innerHTML = '<pre style="white-space:pre-wrap;font-size:12px">' + esc(acc) + '</pre>'; status.textContent = T('rep.stream_ended'); }
+      if (!currentReport && acc) { content.innerHTML = noteHtml + '<pre style="white-space:pre-wrap;font-size:12px">' + esc(acc) + '</pre>'; status.textContent = T('rep.stream_ended'); }
     } catch (e) {
       // "AI / investigator not enabled" is the endpoint's HTTP 403 (errors.ai_not_enabled / errors.investigator_not_enabled in
       // `message_msg`); a failure inside the stream is an SSE error event (plain text, no code). The 403 body is shown in the
       // viewer's language through its `message_msg`.
-      var notEnabled = !!e && e.status === 403;
+      // Issue #1336: an SSE error event (or a JSON error body) with an `error_code` also gets the occupant notice.
+      var notEnabled = !!e && e.status === 403, code = (e && e.cause && e.cause.error_code) || (e && e.body && e.body.error_code) || null;
+      var notice = aiNotice(code);
       status.textContent = T('rep.error_not_enabled', { error: (e && e.body && ND.text(e.body, 'message')) || e.message, hint: notEnabled ? 'yes' : 'no' });
-      content.innerHTML = '';
+      content.innerHTML = notice ? '<div class="banner warn" role="alert"><div class="b-text">' + esc(notice) + '</div></div>' : '';
     } finally { reset('Investigate'); }
   }
   function renderReport(entry) {
     var content = $('report-content'), res = entry.result || {}, ts = entry.timestamp ? CAI18N.fmt.dateTime(new Date(entry.timestamp)) : '';
-    if (!res.success) { content.innerHTML = '<div class="err">' + esc(T('rep.failed_report', { source: iso(res.source || 'error'), error: res.error || T('rep.unknown_error') })) + '</div>'; $('report-actions').hidden = true; return; }
+    if (!res.success) {
+      var fn = aiNotice(res.error_code);
+      content.innerHTML = (fn ? '<div class="banner warn" role="alert"><div class="b-text">' + esc(fn) + '</div></div>' : '') + '<div class="err">' + esc(T('rep.failed_report', { source: iso(res.source || 'error'), error: res.error || T('rep.unknown_error') })) + '</div>';
+      $('report-actions').hidden = true; return;
+    }
     var data = res.data || {}, h = (ts ? '<div class="sub">' + esc(ts) + (res.is_refined ? ' <span class="badge">' + esc(T('rep.refined')) + '</span>' : '') + '</div>' : '');
     if (res.truncated_empty) h += '<div class="banner warn">' + esc(T('rep.truncated_empty')) + '</div>';
     else if (res.truncated) h += '<div class="banner warn">' + esc(T('rep.truncated')) + '</div>';
+    // Issue #1336: a reply missing required sections (or stopped at a provider limit) names the setting to raise
+    var csn = aiNotice(cutShortCode(res)), ecn = res.error_code && res.error_code !== cutShortCode(res) ? aiNotice(res.error_code) : null;
+    if (csn) h += '<div class="banner warn">' + esc(csn) + '</div>';
+    if (ecn) h += '<div class="banner warn">' + esc(ecn) + '</div>';
     h += '<div class="small">' + esc(T(res.source === 'fallback' ? 'rep.fallback' : 'rep.ai_generated')) + '</div>';
     var any = false;
     SECTIONS.forEach(function (d) { var tx = data[d.key] || ''; if (!tx) return; any = true; h += '<details open><summary><strong>' + esc(T('section.' + d.key)) + '</strong></summary><div class="note">' + ND.md(tx) + '</div></details>'; });

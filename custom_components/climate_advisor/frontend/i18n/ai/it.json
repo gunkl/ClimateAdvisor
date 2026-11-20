@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Aumentalo nelle impostazioni di quell'integrazione in Home Assistant. Se esegui comunque, il rapporto potrebbe risultare incompleto o fallire.",
+  "ai.limits.cancel": "Annulla",
+  "ai.limits.cancelled": "Indagine annullata.",
+  "ai.limits.check": "{kind, select, output {Limite di output} context {Finestra di contesto} other {Finestra di contesto combinata (input e output)}}: {setting} in {integration} è {value}; serve almeno {required}.",
+  "ai.limits.checking": "Verifica dei limiti del fornitore di IA…",
+  "ai.limits.run_anyway": "Esegui comunque",
+  "ai.limits.title": "I limiti di questo fornitore di IA sembrano troppo bassi per un'indagine",
+  "ai.limits.unreadable": "Impossibile verificare i limiti di questo fornitore; servono una finestra di contesto di 16k token e un limite di output di 8k token.",
+  "ai.notice.ai_context_limit": "I dati di questo rapporto non sono entrati nella finestra di contesto del modello di IA. Usa un modello con una finestra di contesto di almeno {context} token ({combined} se input e output condividono un'unica finestra, come num_ctx di Ollama), oppure scegli un periodo più breve.",
+  "ai.notice.ai_output_limit": "Il fornitore di IA si è fermato al suo limite di output prima di finire il rapporto. Aumenta il numero massimo di token ad almeno {required} nelle impostazioni di quell'integrazione.",
+  "ai.notice.ai_provider_error": "Il fornitore di IA ha restituito un errore, quindi il rapporto non è stato scritto. Controlla quell'integrazione in Home Assistant e riprova.",
+  "ai.notice.ai_report_cut_short": "Il rapporto è tornato incompleto: mancano alcune sezioni. {has_setting, select, yes {Aumenta {setting} in {integration} ad almeno {required}, poi eseguilo di nuovo.} other {Aumenta il limite di output del fornitore di IA ad almeno {required} token nelle impostazioni di quell'integrazione, poi eseguilo di nuovo.}}",
+  "ai.notice.ai_task_no_entity": "Nessuna entità AI Task è stata scelta e Home Assistant non ne ha una preferita. Scegli un'entità AI Task nelle impostazioni IA di Climate Advisor, oppure impostane una predefinita in Impostazioni > Sistema > IA.",
+  "ai.status_gathering": "Raccolta dei dati di sistema…",
+  "ai.status_provider": "In attesa che il fornitore di IA scriva il rapporto…",
+  "ai.status_sending": "Invio dei dati al fornitore di IA…"
+}

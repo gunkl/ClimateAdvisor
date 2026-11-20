@@ -13,7 +13,7 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 | How do you diagnose `k_active_cool=None` on a home where AC has been running all season? | Run `--rejections --type hvac_cool` to check n values and reason codes. `n=0` with elapsed > 0 on coordinator < v0.3.50 indicates the key-shadow bug (fixed in v0.3.50). `new_session_started` repeatedly means short-cycling. Run `--pending` during a live AC cycle to confirm samples are accumulating. | [§"k_active_cool is None despite AC running all summer"](09-DEBUGGING-GUIDE.md#k_active_cool-is-none-despite-ac-running-all-summer-hvac-observation-debugging) |
 | What does the Temperature Forecast chart show and how do you use it for diagnosis? | Four activity bars (HVAC, Fan, Windows Recommended, Windows Open) plus indoor/outdoor temperature lines, predicted curves, and target band shading. Drag-to-zoom any region; 1-year data in chart_log survives HA restarts. Use Prev/Next buttons to scroll the data window to any past point in time (Issue #160). | [§2. Temperature Forecast Chart (Visual History)](09-DEBUGGING-GUIDE.md#2-temperature-forecast-chart-visual-history) |
 | Why does the Predicted Indoor line track Actual Indoor exactly (delta ≈ 0)? | Check log source tag: `(archive)` = working correctly; `(ode-warmup)` = HA restart < 4h ago (auto-resolves); `(none)` = ODE cache empty (check thermal model confidence). Five root causes documented. | [§"Predicted Indoor tracks Actual Indoor"](09-DEBUGGING-GUIDE.md#predicted-indoor-tracks-actual-indoor-delta--0) |
-| How do you diagnose AI feature failures? | Check `sensor.climate_advisor_ai_status` first: active/inactive/error/disabled/circuit_open. Circuit breaker trips after 5 consecutive failures, auto-resets after 5 minutes. `monthly_cost_estimate` attribute tracks spending. | [§Debugging AI Features](09-DEBUGGING-GUIDE.md#debugging-ai-features) |
+| How do you diagnose AI feature failures? | Check `sensor.climate_advisor_ai_status` first: active/inactive/error/disabled/circuit_open. Circuit breaker trips after 5 consecutive failures, auto-resets after 5 minutes. The status is shared by every zone (Issue #1336). Then check which provider runs it (`ai_provider`: `ha_ai_task` or the deprecated `builtin_claude`), `GET ai_limits` for a too-small provider limit, and the run's `error_code`. `monthly_cost_estimate` tracks spending for built-in Claude only (0 on AI Task). | [§Debugging AI Features](09-DEBUGGING-GUIDE.md#debugging-ai-features) |
 | How do you decide if a finding in an AI investigator report is a real bug or noise? | Apply the 5-category taxonomy: ACTIONABLE / TIME-DEPENDENT / CONTEXTUAL / NOISE / RESOLVED. Count discrepancies ≤ 1, high abandonment from operational interruptions, and pending-observation speculation are all NOISE. | [§Interpreting AI Investigator Reports — Noise Taxonomy](09-DEBUGGING-GUIDE.md#interpreting-ai-investigator-reports--noise-taxonomy) |
 | How do you diagnose a user-reported "CA keeps overriding my thermostat changes"? | Check the Override Bypass Inventory: 9 known bypasses covering setpoint-only changes (#197), confirm state lost on restart (RC-1 #198), grace timer not restored (RC-2 #199), PATH B short overrides (#200), second override ignored (#201), 30s guard too wide (#202), bedtime/wakeup unconditional clear (BW #204 — fixed), away setback mode mismatch (OA #222 — fixed), and away setback detected as override (OB #221 — fixed). | [§Override Bypass Inventory](09-DEBUGGING-GUIDE.md#override-bypass-inventory) |
 | Forecast Low/High or day trend looks absurd (e.g. outdoor -8 °C on a mild day) — what do I check? | Grep logs for `Weather unit mismatch`, `Temperature unit mismatch with Home Assistant`, `Temperature sensor unit mismatch`, `Temperature unit changed since last run`, and `Observed outdoor extreme overrides forecast`; check the diagnostics `chart_data_summary` outdoor_min/max and the `unit_changed` event. | [§"Forecast Low/High looks wrong"](09-DEBUGGING-GUIDE.md#forecast-lowhigh-looks-wrong-unit-mismatch--unit-change-issue-1015) |
@@ -54,7 +54,7 @@ Climate Advisor exposes several sensor entities in Home Assistant. These persist
 | Daily Briefing | `sensor.climate_advisor_daily_briefing` | TLDR summary, truncated (250 chars) only if it exceeds HA's 255-char limit (Issue #555) | `full_briefing`, `tldr` (untruncated) | Today's plan |
 | Occupancy Mode | `sensor.climate_advisor_occupancy_mode` | home / away / guest / vacation | — | Current occupancy |
 | Comfort Score | `sensor.climate_advisor_comfort_score` | 0-100% | `pending_suggestions` | Compliance tracking |
-| AI Status | `sensor.climate_advisor_ai_status` | active / inactive / error / disabled / circuit_open | `last_request_time`, `error_count`, `total_requests`, `model_in_use`, `circuit_breaker`, `monthly_cost_estimate`, `auto_requests_today`, `manual_requests_today` | AI integration health and usage |
+| AI Status | `sensor.climate_advisor_ai_status` | active / inactive / error / disabled / circuit_open | `last_request_time`, `error_count`, `total_requests`, `model_in_use`, `circuit_breaker`, `monthly_cost_estimate`, `auto_requests_today`, `manual_requests_today` | AI integration health and usage; the same in every zone (one shared client, Issue #1336); cost is 0 on AI Task |
 
 **How to access:**
 - HA UI: Developer Tools → States → filter "climate_advisor"
@@ -271,6 +271,25 @@ Source of truth: `custom_components/climate_advisor/control_quality.py` (module 
 - **`disabled`** — AI features are turned off in configuration
 - **`circuit_open`** — circuit breaker has tripped after 5 consecutive failures; will auto-reset after 5 minutes
 
+Since Issue #1336 one AI client serves the whole install, so every zone's AI status sensor and `ai_status?zone=` show the same values. That is expected.
+
+### Which AI provider is running, and why a run failed (Issue #1336)
+
+**What the occupant sees:** the non-AI fallback report with a notice, or a report marked "cut short". The notice's code says why.
+
+| Clue | Meaning | Fix on the occupant's side |
+|---|---|---|
+| `ai_provider` in the zone's entry data (diagnostics) | `ha_ai_task` = HA's AI Task, on `ai_task_entity` (empty = HA's preferred AI Task entity); `builtin_claude` = deprecated built-in client (the `builtin_claude_deprecated` Repairs issue is open) | Move to AI Task: [Built-in Claude deprecation](builtin-claude-deprecated.md) |
+| `GET /api/climate_advisor/ai_limits?zone=<id>` `ok: false` | A readable limit is too small: `checks[]` names the setting, its value and the requirement | Raise it in the provider's integration options (Anthropic/OpenAI `max_tokens` ≥ 8192; Ollama `num_ctx` ≥ 24576, suggest 32768) |
+| `readable: false` | Climate Advisor can't read this provider's limits (OpenRouter, Nabu Casa Cloud, custom) | Check by hand: 16k-token context, 8192-token output, reasoning medium |
+| error `error_code: ai_output_limit` | The provider stopped at its output limit and raised an error, so the whole report was lost | Raise max tokens; on Anthropic untick *Recommended model settings* first (that mode runs at 3000) |
+| `ai_context_limit` | The request did not fit the model's context window | A model or setting with at least a 16k-token window |
+| `ai_task_no_entity` | No AI Task entity chosen and no preferred one set | Choose one in AI settings, or set a default under Settings > System > AI |
+| `ai_provider_error` | Any other provider failure; the message is in the log and the error event | Check the provider integration's own log lines |
+| done `cut_short: true` | The reply came back with required sections empty | Usually the output limit; raise it |
+
+Token counts and cost are not available on AI Task (the provider's account usage page is the only record). The built-in client still logs `input_tokens` / `output_tokens` at DEBUG for `custom_components.climate_advisor.claude_api`. Detail: [AI Integration Brief](ai-integration.md#limit-checks-warn-never-block).
+
 ### AI Investigative Analysis
 
 The dashboard's "AI Investigative Analysis" report (`/api/climate_advisor/ai_investigate`, or the deterministic-analysis-only equivalent) triggers an on-demand AI analysis of recent automation behavior. This is useful for diagnosing unexpected HVAC decisions — the report includes a timeline, key decisions, anomalies, and diagnostics drawn from current system state. (The separate AI Activity Report skill/service was retired in Issue #578 — superseded by this investigator report and the deterministic, non-AI Activity Record.)
@@ -288,7 +307,7 @@ Investigation reports are stored per zone at `climate_advisor_investigation_repo
 
 ### Circuit Breaker
 
-The circuit breaker trips after **5 consecutive failures** (`AI_CIRCUIT_BREAKER_THRESHOLD = 5`) and enters a cooldown period of **5 minutes** (`AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300`) before attempting requests again. While the circuit is open, all AI requests return immediately without calling the Claude API. The `circuit_breaker` attribute of the AI status sensor shows the current state (`closed` = normal, `open` = tripped).
+The circuit breaker trips after **5 consecutive failures** (`AI_CIRCUIT_BREAKER_THRESHOLD = 5`) and enters a cooldown period of **5 minutes** (`AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300`) before attempting requests again. While the circuit is open, all AI requests return immediately without calling the AI provider (AI Task or built-in Claude). The breaker is install-wide since Issue #1336. The `circuit_breaker` attribute of the AI status sensor shows the current state (`closed` = normal, `open` = tripped).
 
 ---
 

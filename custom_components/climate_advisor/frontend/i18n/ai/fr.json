@@ -1,1 +1,18 @@
-{}
+{
+  "ai.limits.advice": "Augmentez-la dans les paramètres de cette intégration dans Home Assistant. Si vous lancez quand même, le rapport peut être incomplet ou échouer.",
+  "ai.limits.cancel": "Annuler",
+  "ai.limits.cancelled": "Analyse annulée.",
+  "ai.limits.check": "{kind, select, output {Limite de sortie} context {Fenêtre de contexte} other {Fenêtre de contexte combinée (entrée et sortie)}} : {setting} dans {integration} vaut {value} ; il faut au moins {required}.",
+  "ai.limits.checking": "Vérification des limites du fournisseur d’IA…",
+  "ai.limits.run_anyway": "Lancer quand même",
+  "ai.limits.title": "Les limites de ce fournisseur d’IA semblent trop basses pour une analyse",
+  "ai.limits.unreadable": "Impossible de vérifier les limites de ce fournisseur ; il faut une fenêtre de contexte de 16k jetons et une limite de sortie de 8k jetons.",
+  "ai.notice.ai_context_limit": "Les données de ce rapport ne tiennent pas dans la fenêtre de contexte du modèle d’IA. Utilisez un modèle dont la fenêtre de contexte compte au moins {context} jetons ({combined} si l’entrée et la sortie partagent une seule fenêtre, comme num_ctx d’Ollama), ou choisissez une période plus courte.",
+  "ai.notice.ai_output_limit": "Le fournisseur d’IA s’est arrêté à sa limite de sortie avant la fin du rapport. Augmentez son nombre maximal de jetons à au moins {required} dans les paramètres de cette intégration.",
+  "ai.notice.ai_provider_error": "Le fournisseur d’IA a renvoyé une erreur, le rapport n’a donc pas pu être rédigé. Vérifiez cette intégration dans Home Assistant, puis réessayez.",
+  "ai.notice.ai_report_cut_short": "Le rapport est revenu incomplet : certaines sections manquent. {has_setting, select, yes {Augmentez {setting} dans {integration} à au moins {required}, puis relancez-le.} other {Augmentez la limite de sortie du fournisseur d’IA à au moins {required} jetons dans les paramètres de cette intégration, puis relancez-le.}}",
+  "ai.notice.ai_task_no_entity": "Aucune entité AI Task n’est choisie et Home Assistant n’en a pas de préférée. Choisissez une entité AI Task dans les paramètres IA de Climate Advisor, ou définissez-en une par défaut dans Paramètres > Système > IA.",
+  "ai.status_gathering": "Collecte des données du système…",
+  "ai.status_provider": "En attente du rapport du fournisseur d’IA…",
+  "ai.status_sending": "Envoi des données au fournisseur d’IA…"
+}

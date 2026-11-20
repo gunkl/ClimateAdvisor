@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.51] — 2026-11-20
+
+### Fixed
+- Fix #1624: if you turn the whole-house fan on and then turn the heat or AC up or down, Climate Advisor now treats your thermostat change as the newer one. It stops the fan and keeps your setting. Before, it could switch your heat or AC Off and keep the fan running, for example when you switched automation back on. The fan and the heating/cooling still never run together, and your most recent change still wins.
+
 ## [0.9.50] — 2026-11-20
 
 ### Changed (CI only; nothing changes in your house)

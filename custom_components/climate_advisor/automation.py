@@ -4801,6 +4801,11 @@ class AutomationEngine:
                 # RUNNING mode; an Off is never matched against it (#1159).
                 # ``_record_commanded_mode`` instead judges a "real change" against the LIVE mode, so a CA
                 # write that reverses this user change is recorded.
+        elif detected_mode in WHF_ACTIVE_HVAC_MODES:
+            # Issue #1624 rule 2: a setpoint change while the thermostat already heats or cools is the occupant's
+            # newest HVAC action too (the mirror of a WHF press re-stamping ``_whf_press_time`` while the fan runs).
+            # Without it a fan pressed seconds EARLIER counted as newer and CA switched this change Off.
+            self._occupant_hvac_on_at = dt_util.now()
         confirm_seconds = int(self.config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS))
 
         # Issue #714: a manual override to an active HVAC mode structurally conflicts

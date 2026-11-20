@@ -1,6 +1,7 @@
 {
   "domain": "climate_advisor",
   "name": "Climate Advisor",
+  "after_dependencies": ["ai_task"],
   "codeowners": ["@gunkl"],
   "config_flow": true,
   "dependencies": ["weather", "climate", "http"],

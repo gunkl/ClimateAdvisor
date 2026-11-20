@@ -31,7 +31,10 @@ if TYPE_CHECKING:
     pass
 
 from . import i18n, log_capture, zone_registry
+from .ai_settings_sync import provider_of
 from .const import (
+    AI_PROVIDER_BUILTIN_CLAUDE,
+    AI_SETTINGS_BACKUP_KEY,
     ATTR_AUTOMATION_STATUS,
     ATTR_CONTACT_STATUS,
     ATTR_DAY_TYPE,
@@ -1397,6 +1400,8 @@ async def build_config_context(hass: Any, coordinator: Any, **kwargs: Any) -> st
     try:
         cfg: dict[str, Any] = dict(coordinator.config or {})
         cfg.pop("ai_api_key", None)
+        cfg.pop(AI_SETTINGS_BACKUP_KEY, None)  # Issue #1336: the backup can hold a key too
+        _provider = provider_of(cfg)
 
         # Issue #1048: config temperatures are internal degF; show them in the user's unit.
         _cfg_unit = cfg.get("temp_unit", "fahrenheit")
@@ -1426,7 +1431,13 @@ async def build_config_context(hass: Any, coordinator: Any, **kwargs: Any) -> st
             f"  sleep_time:      {cfg.get('sleep_time', 'unknown')}",
             f"  briefing_time:   {cfg.get('briefing_time', 'unknown')}",
             f"  ai_enabled:      {cfg.get('ai_enabled', 'unknown')}",
-            f"  ai_model:        {cfg.get('ai_model', 'unknown')}",
+            # Issue #1336: the provider, and the model only where Climate Advisor chooses it (built-in Claude)
+            f"  ai_provider:     {_provider}",
+            *(
+                [f"  ai_model:        {cfg.get('ai_model', 'unknown')}"]
+                if _provider == AI_PROVIDER_BUILTIN_CLAUDE
+                else [f"  ai_task_entity:  {cfg.get('ai_task_entity') or 'preferred'}"]
+            ),
             f"  learning_enabled:{cfg.get('learning_enabled', 'unknown')}",
             "",
         ]

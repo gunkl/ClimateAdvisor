@@ -17,6 +17,23 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Issue #1336: every streaming status event carries a catalog key (frontend/i18n/ai/<lang>.json) beside its
+# English fallback text, so the dashboard renders it in the viewer's language.
+STATUS_KEY_GATHERING = "ai.status_gathering"
+STATUS_KEY_SENDING = "ai.status_sending"
+STATUS_KEY_PROVIDER = "ai.status_provider"
+STATUS_TEXT_GATHERING = "Gathering system data…"
+STATUS_TEXT_SENDING = "Sending the data to the AI provider…"
+STATUS_TEXT_PROVIDER = "Waiting for the AI provider to write the report…"
+
+
+def status_event(text: str, key: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A ``{"type": "status", "text", "key"[, "params"]}`` SSE event (Issue #1336)."""
+    event: dict[str, Any] = {"type": "status", "text": text, "key": key}
+    if params:
+        event["params"] = dict(params)
+    return event
+
 
 @dataclass
 class AISkillDefinition:
@@ -129,6 +146,7 @@ class AISkillRegistry:
             reasoning_effort=override_reasoning,
         )
 
+        error_code = getattr(response, "error_code", None)
         if response.success:
             await _maybe_persist_model_fallback(coordinator, override_model, cfg, response)
             try:
@@ -142,6 +160,7 @@ class AISkillRegistry:
                     "raw_response": response.content,
                     "truncated": response.truncated,
                     "truncated_empty": response.truncated_empty,
+                    "error_code": None,
                 }
             except Exception:
                 _LOGGER.exception("Failed to parse AI response for skill '%s'", name)
@@ -154,12 +173,17 @@ class AISkillRegistry:
             response.error or "parse error",
         )
         if skill.fallback:
-            return _run_fallback(skill, coordinator, context=context, **kwargs)
+            result = _run_fallback(skill, coordinator, context=context, **kwargs)
+            # Issue #1336: why the AI part failed (the occupant is told, e.g. "the provider's output limit")
+            result["error_code"] = error_code
+            return result
 
-        return _error_result(
+        result = _error_result(
             response.error or "AI request failed and no fallback available",
             input_context=context,
         )
+        result["error_code"] = error_code
+        return result
 
     async def async_execute_streaming(
         self,
@@ -173,7 +197,8 @@ class AISkillRegistry:
 
         Yields dicts with ``type`` key:
         - ``{"type": "chunk", "text": str}`` — incremental text from the model
-        - ``{"type": "error", "message": str}`` — terminal failure
+        - ``{"type": "status", "text": str, "key": str[, "params": dict]}`` — progress (Issue #1336: ``key``)
+        - ``{"type": "error", "message": str, "error_code": str | None}`` — terminal failure
         - ``{"type": "done", ...}`` — final structured result (same shape as async_execute)
 
         Args:
@@ -187,38 +212,40 @@ class AISkillRegistry:
         skill = self._skills.get(name)
         if skill is None:
             _LOGGER.error("AI skill '%s' not found in registry", name)
-            yield {"type": "error", "message": f"Unknown skill: {name}"}
+            yield {"type": "error", "message": f"Unknown skill: {name}", "error_code": None}
             return
 
         # Run context builder concurrently, streaming status events as providers complete.
-        status_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        status_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
         async def _push_status(msg: str) -> None:
-            await status_queue.put(msg)
+            # Per-context-section progress ("Loading <section>…"): English detail text, gathering key.
+            await status_queue.put(status_event(msg, STATUS_KEY_GATHERING))
 
         context_task = asyncio.create_task(
             skill.context_builder(hass, coordinator, status_callback=_push_status, **kwargs)
         )
-        yield {"type": "status", "text": "Gathering system data…"}
+        yield status_event(STATUS_TEXT_GATHERING, STATUS_KEY_GATHERING)
         while not context_task.done():
             try:
-                msg = await asyncio.wait_for(status_queue.get(), timeout=1.0)
-                yield {"type": "status", "text": msg}
+                status = await asyncio.wait_for(status_queue.get(), timeout=1.0)
             except TimeoutError:
-                pass
+                continue
+            yield status
 
-        # Drain any remaining status messages before the Claude call.
+        # Drain any remaining status messages before the AI call.
         while not status_queue.empty():
-            yield {"type": "status", "text": status_queue.get_nowait()}
+            yield status_queue.get_nowait()
 
         try:
             context = context_task.result()
         except Exception:
             _LOGGER.exception("Failed to build context for skill '%s'", name)
-            yield {"type": "error", "message": "Context builder failed"}
+            yield {"type": "error", "message": "Context builder failed", "error_code": None}
             return
 
-        yield {"type": "status", "text": "Sending context to Claude AI…"}
+        yield status_event(STATUS_TEXT_SENDING, STATUS_KEY_SENDING)
+        yield status_event(STATUS_TEXT_PROVIDER, STATUS_KEY_PROVIDER)
 
         cfg: dict[str, Any] = getattr(coordinator, "config", {}) or {}
         override_model = cfg.get(skill.config_key_model) if skill.config_key_model else None
@@ -249,8 +276,9 @@ class AISkillRegistry:
                     stop_reason = event.get("stop_reason")
                     truncated_empty = event.get("truncated_empty", False)
         except Exception as exc:
-            _LOGGER.error("Streaming request failed for skill '%s': %s", name, exc)
-            yield {"type": "error", "message": str(exc)}
+            error_code = getattr(exc, "error_code", None)
+            _LOGGER.error("Streaming request failed for skill '%s': error_code=%s %s", name, error_code, exc)
+            yield {"type": "error", "message": str(exc), "error_code": error_code}
             return
 
         try:
@@ -269,6 +297,7 @@ class AISkillRegistry:
             "raw_response": full_text,
             "truncated": stop_reason == "max_tokens",
             "truncated_empty": truncated_empty,
+            "error_code": None,
         }
 
 

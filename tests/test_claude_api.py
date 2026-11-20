@@ -955,7 +955,9 @@ class TestBuildRequestKwargsFromCapabilityTable:
         assert "output_config" not in kwargs
         assert kwargs["temperature"] == 0.3
 
-    def test_legacy_model_high_effort_uses_legacy_thinking_shape(self):
+    def test_legacy_model_high_effort_sends_no_extended_thinking(self):
+        """Issue #1336: the high-reasoning extended-thinking path was removed (medium is the highest level; a
+        stored "high" is migrated to "medium"). A stray "high" no longer sends a 16384-token thinking budget."""
         mock_api = _make_mock_api_client()
         client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
 
@@ -968,8 +970,9 @@ class TestBuildRequestKwargsFromCapabilityTable:
             user_message="User.",
         )
 
-        assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 16384}
-        assert kwargs["temperature"] == 1
+        assert "thinking" not in kwargs
+        assert kwargs["max_tokens"] == 4096
+        assert kwargs["temperature"] == 0.3
 
     def test_adaptive_model_medium_effort_sends_adaptive_shape_on_first_call(self):
         """The whole point of Issue #572: no learning step — the very first request

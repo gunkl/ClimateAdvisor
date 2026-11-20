@@ -45,6 +45,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from . import cycle_model, i18n, log_capture, prediction_engines, v4_shadow, window_span
+from .ai_settings_sync import is_ai_configured, provider_of
 from .automation import (
     NAT_VENT_START_PREDICTION,
     AutomationEngine,
@@ -90,6 +91,7 @@ from .confirmed_transition import is_confirmed, resolve_candidate_since
 from .const import (
     _VENT_SPLIT_TYPES,
     AC_WHF_OVERLAP_TOLERANCE_S,
+    AI_SHARED_DATA_KEY,
     ATTR_AI_STATUS,
     ATTR_AUTOMATION_STATUS,
     ATTR_BRIEFING,
@@ -1450,7 +1452,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Event log ring buffer (Issue #76) — timestamped automation events for debug download
         self._event_log: list[dict] = []
 
-        # AI subsystem (only if enabled and API key present). The actual
+        # AI subsystem (only if AI is configured: enabled, plus a key for built-in Claude; AI Task needs no key,
+        # Issue #1336). One client and skill registry serve every zone (install-wide AI settings, Issue #1336):
+        # attached from hass.data[AI_SHARED_DATA_KEY] in async_restore_state(). The actual
         # ClaudeAPIClient construction does blocking I/O (AsyncAnthropic's
         # constructor reads ~/.config/anthropic/active_config, loads the TLS
         # cert bundle, imports pydantic — confirmed live via HA's own
@@ -1462,7 +1466,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.ai_skills: AISkillRegistry | None = None
         self._investigation_report_history: list[dict] = []
         self._ai_client_config: dict[str, Any] | None = None
-        if config.get(CONF_AI_ENABLED) and config.get(CONF_AI_API_KEY):
+        if is_ai_configured(config):
             from .ai_skills import AISkillRegistry as _AISkillRegistry
             from .ai_skills_investigator import register_investigator_skill
 
@@ -1477,8 +1481,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("AI subsystem registered — client build deferred to async_restore_state()")
         else:
             _LOGGER.debug(
-                "AI subsystem disabled — enabled: %s, key present: %s",
+                "AI subsystem disabled — enabled: %s, provider: %s, key present: %s",
                 config.get(CONF_AI_ENABLED, False),
+                provider_of(config),
                 bool(config.get(CONF_AI_API_KEY)),
             )
 
@@ -2670,11 +2675,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _LOGGER.info("Climate Advisor v%s starting up", VERSION)
         ai_client_config = getattr(self, "_ai_client_config", None)
         if ai_client_config is not None:
-            from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
-
-            self.claude_client = await self._executor_job(functools.partial(_ClaudeAPIClient, ai_client_config))
-            _LOGGER.info("AI subsystem initialized — model: %s", ai_client_config.get("ai_model", "unknown"))
+            await _async_attach_shared_ai_client(self, ai_client_config)
             self._ai_client_config = None
+        else:
+            _refresh_shared_ai_client_config(self)
         # Issue #543: chart_log.load() does blocking file I/O — offload to executor.
         await self._executor_job(self._chart_log.load)
         # Issue #1230 R0: ForecastArchive.load() never raises (corrupt/missing file -> empty archive).
@@ -2755,7 +2759,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Restore AI stats regardless of date boundary — monthly budget and cumulative
         # counters must persist across reboots. Daily counters self-correct via
         # _reset_daily_counters_if_needed() inside restore_persistent_stats().
-        if self.claude_client:
+        # Issue #1336: the client is shared by every zone, so only the first zone's saved stats are applied (every
+        # zone saves the same install-wide counters).
+        if self.claude_client and not getattr(self.claude_client, "stats_restored", False):
             ai_stats = state.get("ai_stats")
             if ai_stats and isinstance(ai_stats, dict):
                 self.claude_client.restore_persistent_stats(ai_stats)
@@ -22802,3 +22808,62 @@ def _parse_time(time_str: str) -> time:
             time_str,
         )
         return time(6, 0)
+
+
+# Issue #1336: the install-wide AI client. Module functions (not methods) so partially built test
+# coordinators that bind only async_restore_state() still run them.
+def _shared_ai_store(coord: Any) -> dict[str, Any] | None:
+    """``hass.data[AI_SHARED_DATA_KEY]`` (created empty when absent), or None without a real hass.data dict."""
+    data = getattr(getattr(coord, "hass", None), "data", None)
+    if not isinstance(data, dict):
+        return None
+    store = data.setdefault(AI_SHARED_DATA_KEY, {})
+    return store if isinstance(store, dict) else None
+
+
+async def _async_attach_shared_ai_client(coord: Any, ai_client_config: dict[str, Any]) -> None:
+    """Use the install-wide AI client, creating it on the first zone with AI configured (Issue #1336).
+
+    Every zone's entry holds the same AI values (ai_settings_sync), so a later zone's setup or reload just
+    refreshes the shared client's config with its own entry data. The circuit breaker and daily limits are
+    therefore install-wide; each investigation still sends only this zone's context and saves to this
+    zone's report history. Without a real ``hass.data`` dict (partial test coordinators) the client is this
+    zone's own, as before.
+    """
+    from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
+
+    store = _shared_ai_store(coord)
+    client = store.get("client") if store is not None else None
+    if client is None:
+        client = await coord._executor_job(functools.partial(_ClaudeAPIClient, ai_client_config))
+        if store is not None:
+            store["client"] = client
+            if coord.ai_skills is not None:
+                store["skills"] = coord.ai_skills
+        _LOGGER.info(
+            "AI subsystem initialized — provider: %s, model: %s",
+            provider_of(ai_client_config),
+            ai_client_config.get("ai_model", "unknown"),
+        )
+    else:
+        client.update_config(ai_client_config)
+        _LOGGER.info("AI subsystem attached to the shared client — provider: %s", provider_of(ai_client_config))
+    if store is not None:
+        if store.get("skills") is None and coord.ai_skills is not None:
+            store["skills"] = coord.ai_skills
+        coord.ai_skills = store.get("skills") or coord.ai_skills
+    client.hass = coord.hass
+    coord.claude_client = client
+
+
+def _refresh_shared_ai_client_config(coord: Any) -> None:
+    """A zone set up with AI not configured still refreshes the shared client's settings (Issue #1336).
+
+    All zones hold the same AI values, so this zone's "AI off" is the install's: the shared client then
+    reports ``disabled`` until the zones that still use it reload with the new values.
+    """
+    data = getattr(getattr(coord, "hass", None), "data", None)
+    store = data.get(AI_SHARED_DATA_KEY) if isinstance(data, dict) else None
+    client = store.get("client") if isinstance(store, dict) else None
+    if client is not None:
+        client.update_config(dict(coord.config))

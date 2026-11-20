@@ -1,4 +1,9 @@
-"""Centralized Claude API client for Climate Advisor."""
+"""Centralized AI client for Climate Advisor.
+
+Two transports share one set of resilience guards (circuit breaker, daily limits, request
+history): Home Assistant AI Task (Issue #1336, the main path: any AI integration the
+occupant set up in Home Assistant) and the deprecated built-in Claude client (Anthropic SDK).
+"""
 
 from __future__ import annotations
 
@@ -13,17 +18,23 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from .ai_settings_sync import provider_of
 from .const import (
     AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     AI_CIRCUIT_BREAKER_THRESHOLD,
+    AI_ERROR_CONTEXT_LIMIT,
+    AI_ERROR_NO_ENTITY,
+    AI_ERROR_OUTPUT_LIMIT,
+    AI_ERROR_PROVIDER,
     AI_MAX_RETRIES,
     AI_MODEL_CAPABILITIES,
     AI_MODEL_CAPABILITIES_DEFAULT,
     AI_MODELS,
-    AI_REASONING_BUDGET_TOKENS,
-    AI_REASONING_HIGH,
+    AI_PROVIDER_HA_AI_TASK,
     AI_REQUEST_HISTORY_CAP,
     AI_RETRY_BASE_DELAY_SECONDS,
+    AI_TASK_NAME,
+    AI_TASK_TIMEOUT_SECONDS,
     AI_THINKING_SHAPE_ADAPTIVE,
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
@@ -34,6 +45,7 @@ from .const import (
     CONF_AI_MODEL,
     CONF_AI_MONTHLY_BUDGET,
     CONF_AI_REASONING_EFFORT,
+    CONF_AI_TASK_ENTITY,
     CONF_AI_TEMPERATURE,
     DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
     DEFAULT_AI_INVESTIGATOR_ENABLED,
@@ -153,6 +165,62 @@ class ClaudeResponse:
     # salvage, and raising max_tokens further may not even be the right lever.
     resolved_model: str = ""  # actual model used; differs from the requested model only
     # when a deprecated/invalid model triggered a same-tier fallback (Issue #563)
+    error_code: str | None = None  # Issue #1336: a stable AI_ERROR_* code the occupant is told about
+
+
+class AIProviderError(RuntimeError):
+    """A failed AI request that carries a stable ``AI_ERROR_*`` code (Issue #1336).
+
+    Raised by ``async_request_streaming()`` on the AI Task path so the streaming caller can put the code on its
+    SSE error event. ``str(exc)`` is the plain-English error.
+    """
+
+    def __init__(self, message: str, error_code: str | None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
+# Issue #1336: how HA's AI integrations report a reply that hit a limit (HA 2026.10.4 source).
+# Anthropic raises HomeAssistantError(translation_key=...); OpenAI raises plain text.
+_OUTPUT_LIMIT_KEYS = frozenset({"response_max_tokens"})
+_CONTEXT_LIMIT_KEYS = frozenset({"response_context_window_exceeded"})
+_OUTPUT_LIMIT_TEXT = ("max output tokens", "response_max_tokens")
+_CONTEXT_LIMIT_TEXT = ("response_context_window_exceeded",)
+_NO_ENTITY_KEYS = frozenset({"no_entity"})
+_NO_ENTITY_TEXT = "no entity_id provided and no preferred entity set"
+
+
+def classify_ai_task_error(exc: BaseException) -> str:
+    """Map an AI Task failure to the ``AI_ERROR_*`` code the occupant is shown (Issue #1336).
+
+    Reads the HomeAssistantError translation key first, then the message. ``ai_task`` not set up at all
+    (a ``KeyError`` on its hass.data, or no ``ai_task`` package) means there is no AI Task entity to use.
+    Anything else, a timeout included, is a provider error.
+    """
+    key = str(getattr(exc, "translation_key", None) or "")
+    text = str(exc).lower()
+    if key in _OUTPUT_LIMIT_KEYS or any(t in text for t in _OUTPUT_LIMIT_TEXT):
+        return AI_ERROR_OUTPUT_LIMIT
+    if key in _CONTEXT_LIMIT_KEYS or any(t in text for t in _CONTEXT_LIMIT_TEXT):
+        return AI_ERROR_CONTEXT_LIMIT
+    if key in _NO_ENTITY_KEYS or _NO_ENTITY_TEXT in text or isinstance(exc, (KeyError, ImportError)):
+        return AI_ERROR_NO_ENTITY
+    return AI_ERROR_PROVIDER
+
+
+async def _async_ai_task_generate(hass: Any, *, entity_id: str | None, instructions: str) -> Any:
+    """Call ``ai_task.async_generate_data`` (the approved HA Boundary Rule exception, Issue #1336).
+
+    Imported here, not at module level, so an install without ``ai_task`` still loads Climate Advisor.
+    """
+    from homeassistant.components import ai_task  # noqa: PLC0415
+
+    return await ai_task.async_generate_data(
+        hass,
+        task_name=AI_TASK_NAME,
+        entity_id=entity_id,
+        instructions=instructions,
+    )
 
 
 @dataclass
@@ -248,8 +316,16 @@ class ClaudeAPIClient:
         """
         self._config = config
         self._client: Any = client
+        # Issue #1336: the AI Task transport needs Home Assistant; set by the coordinator that attaches the
+        # (install-wide, shared) client. Built-in Claude does not use it.
+        self.hass: Any = None
+        # Issue #1336: the client is shared by every zone, and every zone's state file carries its stats; only the
+        # first zone to restore them applies them (they are the same install-wide counters).
+        self.stats_restored: bool = False
 
-        if self._client is None and ANTHROPIC_AVAILABLE:
+        if self.uses_ai_task:
+            _LOGGER.debug("AI client uses Home Assistant AI Task — no API key needed")
+        elif self._client is None and ANTHROPIC_AVAILABLE:
             api_key = config.get(CONF_AI_API_KEY, "")
             if api_key:
                 self._client = AsyncAnthropic(api_key=api_key)
@@ -272,6 +348,21 @@ class ClaudeAPIClient:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def provider(self) -> str:
+        """The configured provider (``ha_ai_task`` or ``builtin_claude``), Issue #1336."""
+        return provider_of(self._config)
+
+    @property
+    def uses_ai_task(self) -> bool:
+        """True when requests go through Home Assistant AI Task (Issue #1336)."""
+        return self.provider == AI_PROVIDER_HA_AI_TASK
+
+    @property
+    def ai_task_entity(self) -> str:
+        """The chosen AI Task entity, or "" for Home Assistant's preferred one."""
+        return str(self._config.get(CONF_AI_TASK_ENTITY) or "")
 
     async def async_list_models(self) -> list[str]:
         """Return available Claude model IDs, cached for _MODEL_LIST_CACHE_TTL_SECONDS.
@@ -347,6 +438,14 @@ class ClaudeAPIClient:
                 rate_limited=True,
             )
 
+        if self.uses_ai_task:
+            # Issue #1336: no budget (cost is the provider's, reported as 0) and no retry (a provider that fails
+            # at its output limit fails the same way again; ai_task has no timeout of its own, so each attempt
+            # can take up to AI_TASK_TIMEOUT_SECONDS).
+            response = await self._async_ai_task_call(system_prompt, user_message)
+            self._record_request_outcome(response, triggered_by, system_prompt)
+            return response
+
         # Guard: monthly budget
         if not self._check_budget():
             _LOGGER.warning("Monthly AI budget exceeded; skipping Claude API call")
@@ -393,8 +492,11 @@ class ClaudeAPIClient:
             temperature=resolved_temperature,
             reasoning_effort=reasoning_effort,
         )
+        self._record_request_outcome(response, triggered_by, system_prompt)
+        return response
 
-        # Update counters on success or failure
+    def _record_request_outcome(self, response: ClaudeResponse, triggered_by: str, system_prompt: str) -> None:
+        """Circuit breaker, budget, daily counters and request history after one request (both transports)."""
         if response.success:
             self._circuit_breaker.consecutive_failures = 0
             if self._circuit_breaker.state != _CB_CLOSED:
@@ -433,7 +535,86 @@ class ClaudeAPIClient:
             }
         )
 
-        return response
+    async def _async_ai_task_call(self, system_prompt: str, user_message: str) -> ClaudeResponse:
+        """One Home Assistant AI Task request (Issue #1336). Never raises.
+
+        The instructions are the system prompt, a blank line, then the context (AI Task has no separate system
+        prompt for callers). Tokens and cost are unknown to callers and reported as 0.
+        """
+        start_time = time.monotonic()
+        entity_id = self.ai_task_entity or None
+        skill_name = self._extract_skill_name(system_prompt)
+
+        def _failure(error: str, code: str) -> ClaudeResponse:
+            return ClaudeResponse(
+                success=False,
+                content="",
+                input_tokens=0,
+                output_tokens=0,
+                estimated_cost=0.0,
+                latency_ms=(time.monotonic() - start_time) * 1000.0,
+                error=error,
+                error_code=code,
+            )
+
+        if self.hass is None:
+            _LOGGER.warning("AI Task request skipped: client not attached to Home Assistant skill=%s", skill_name)
+            return _failure("AI Task client is not attached to Home Assistant", AI_ERROR_PROVIDER)
+
+        _LOGGER.debug(
+            "AI Task request: skill=%s entity=%s instructions_chars=%d",
+            skill_name,
+            entity_id or "preferred",
+            len(system_prompt) + len(user_message),
+        )
+        try:
+            async with asyncio.timeout(AI_TASK_TIMEOUT_SECONDS):
+                result = await _async_ai_task_generate(
+                    self.hass,
+                    entity_id=entity_id,
+                    instructions=system_prompt + "\n\n" + user_message,
+                )
+        except Exception as exc:  # noqa: BLE001 - every provider failure goes to the breaker and the fallback
+            code = classify_ai_task_error(exc)
+            if isinstance(exc, TimeoutError):
+                error = f"AI Task timed out after {AI_TASK_TIMEOUT_SECONDS} s"
+            else:
+                error = f"AI Task error: {exc}"
+            _LOGGER.warning(
+                "AI Task request failed: skill=%s entity=%s error_code=%s error=%s",
+                skill_name,
+                entity_id or "preferred",
+                code,
+                error,
+            )
+            return _failure(error, code)
+
+        data = getattr(result, "data", None)
+        text = data if isinstance(data, str) else ("" if data is None else str(data))
+        latency_ms = (time.monotonic() - start_time) * 1000.0
+        if not text.strip():
+            _LOGGER.warning(
+                "AI Task request failed: empty reply skill=%s entity=%s",
+                skill_name,
+                entity_id or "preferred",
+            )
+            return _failure("AI Task returned an empty reply", AI_ERROR_PROVIDER)
+
+        _LOGGER.debug(
+            "AI Task response finished: skill=%s chars=%d latency_ms=%.0f",
+            skill_name,
+            len(text),
+            latency_ms,
+        )
+        return ClaudeResponse(
+            success=True,
+            content=text,
+            input_tokens=0,
+            output_tokens=0,
+            estimated_cost=0.0,
+            latency_ms=latency_ms,
+            stop_reason="end_turn",
+        )
 
     async def async_request_streaming(
         self,
@@ -484,6 +665,17 @@ class ClaudeAPIClient:
 
         if not self._check_rate_limit(triggered_by):
             raise RuntimeError("Rate limit exceeded")
+
+        if self.uses_ai_task:
+            # Issue #1336: AI Task does not stream to callers — the whole reply arrives at once, as one text event.
+            response = await self._async_ai_task_call(system_prompt, user_message)
+            if not response.success:
+                self._record_streaming_failure()
+                raise AIProviderError(response.error or "AI Task request failed", response.error_code)
+            yield {"type": "text", "text": response.content}
+            yield {"type": "stop", "stop_reason": "end_turn", "truncated_empty": False}
+            self._record_streaming_success(system_prompt, triggered_by, 0, 0, 0.0, response.latency_ms)
+            return
 
         if not self._check_budget():
             raise RuntimeError("Monthly budget exceeded")
@@ -548,15 +740,7 @@ class ClaudeAPIClient:
                     exc,
                 )
 
-            self._circuit_breaker.consecutive_failures += 1
-            self._error_count += 1
-            if self._circuit_breaker.consecutive_failures >= AI_CIRCUIT_BREAKER_THRESHOLD:
-                self._circuit_breaker.state = _CB_OPEN
-                self._circuit_breaker.opened_at = time.monotonic()
-                _LOGGER.error(
-                    "Circuit breaker opened after %d consecutive failures",
-                    self._circuit_breaker.consecutive_failures,
-                )
+            self._record_streaming_failure()
             raise
 
         latency_ms = (time.monotonic() - start_time) * 1000.0
@@ -600,8 +784,32 @@ class ClaudeAPIClient:
                 kwargs["max_tokens"],
             )
         yield {"type": "stop", "stop_reason": stop_reason, "truncated_empty": truncated_empty}
+        self._record_streaming_success(
+            system_prompt, triggered_by, input_tokens, output_tokens, estimated_cost, latency_ms
+        )
 
-        # Update counters on success
+    def _record_streaming_failure(self) -> None:
+        """Count a failed streaming request on the circuit breaker (both transports)."""
+        self._circuit_breaker.consecutive_failures += 1
+        self._error_count += 1
+        if self._circuit_breaker.consecutive_failures >= AI_CIRCUIT_BREAKER_THRESHOLD:
+            self._circuit_breaker.state = _CB_OPEN
+            self._circuit_breaker.opened_at = time.monotonic()
+            _LOGGER.error(
+                "Circuit breaker opened after %d consecutive failures",
+                self._circuit_breaker.consecutive_failures,
+            )
+
+    def _record_streaming_success(
+        self,
+        system_prompt: str,
+        triggered_by: str,
+        input_tokens: int,
+        output_tokens: int,
+        estimated_cost: float,
+        latency_ms: float,
+    ) -> None:
+        """Reset the breaker and record counters/history after a completed streaming request (both transports)."""
         self._circuit_breaker.consecutive_failures = 0
         if self._circuit_breaker.state != _CB_CLOSED:
             _LOGGER.info("Circuit breaker reset to closed after successful streaming request")
@@ -686,9 +894,9 @@ class ClaudeAPIClient:
             status = "disabled"
         elif self._circuit_breaker.state == _CB_OPEN:
             status = "circuit_open"
-        elif not self._check_budget():
+        elif not self.uses_ai_task and not self._check_budget():
             status = "budget_exceeded"
-        elif self._client is None:
+        elif (self.hass is None) if self.uses_ai_task else (self._client is None):
             status = "inactive"
         elif self._error_count > 0 and self._circuit_breaker.consecutive_failures > 0:
             status = "error"
@@ -700,7 +908,10 @@ class ClaudeAPIClient:
             "error_count": self._error_count,
             "total_requests": self._total_requests,
             "last_request_time": self._last_request_time,
-            "model": self._config.get(CONF_AI_MODEL, DEFAULT_AI_MODEL),
+            # Issue #1336: on AI Task the model is chosen in the AI integration, not here ("" = not known).
+            "model": "" if self.uses_ai_task else self._config.get(CONF_AI_MODEL, DEFAULT_AI_MODEL),
+            "provider": self.provider,
+            "ai_task_entity": self.ai_task_entity,
             "circuit_breaker_state": self._circuit_breaker.state,
             "monthly_cost_estimate": round(self._budget.monthly_cost, 4),
             "auto_requests_today": self._rate_counters.auto_requests_today,
@@ -757,6 +968,7 @@ class ClaudeAPIClient:
         self._investigator_requests_date = data.get("investigator_requests_date", "")
         # Apply daily reset if rebooted after midnight
         self._reset_daily_counters_if_needed()
+        self.stats_restored = True
         _LOGGER.debug(
             "AI stats restored — total_requests=%d, monthly_cost=%.4f, budget_month=%d",
             self._total_requests,
@@ -790,7 +1002,10 @@ class ClaudeAPIClient:
 
         self._config = config
 
-        if new_key != old_key:
+        if self.uses_ai_task:
+            # Issue #1336: AI Task needs no Anthropic client; one already built stays unused until a switch back.
+            return
+        if new_key != old_key or (self._client is None and new_key):
             if new_key and ANTHROPIC_AVAILABLE:
                 self._client = AsyncAnthropic(api_key=new_key)
                 _LOGGER.debug("API client re-initialized — key updated")
@@ -984,17 +1199,8 @@ class ClaudeAPIClient:
                 kwargs["temperature"] = 1  # required by the API when thinking is active
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["output_config"] = {"effort": reasoning_effort}
-        elif reasoning_effort == AI_REASONING_HIGH:
-            # Extended thinking for high reasoning effort (legacy shape).
-            # Claude API requirements when thinking is enabled:
-            #   1. temperature must be exactly 1
-            #   2. max_tokens must exceed budget_tokens
-            budget = AI_REASONING_BUDGET_TOKENS.get(AI_REASONING_HIGH, 16384)
-            if caps["supports_temperature"]:
-                kwargs["temperature"] = 1  # required by the API — overrides configured value
-            if kwargs["max_tokens"] <= budget:
-                kwargs["max_tokens"] = budget + 4096  # reserve room for output tokens
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # Issue #1336: the legacy extended-thinking shape was sent only at "high" reasoning, which is no longer
+        # offered (low/medium only; a stored "high" is migrated to "medium"). Legacy-shape models send no thinking.
 
         return kwargs
 

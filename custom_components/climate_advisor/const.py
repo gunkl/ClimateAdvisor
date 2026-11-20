@@ -1527,10 +1527,28 @@ CONFIG_METADATA = {
         ),
         "category": "ai_settings",
     },
+    "ai_provider": {
+        "label": "AI Provider",
+        "description": (
+            "Which AI writes the investigation. Home Assistant AI Task uses an AI integration you already"
+            " set up in Home Assistant (for example OpenAI, Google, Anthropic or Ollama)."
+            " Built-in Claude is deprecated and will be removed. Applies to all zones."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_task_entity": {
+        "label": "AI Task Entity",
+        "description": (
+            "The Home Assistant AI Task entity that writes the investigation. Leave empty to use Home"
+            " Assistant's preferred AI Task entity (Settings > System > AI). It needs a context window of"
+            " at least 16k tokens and an output limit of at least 8192 tokens. Applies to all zones."
+        ),
+        "category": "ai_settings",
+    },
     "ai_api_key": {
         "label": "Claude API Key",
         "description": (
-            "Your Anthropic API key. Stored securely in Home Assistant's config entry."
+            "Built-in Claude only. Your Anthropic API key. Stored securely in Home Assistant's config entry."
             " Never logged or exposed in sensor attributes."
         ),
         "category": "ai_settings",
@@ -1539,7 +1557,7 @@ CONFIG_METADATA = {
     "ai_model": {
         "label": "AI Model",
         "description": (
-            "Which Claude model to use."
+            "Built-in Claude only. Which Claude model to use."
             " Sonnet is recommended for cost/quality balance."
             " Haiku is cheapest. Opus is most capable but expensive."
         ),
@@ -1548,7 +1566,7 @@ CONFIG_METADATA = {
     "ai_reasoning_effort": {
         "label": "Reasoning Effort",
         "description": (
-            "How much reasoning effort Claude uses."
+            "Built-in Claude only. How much reasoning effort Claude uses."
             " Higher effort produces better analysis but uses more tokens and costs more."
         ),
         "category": "ai_settings",
@@ -2304,6 +2322,11 @@ AI_ERROR_NO_ENTITY = "ai_task_no_entity"  # no AI Task entity picked and no pref
 AI_ERROR_PROVIDER = "ai_provider_error"  # any other provider failure
 AI_CUT_SHORT = "ai_report_cut_short"  # a reply that came back missing required sections
 
+# The one AI client (and skill registry) every zone shares: hass.data[AI_SHARED_DATA_KEY] =
+# {"client": ClaudeAPIClient, "skills": AISkillRegistry}. Kept outside hass.data[DOMAIN], whose values are
+# all coordinators (the zone count). Removed with the last zone, like the panel.
+AI_SHARED_DATA_KEY = f"{DOMAIN}_ai"
+
 # Investigation report history (Issue #82)
 INVESTIGATION_REPORT_HISTORY_CAP = 60
 
@@ -2312,6 +2335,7 @@ ATTR_AI_STATUS = "ai_status"
 
 # API paths for AI endpoints
 API_AI_STATUS = f"{API_BASE}/ai_status"
+API_AI_LIMITS = f"{API_BASE}/ai_limits"  # Issue #1336
 API_AI_INVESTIGATE = f"{API_BASE}/ai_investigate"
 API_INVESTIGATION_REPORTS = f"{API_BASE}/investigation_reports"
 API_DELETE_REPORT = f"{API_BASE}/delete_report"
@@ -2381,6 +2405,7 @@ _METADATA_DEFAULTS: dict[str, Any] = {
     "email_occupancy_home": True,
     "email_entity_health": True,
     "ai_enabled": DEFAULT_AI_ENABLED,
+    "ai_provider": DEFAULT_AI_PROVIDER,
     "ai_model": DEFAULT_AI_MODEL,
     "ai_reasoning_effort": DEFAULT_AI_REASONING_EFFORT,
     "ai_max_tokens": DEFAULT_AI_MAX_TOKENS,
@@ -2410,6 +2435,7 @@ _METADATA_NO_DEFAULT: frozenset[str] = frozenset(
         "vacation_toggle_entity",
         "guest_toggle_entity",
         "ai_api_key",
+        "ai_task_entity",
     }
 )
 for _key, _default in _METADATA_DEFAULTS.items():

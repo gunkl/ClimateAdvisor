@@ -87,6 +87,8 @@ EXPECTED_KEYS = {
     "comfort_deadband_cold_f",
     "comfort_family_recency_window_min",
     "ai_enabled",
+    "ai_provider",  # Issue #1336
+    "ai_task_entity",  # Issue #1336
     "ai_api_key",
     "ai_model",
     "ai_reasoning_effort",

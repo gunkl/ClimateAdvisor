@@ -383,6 +383,32 @@ def parse_investigation_response(raw_text: str, language: str | None = None) -> 
     return sections
 
 
+# The report sections the investigator prompt requires (every parse_investigation_response key but full_text).
+REQUIRED_REPORT_SECTIONS: tuple[str, ...] = (
+    "activity_summary",
+    "incongruities",
+    "data_quality",
+    "errors_warnings",
+    "hypotheses",
+    "recommended_actions",
+    "assumptions",
+)
+
+
+def report_cut_short(data: Any, *, truncated: bool = False) -> bool:
+    """True when an AI report came back incomplete (Issue #1336): it was truncated, or it has text but at least
+    one required section is empty in ``parse_investigation_response``'s result ``data``.
+
+    An empty reply is not "cut short" (it is a failure, handled elsewhere), and neither is the non-AI fallback
+    (its ``full_text`` is empty).
+    """
+    if truncated:
+        return True
+    if not isinstance(data, dict) or not str(data.get("full_text") or "").strip():
+        return False
+    return any(not str(data.get(key) or "").strip() for key in REQUIRED_REPORT_SECTIONS)
+
+
 def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     """Return a lightweight investigation dict from coordinator data without AI.
 
@@ -641,7 +667,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
         "errors_warnings": (
             "\n".join(errors_parts) if errors_parts else "No errors or warnings in the supplied window."
         ),
-        "hypotheses": "AI unavailable — hypotheses require cross-source analysis by Claude.",
+        "hypotheses": "AI unavailable — hypotheses require cross-source analysis by the AI provider.",
         "recommended_actions": "Restore AI connectivity and re-run the full investigator skill.",
         "assumptions": "Fallback only scans deterministic patterns; deep inference was not performed.",
         "full_text": "",

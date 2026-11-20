@@ -505,6 +505,9 @@ class ClimateAdvisorAIStatusSensor(ClimateAdvisorBaseSensor):
                 "error_count": status.get("error_count", 0),
                 "total_requests": status.get("total_requests", 0),
                 "model_in_use": status.get("model"),
+                # Issue #1336: which provider (and AI Task entity, "" = HA's preferred one) writes the reports
+                "provider": status.get("provider"),
+                "ai_task_entity": status.get("ai_task_entity", ""),
                 "circuit_breaker": status.get("circuit_breaker_state", "closed"),
                 "monthly_cost_estimate": status.get("monthly_cost_estimate", 0.0),
                 "auto_requests_today": status.get("auto_requests_today", 0),

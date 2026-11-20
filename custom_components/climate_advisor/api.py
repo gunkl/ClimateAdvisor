@@ -15,10 +15,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
-from . import i18n, log_capture, prediction_accuracy, status_text, zone_registry
+from . import ai_limits, i18n, log_capture, prediction_accuracy, status_text, zone_registry
+from .ai_settings_sync import provider_of
 from .ai_skills_context import OUTDOOR_SENSOR_REASON_LABELS, build_event_timeline_table, build_event_timeline_wire
+from .ai_skills_investigator import report_cut_short
 from .const import (
+    AI_CUT_SHORT,
     API_AI_INVESTIGATE,
+    API_AI_LIMITS,
     API_AI_STATUS,
     API_AUTOMATION_STATE,
     API_BRIEFING,
@@ -60,6 +64,7 @@ from .const import (
     ATTR_WHF_STATUS,
     CONF_AI_ENABLED,
     CONF_AI_INVESTIGATOR_ENABLED,
+    CONF_AI_TASK_ENTITY,
     CONF_ENERGY_RATE,
     CONF_GITHUB_REPO,
     CONF_GITHUB_TOKEN,
@@ -1226,10 +1231,44 @@ class ClimateAdvisorAIStatusView(HomeAssistantView):
                 )
             return self.json(
                 {
-                    "status": {"status": "disabled"},
+                    "status": {
+                        "status": "disabled",
+                        # Issue #1336: which provider the (install-wide) AI settings name, even while off
+                        "provider": provider_of(coordinator.config),
+                        "ai_task_entity": str(coordinator.config.get(CONF_AI_TASK_ENTITY) or ""),
+                    },
                     "recent_requests": [],
                 }
             )
+
+
+class ClimateAdvisorAILimitsView(HomeAssistantView):
+    """GET /api/climate_advisor/ai_limits — the AI provider's limits against the requirements (Issue #1336).
+
+    The dashboard asks before starting an investigation: a known-too-small limit gets a warning with
+    *Run anyway* / *Cancel*; an unreadable one gets a one-line note. Never blocks anything.
+    """
+
+    url = API_AI_LIMITS
+    name = "api:climate_advisor:ai_limits"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator, ambiguous_refused = _get_coordinator(hass, request)
+        if ambiguous_refused:
+            return self.json(_ambiguous_zone_payload(hass), status_code=400)
+        if not coordinator:
+            return self.json(_error_body(hass, "not_loaded"), status_code=503)
+
+        with log_capture.zone_scope(coordinator.zone_label):
+            return self.json(await ai_limits.async_read_limits(hass, coordinator.config))
+
+
+def _cut_short_fields(data: Any, truncated: bool) -> dict[str, Any]:
+    """``{"cut_short", "cut_short_code"}`` for an investigation result (Issue #1336)."""
+    cut_short = report_cut_short(data, truncated=bool(truncated))
+    return {"cut_short": cut_short, "cut_short_code": AI_CUT_SHORT if cut_short else None}
 
 
 def _oldest_event_time(event_log: list[dict]) -> str | None:
@@ -1402,6 +1441,9 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                     hours=hours,
                     deep=deep,
                 ):
+                    if event.get("type") == "done":
+                        # Issue #1336: a reply missing required sections is flagged so the occupant is told
+                        event.update(_cut_short_fields(event.get("data"), event.get("truncated", False)))
                     await stream_resp.write(("data: " + json.dumps(event) + "\n\n").encode())
                     await stream_resp.drain()
                     if event.get("type") == "chunk":
@@ -1419,6 +1461,9 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                             "raw_response": event.get("raw_response", ""),
                             "truncated": event.get("truncated", False),
                             "truncated_empty": event.get("truncated_empty", False),
+                            "error_code": event.get("error_code"),
+                            "cut_short": event.get("cut_short", False),
+                            "cut_short_code": event.get("cut_short_code"),
                         }
                         # Issue #925: activity_summary now arrives already populated in
                         # event["data"] — it's an ordinary parsed LLM section (see
@@ -1445,6 +1490,8 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                                 "Investigation report truncated: hit max_tokens limit; "
                                 "consider raising Investigator Max Response Length"
                             )
+                        elif final_result["cut_short"]:
+                            _LOGGER.warning("Investigation report cut short: required sections missing")
 
                 if final_result and final_result.get("success"):
                     coordinator.claude_client.increment_investigator_counter()
@@ -1464,6 +1511,8 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 deep=deep,
             )
 
+            result.setdefault("error_code", None)
+            result.update(_cut_short_fields(result.get("data"), result.get("truncated", False)))
             if result.get("success") or result.get("source") == "fallback":
                 # Issue #925: activity_summary already arrives populated in result["data"]
                 # — see streaming path above.
@@ -1875,6 +1924,7 @@ API_VIEWS = [
     ClimateAdvisorResumeFromPauseView,
     ClimateAdvisorToggleAutomationView,
     ClimateAdvisorAIStatusView,
+    ClimateAdvisorAILimitsView,
     ClimateAdvisorActivityRecordView,
     ClimateAdvisorInvestigateView,
     ClimateAdvisorInvestigationReportsView,

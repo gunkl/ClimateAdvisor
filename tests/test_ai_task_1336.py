@@ -18,14 +18,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.climate_advisor import claude_api
 from custom_components.climate_advisor.ai_skills import AISkillDefinition, AISkillRegistry
 from custom_components.climate_advisor.ai_skills_investigator import (
     REQUIRED_REPORT_SECTIONS,
     parse_investigation_response,
     report_cut_short,
 )
-from custom_components.climate_advisor.claude_api import AIProviderError, ClaudeAPIClient, classify_ai_task_error
 from custom_components.climate_advisor.const import (
     AI_CUT_SHORT,
     AI_ERROR_CONTEXT_LIMIT,
@@ -43,6 +41,23 @@ from custom_components.climate_advisor.const import (
 
 _GEN = "custom_components.climate_advisor.claude_api._async_ai_task_generate"
 
+
+# claude_api is imported lazily, never at collection time: tests/test_claude_api.py must be the first to import it
+# (it injects a mock ``anthropic`` package first; see claude.md "Module-Level sys.modules Mocking").
+def _claude_api():
+    import importlib  # noqa: PLC0415
+
+    return importlib.import_module("custom_components.climate_advisor.claude_api")
+
+
+def ClaudeAPIClient(*args, **kwargs):  # noqa: N802 - stands in for the class
+    return _claude_api().ClaudeAPIClient(*args, **kwargs)
+
+
+def classify_ai_task_error(exc):
+    return _claude_api().classify_ai_task_error(exc)
+
+
 _FULL_REPORT = "\n".join(
     f"## {h}\nSome text."
     for h in (
@@ -57,7 +72,7 @@ _FULL_REPORT = "\n".join(
 )
 
 
-def _task_client(**config) -> ClaudeAPIClient:
+def _task_client(**config):
     cfg = {"ai_enabled": True, "ai_provider": AI_PROVIDER_HA_AI_TASK, "ai_task_entity": "", **config}
     client = ClaudeAPIClient(cfg)
     client.hass = MagicMock()
@@ -96,7 +111,7 @@ class TestAITaskRequest:
             patch.dict(sys.modules, {"homeassistant.components.ai_task": fake_ai_task}),
             patch.object(sys.modules["homeassistant.components"], "ai_task", fake_ai_task, create=True),
         ):
-            asyncio.run(claude_api._async_ai_task_generate(hass, entity_id=None, instructions="I"))
+            asyncio.run(_claude_api()._async_ai_task_generate(hass, entity_id=None, instructions="I"))
         fake_ai_task.async_generate_data.assert_awaited_once_with(
             hass, task_name=AI_TASK_NAME, entity_id=None, instructions="I"
         )
@@ -197,7 +212,7 @@ class TestAITaskStreaming:
     def test_failure_raises_with_code(self):
         client = _task_client()
         err = HomeAssistantError("OpenAI response incomplete: max output tokens reached")
-        with patch(_GEN, AsyncMock(side_effect=err)), pytest.raises(AIProviderError) as info:
+        with patch(_GEN, AsyncMock(side_effect=err)), pytest.raises(_claude_api().AIProviderError) as info:
             asyncio.run(self._collect(client))
         assert info.value.error_code == AI_ERROR_OUTPUT_LIMIT
         assert client._circuit_breaker.consecutive_failures == 1

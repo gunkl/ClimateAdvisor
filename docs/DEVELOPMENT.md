@@ -225,6 +225,14 @@ whose body starts "Fixes #N."; otherwise it labels the issue `needs-human`. It n
 edits workflows or goldens, or adds AI attribution: the owner reviews the draft and decides. Run it by hand for one
 issue with **Actions → Nightly failure auto-diagnosis → Run workflow** (the issue number).
 
+**When the diagnosis itself cannot run** (Issue #1625). The action hides Claude's output because the repo is public, so
+a failed Claude step used to leave only "is_error:true" in the log. A follow-up step now runs
+`.github/scripts/autodiag_failure.py`. It reads only the final error message from the action's `execution_file`
+(never the transcript), redacts anything token-like, and names the kind of failure: **authentication** (replace the
+`CLAUDE_CODE_OAUTH_TOKEN` secret from `claude setup-token`), **usage limit**, **API unavailable**, **turn limit** or
+**unknown**. It writes that to the job summary, comments it on the nightly-failure issue and labels the issue
+`needs-human`. `claude.yml` (the `@claude` responder) runs the same script on failure, writing only to its job summary.
+
 ## Test badges
 
 The README's second badge row (Issue #1343) shows every test layer, in the same `flat-square` style as the version

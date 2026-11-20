@@ -476,6 +476,18 @@ def _ai_v21_values(values: dict) -> dict:
     return out
 
 
+def _ai_named_provider(values: dict) -> dict:
+    """Issue #1336: AI values with only the new ``ai_provider`` key filled in.
+
+    Used to decide whether a zone's own originals need a backup: naming the provider is not a change the
+    occupant made, so it alone does not create a second copy of the zone's settings (and key).
+    """
+    out = dict(values)
+    if out:
+        out[CONF_AI_PROVIDER] = ai_settings_sync.provider_of(out)
+    return out
+
+
 def _migrate_ai_settings_v21(hass: HomeAssistant, config_entry: ConfigEntry) -> dict:
     """The v20 -> v21 data of one zone (Issue #1336): AI settings become install-wide.
 
@@ -494,13 +506,13 @@ def _migrate_ai_settings_v21(hass: HomeAssistant, config_entry: ConfigEntry) -> 
         entries = [config_entry]
     # The data of this entry as it is now (earlier hops may have changed it); siblings as stored.
     entries_data = [config_entry.data if e.entry_id == config_entry.entry_id else e.data for e in entries]
-    values, conflict = ai_settings_sync.pick_install_ai_values(entries_data)
+    values, conflict = ai_settings_sync.pick_install_ai_values(entries_data, _ai_v21_values)
 
     if values is None:
         # No zone has AI configured: this zone's own values, in their v21 form.
         own = ai_settings_sync.extract_ai_values(config_entry.data)
         new_data = (
-            ai_settings_sync.unified_entry_data(config_entry.data, _ai_v21_values(own))
+            ai_settings_sync.unified_entry_data(config_entry.data, _ai_v21_values(own), _ai_named_provider)
             if own
             else dict(config_entry.data)
         )
@@ -508,7 +520,7 @@ def _migrate_ai_settings_v21(hass: HomeAssistant, config_entry: ConfigEntry) -> 
         return new_data
 
     install_values = _ai_v21_values(values)
-    new_data = ai_settings_sync.unified_entry_data(config_entry.data, install_values)
+    new_data = ai_settings_sync.unified_entry_data(config_entry.data, install_values, _ai_named_provider)
     winner = next(
         (
             e

@@ -19,7 +19,7 @@ Stable order is ``hass.config_entries.async_entries(DOMAIN)``, the same order
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -92,7 +92,10 @@ def is_ai_configured(values: Mapping[str, Any]) -> bool:
     return True
 
 
-def pick_install_ai_values(entries_data: Iterable[Mapping[str, Any]]) -> tuple[dict[str, Any] | None, bool]:
+def pick_install_ai_values(
+    entries_data: Iterable[Mapping[str, Any]],
+    normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, bool]:
     """Choose the install's AI values from every zone's ORIGINAL values, in stable order.
 
     Returns ``(values, conflict)``: ``values`` is the stably-first zone with AI configured
@@ -100,6 +103,9 @@ def pick_install_ai_values(entries_data: Iterable[Mapping[str, Any]]) -> tuple[d
     zone had different values (the occupant is told which zone's settings were kept).
     """
     configured = [original_ai_values(d) for d in entries_data]
+    if normalize:
+        # Compare every zone in one form: a zone migrated earlier holds its values already normalized.
+        configured = [normalize(dict(v)) if v else v for v in configured]
     configured = [v for v in configured if is_ai_configured(v)]
     if not configured:
         return None, False
@@ -108,11 +114,21 @@ def pick_install_ai_values(entries_data: Iterable[Mapping[str, Any]]) -> tuple[d
     return dict(winner), conflict
 
 
-def unified_entry_data(data: Mapping[str, Any], install_values: Mapping[str, Any]) -> dict[str, Any]:
-    """This entry's data with the install's AI values; its own originals backed up when they differ."""
+def unified_entry_data(
+    data: Mapping[str, Any],
+    install_values: Mapping[str, Any],
+    normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """This entry's data with the install's AI values; its own originals backed up when they differ.
+
+    ``normalize`` puts the originals in the same form as ``install_values`` before comparing (the v21
+    migration names the provider and maps "high" to "medium"), so a zone whose settings only changed form
+    gets no backup, and no second copy of its key.
+    """
     new_data = dict(data)
     own_original = original_ai_values(data)
-    if own_original != dict(install_values) and AI_SETTINGS_BACKUP_KEY not in new_data:
+    compared = normalize(dict(own_original)) if normalize else own_original
+    if compared != dict(install_values) and AI_SETTINGS_BACKUP_KEY not in new_data:
         new_data[AI_SETTINGS_BACKUP_KEY] = own_original
     for key in AI_SHARED_KEYS:
         new_data.pop(key, None)

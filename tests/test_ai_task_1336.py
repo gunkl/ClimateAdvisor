@@ -487,6 +487,15 @@ class TestMigrationV21:
         assert a.data["ai_api_key"] == b.data["ai_api_key"] == "sk-1"
         create.assert_not_called()
 
+    def test_unchanged_zone_gets_no_backup(self):
+        """A zone whose settings only gain the new provider name keeps no second copy of its key."""
+        unchanged = {**_ON_KEY, "ai_reasoning_effort": "medium"}
+        a = _entry("a", "A", unchanged)
+        create = _migrate_all([a])
+        assert a.data["ai_provider"] == AI_PROVIDER_BUILTIN_CLAUDE
+        assert AI_SETTINGS_BACKUP_KEY not in a.data
+        create.assert_not_called()
+
     def test_different_values_keep_first_and_raise_issue(self):
         a = _entry("a", "Upstairs", _ON_KEY)
         b = _entry("b", "Downstairs", {**_ON_KEY, "ai_api_key": "sk-2", "ai_model": "claude-haiku-4-5"})

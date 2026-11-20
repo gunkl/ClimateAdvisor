@@ -2242,7 +2242,10 @@ AI_MODEL_CAPABILITIES_DEFAULT: dict = {
 AI_REASONING_LOW = "low"
 AI_REASONING_MEDIUM = "medium"
 AI_REASONING_HIGH = "high"
-AI_REASONING_OPTIONS = [AI_REASONING_LOW, AI_REASONING_MEDIUM, AI_REASONING_HIGH]
+# Issue #1336: medium is the highest reasoning effort offered (owner decision); a stored
+# "high" is migrated to "medium" (config entry v21). AI_REASONING_HIGH stays defined only so the
+# migration and old stored values can be recognized.
+AI_REASONING_OPTIONS = [AI_REASONING_LOW, AI_REASONING_MEDIUM]
 AI_REASONING_BUDGET_TOKENS = {
     AI_REASONING_LOW: 1024,
     AI_REASONING_MEDIUM: 4096,
@@ -2259,6 +2262,47 @@ AI_RETRY_BASE_DELAY_SECONDS = 1.0  # exponential backoff: 1s, 2s, 4s
 
 # Request history cap (metadata-only deque)
 AI_REQUEST_HISTORY_CAP = 50
+
+# ---------------------------------------------------------------------------
+# Bring-your-own AI provider via Home Assistant AI Task (Issue #1336)
+# ---------------------------------------------------------------------------
+# AI settings are install-wide: the same values are kept on every zone's config entry
+# (ai_settings_sync.py) and one shared AI client serves every zone.
+CONF_AI_PROVIDER = "ai_provider"
+AI_PROVIDER_HA_AI_TASK = "ha_ai_task"
+AI_PROVIDER_BUILTIN_CLAUDE = "builtin_claude"  # deprecated (Issue #1336), removed in a later release
+AI_PROVIDER_OPTIONS = [AI_PROVIDER_HA_AI_TASK, AI_PROVIDER_BUILTIN_CLAUDE]
+DEFAULT_AI_PROVIDER = AI_PROVIDER_HA_AI_TASK  # new installs; v21 migration keeps keyed installs on builtin_claude
+
+# The AI Task entity to use; "" = Home Assistant's preferred AI Task entity
+# (Settings > System > AI).
+CONF_AI_TASK_ENTITY = "ai_task_entity"
+DEFAULT_AI_TASK_ENTITY = ""
+AI_TASK_NAME = "Climate Advisor investigation"
+AI_TASK_TIMEOUT_SECONDS = 300  # ai_task sets no timeout of its own
+
+# Documented provider requirements (Issue #1336, docs/ai-integration.md):
+# input needs a context window of at least 16k tokens; output needs an output limit of at
+# least 8192 tokens at medium reasoning; a window that holds both (Ollama num_ctx) needs both.
+AI_REQUIRED_CONTEXT_TOKENS = 16384
+AI_REQUIRED_OUTPUT_TOKENS = 8192
+AI_REQUIRED_COMBINED_TOKENS = AI_REQUIRED_CONTEXT_TOKENS + AI_REQUIRED_OUTPUT_TOKENS  # 24576
+
+# Each zone's own AI values from before the install-wide unification (v21 migration),
+# kept only when they differed from the values chosen for the whole install, so no key or
+# setting is lost. Removed together with built-in Claude.
+AI_SETTINGS_BACKUP_KEY = "ai_settings_backup_1336"
+
+# Install-wide Repairs issues (fixed ids, like zone_resolution_ambiguous)
+ISSUE_BUILTIN_CLAUDE_DEPRECATED = "builtin_claude_deprecated"
+ISSUE_AI_SETTINGS_UNIFIED = "ai_settings_unified"
+
+# Stable error codes for AI failures the occupant is told about (frontend i18n keys)
+AI_ERROR_OUTPUT_LIMIT = "ai_output_limit"  # provider stopped at its output limit
+AI_ERROR_CONTEXT_LIMIT = "ai_context_limit"  # the prompt did not fit the model's context window
+AI_ERROR_NO_ENTITY = "ai_task_no_entity"  # no AI Task entity picked and no preferred one set
+AI_ERROR_PROVIDER = "ai_provider_error"  # any other provider failure
+AI_CUT_SHORT = "ai_report_cut_short"  # a reply that came back missing required sections
 
 # Investigation report history (Issue #82)
 INVESTIGATION_REPORT_HISTORY_CAP = 60

@@ -34,7 +34,13 @@ jobs:
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Workload identity federation: the job's GitHub OIDC token (id-token: write) is exchanged for a
+          # short-lived Anthropic access token, so no Claude credential is stored in the repo or its secrets.
+          # These are identifiers, not credentials; the federation rule decides which workflows may exchange.
+          anthropic_federation_rule_id: fdrl_01P4ZqjLfXnfTiQVQihCUZAd
+          anthropic_organization_id: 57f44af8-9979-4335-97d0-0230a761ca09
+          anthropic_service_account_id: svac_01217po5WfFdad84kSxqXQbc
+          anthropic_workspace_id: wrkspc_01BEPQrHwk2aMtjxDxxm3f82
 
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |

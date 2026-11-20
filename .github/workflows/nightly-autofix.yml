@@ -81,7 +81,11 @@ jobs:
         if: ${{ steps.find.outputs.issue }}
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Workload identity federation (see claude.yml): no stored Claude credential.
+          anthropic_federation_rule_id: fdrl_01P4ZqjLfXnfTiQVQihCUZAd
+          anthropic_organization_id: 57f44af8-9979-4335-97d0-0230a761ca09
+          anthropic_service_account_id: svac_01217po5WfFdad84kSxqXQbc
+          anthropic_workspace_id: wrkspc_01BEPQrHwk2aMtjxDxxm3f82
           additional_permissions: |
             actions: read
           claude_args: >-

@@ -37,7 +37,7 @@ A Home Assistant integration that runs your thermostat from the weather forecast
   - away / vacation / guest occupancy toggles;
   - time-of-use pre-conditioning ahead of high-cost periods (each schedule can be limited to changing only the cooling or only the heating setpoint, and switched on and off by an entity such as a peak-season helper);
   - a daily energy cost estimate: enter your energy rate and the heating and cooling power, and each day's record gets an estimated cost (left blank, nothing is assumed and the cost shows "—");
-  - an optional Claude-powered AI Investigator.
+  - an optional AI Investigator that runs on the AI provider you already use in Home Assistant (OpenAI, Google, Anthropic, Ollama, OpenRouter and others); see [AI Investigator](#ai-investigator).
 - **Learns your house, then plans with it.** A prediction engine learns how fast your home heats, cools, leaks heat and warms in the sun, and forecasts the indoor temperature ahead. The engine you choose (v4 by default) times pre-heating and pre-cooling, the ceiling guard, setbacks and the window close time; see [Prediction engines](#prediction-engines). Climate Advisor also learns your thermostat's own swing, and after two weeks of data it starts offering suggestions.
 - **One plan behind everything you read.** The "Next 24 hours" list, Your Next Action, Next Automation, the briefing (including its "Today's Steps") and the Analysis tab's plan for tomorrow all read the same plan, so they never disagree about when to open or close the windows or what Climate Advisor does next.
 - **Tonight in the bedroom (advice only).** Each evening it compares keeping the windows closed, opening them for a while, or running the whole-house or HVAC fan, and recommends one. It never opens a window or starts a fan for this advice. Predicted bedroom temperatures appear only once the v4 bedroom model is confident; until then the advice is in words.
@@ -131,7 +131,7 @@ Everything is editable afterwards under **Configure**. The options there also co
 - **Learning & Behavior:** the prediction and comparison engines, **Prefer Savings Over Comfort**, adaptive pre-heat and setback, and the optional energy rate, heating power and cooling power for the cost estimate;
 - **Sensors & Fan:** door/window sensors, the fan and the natural-ventilation soft start;
 - day-type thresholds;
-- AI settings (needs a Claude API key);
+- AI settings, which apply to every zone (see [AI Investigator](#ai-investigator));
 - GitHub settings, for submitting reports as issues.
 
 ### Thermostat requirements
@@ -142,9 +142,32 @@ Climate Advisor is the scheduler and the thermostat is the executor. Set the the
 - **Set holds to last until changed.** On an Ecobee: Hold Action → Until I change it.
 - **Single-mode systems:** heat-only and cool-only thermostats work, with Climate Advisor using the one mode the device has. These setups are less tested than heat-and-cool systems.
 
+### AI Investigator
+
+The optional AI Investigator reads what Climate Advisor did and why, and writes a report in your Home Assistant language. It uses the AI provider you set up in Home Assistant, so Climate Advisor keeps no key of its own. With a local model such as Ollama, your house data stays at home.
+
+1. **Add your AI provider to Home Assistant** under **Settings > Devices & services**, for example OpenAI, Google Generative AI, Anthropic, Ollama or OpenRouter, and give it an **AI Task** entity.
+2. **Set its limits** in that integration's AI Task options:
+   - max tokens at least **8192**, where the integration has this setting;
+   - reasoning (thinking effort) at **medium**, where it has one;
+   - for Ollama, a context window (`num_ctx`) of **32768**.
+
+   A smaller limit can cut a report short, and on Anthropic and OpenAI the whole report is then lost. Climate Advisor checks these limits where it can and warns you before a run, but it never stops you.
+3. **Choose it in Climate Advisor:** **Configure > AI settings**, pick the AI Task entity, or leave the field empty to use Home Assistant's preferred AI Task entity (**Settings > System > AI**). These settings apply to every zone.
+
+The report appears all at once when it is ready. Climate Advisor no longer shows the cost of an AI Task run; your provider's account shows usage and spending.
+
+**Already using Climate Advisor's built-in Claude?** It still works, but it is deprecated and will be removed in a later release. To move:
+
+1. Add Home Assistant's **Anthropic** integration with your API key, then add an **AI Task** to it.
+2. **Untick "Recommended model settings"** so you can set **max tokens to 8192** (the default is 3000, too small for a full report). Pick the same Claude model you use today and set thinking effort to **medium**.
+3. In Climate Advisor's AI settings, choose the new `ai_task.*` entity. The deprecation notice in AI settings and in **Settings > Repairs** then clears.
+
+Details: [ai-integration](docs/ai-integration.md), [moving from built-in Claude](docs/builtin-claude-deprecated.md).
+
 ### Multiple zones
 
-Each thermostat is its own zone: a separate config entry with its own learning, thermal model, dashboard data and settings. Nothing is shared between zones.
+Each thermostat is its own zone: a separate config entry with its own learning, thermal model, dashboard data and settings. The only thing shared between zones is the AI settings: they apply to the whole home, and saving them in one zone sets them in every zone.
 
 To add a zone, run **Add Integration → Climate Advisor** again for the next thermostat. With two or more zones:
 - the dashboard shows a zone selector;
@@ -171,7 +194,7 @@ Each zone creates **21 sensors** and **1 switch**, grouped under a device named 
 | Fan Status | Fan state, such as active, manual override or inactive |
 | Contact Sensors | Door/window summary, with per-sensor detail |
 | Indoor Temperature, Outdoor Temperature, Forecast High, Forecast Low | Current readings and today's forecast |
-| AI Status | AI feature state, usage and cost |
+| AI Status | AI feature state and usage, the same in every zone. Cost is shown only for built-in Claude |
 | **Automation** (switch) | Off means observe-only: no commands are sent |
 
 ## Services
@@ -217,7 +240,8 @@ The panel is backed by a REST API; see [rest-api](docs/rest-api.md).
 | Thermal model v3 | [thermal-model-v3-spec](docs/thermal-model-v3-spec.md) |
 | The plan behind Next 24 hours, Next Action and the briefing | [operation-timeline-spec](docs/operation-timeline-spec.md) |
 | Tonight in the bedroom | [night-strategy-spec](docs/night-strategy-spec.md) |
-| AI features | [ai-integration](docs/ai-integration.md) |
+| AI features (providers, requirements, limits) | [ai-integration](docs/ai-integration.md) |
+| Moving from built-in Claude to an AI Task provider | [builtin-claude-deprecated](docs/builtin-claude-deprecated.md) |
 | Release history | [CHANGELOG](CHANGELOG.md) |
 
 ## Contributing

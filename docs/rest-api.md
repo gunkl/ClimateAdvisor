@@ -7,9 +7,12 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What does api.py own and what does it explicitly not own? | It owns the HTTP view layer — routing, auth enforcement, input validation, and response serialisation. It does NOT own business logic; every action delegates to the coordinator or automation engine. | [Scope](#scope) |
-| How does authentication work and are there any unauthenticated endpoints? | All 26 views (24 in `api.py` `API_VIEWS`, `zones` in `api.py` `ZONELESS_VIEWS`, plus `settings_extra` in `dashboard_api.py` `DASHBOARD_VIEWS`) set `requires_auth = True`. A HA long-lived access token is required for every endpoint; no unauthenticated endpoints exist. | [Authentication](#authentication) |
+| How does authentication work and are there any unauthenticated endpoints? | All 27 views (25 in `api.py` `API_VIEWS`, including `ai_limits` since Issue #1336, `zones` in `api.py` `ZONELESS_VIEWS`, plus `settings_extra` in `dashboard_api.py` `DASHBOARD_VIEWS`) set `requires_auth = True`. A HA long-lived access token is required for every endpoint; no unauthenticated endpoints exist. | [Authentication](#authentication) |
 | Which config values are ever redacted and why? | Two fields are redacted: `ai_api_key` (via `"sensitive": True` in CONFIG_METADATA) and `notify_service` (hard-coded name check). Both return `"configured"` or `"not set"` — never the raw value. (`github_token` is not in `CONFIG_METADATA`, so it never appears in this view at all; diagnostics redacts it separately, Issue #1062.) | [Sensitive Field Redaction](#sensitive-field-redaction) |
 | What HTTP status codes does the API return and when? | 400 bad input, 403 feature disabled, 429 rate limit, 500 investigation failure, 503 coordinator/AI unavailable. Out-of-range numerics are silently clamped, not rejected. | [Error Handling](#error-handling) |
+| What does `GET /api/climate_advisor/ai_limits` return, and when is it called (Issue #1336)? | The chosen AI provider's readable limits against the requirements: `{provider, entity_id, integration, readable, checks: [{kind, setting, value, required, ok}], ok}`. `ok` is false only when a readable check fails; unreadable = `readable: false`, `checks: []`. The dashboard calls it before every investigation and warns (never blocks). | [GET ai_limits](#get-apiclimate_advisorai_limits-issue-1336) |
+| What did Issue #1336 add to the `ai_investigate` stream? | `key` (+ `params`) on every status event, `error_code` on error events, `cut_short` / `cut_short_code` on the done event; the non-streaming JSON result gets the same three. The protocol is otherwise unchanged. | [AI investigate stream fields](#ai-investigate-stream-fields-issue-1336) |
+| Why does every zone show the same `ai_status`? | AI settings are install-wide and one client serves every zone (Issue #1336), so `ai_status?zone=<any>` returns the same shared status: counters, circuit breaker and recent requests across all zones. Expected, not a zone-scoping bug. | [Endpoints](#get-endpoints) |
 | How does api.py read coordinator state and why does it sometimes bypass the coordinator cache? | Primary reads use `coordinator.data.get(...)` with safe defaults. Live HVAC state is read via `hass.states.get(climate_entity_id)` to guarantee freshness past the 30-minute update cycle. | [Coordinator Access Pattern](#coordinator-access-pattern) |
 | What security guardrails prevent sensitive data from leaking through the config or AI status endpoints? | `ClimateAdvisorConfigView` applies the two-case redaction rule. `ClimateAdvisorAIStatusView` calls `status.pop("api_key", None)` before serialising. Unknown suggestion-accept keys are applied in-memory only and never persisted to the HA config entry. | [Security Notes](#security-notes) |
 | How does a caller know an `event_log`/`activity_record` response doesn't cover the full requested window? | Both endpoints return `is_truncated` (bool) and `oldest_available` (ISO timestamp or null) alongside their normal payload, computed by comparing the oldest stored event against the requested window's cutoff. | [Event Log Truncation Signal](#event-log-truncation-signal) |
@@ -23,7 +26,7 @@
 ## Scope
 
 **Owns:**
-- HTTP view registration for the 24 `API_VIEWS` Climate Advisor REST endpoints (`__init__.py` registers `(*API_VIEWS, *DASHBOARD_VIEWS, *ZONELESS_VIEWS)` once, domain-wide; `dashboard_api.py` adds the 25th, `settings_extra`; `ZONELESS_VIEWS` the 26th, `zones`, Issue #1454)
+- HTTP view registration for the 25 `API_VIEWS` Climate Advisor REST endpoints (`ai_limits` added by Issue #1336) (`__init__.py` registers `(*API_VIEWS, *DASHBOARD_VIEWS, *ZONELESS_VIEWS)` once, domain-wide; `dashboard_api.py` adds the 26th, `settings_extra`; `ZONELESS_VIEWS` the 27th, `zones`, Issue #1454)
 - Auth enforcement (`requires_auth = True` on every view)
 - Input validation and HTTP error responses (400, 403, 429, 500, 503)
 - Response serialisation: field selection, display transforms, sensitive-field redaction
@@ -38,7 +41,7 @@
 
 ## Authentication
 
-All 26 view classes set `requires_auth = True`. HA handles token validation before the view handler is invoked. No endpoint is reachable without a valid HA long-lived access token. There is no per-endpoint permission model beyond HA authentication.
+All 27 view classes set `requires_auth = True`. HA handles token validation before the view handler is invoked. No endpoint is reachable without a valid HA long-lived access token. There is no per-endpoint permission model beyond HA authentication.
 
 ## Choosing a zone (`zone`)
 
@@ -69,7 +72,8 @@ The Repairs card ("Ambiguous zone selection") names the request (method, path, c
 | `/api/climate_advisor/automation_state` | Full automation engine debug state | Delegated to `coordinator.get_debug_state()` |
 | `/api/climate_advisor/learning` | Learning engine summary | `today_record`, `yesterday_record`, `tomorrow_plan`, `suggestions`, `compliance`, `comfort_range_low`, `comfort_range_high`, `unit` **Language (Issue #1341):** each `suggestions` item is `{key, text, text_msg}`; `text` is rendered in Home Assistant's language (`i18n.hass_language(hass)`, `generate_suggestions(lang=...)`), `text_msg` is the `Msg.to_wire()` form (`{key, params}`) the dashboard re-renders in the viewer's language. `key` and `text` are unchanged. **Units (Issue #1049):** `tomorrow_plan.expected_high` / `expected_low` are converted at this boundary into the configured `unit` (via `temperature.display_temp()`, on a copy; `coordinator.tomorrow_plan` stays internal °F), matching `comfort_range_*`; the frontend appends the unit symbol and does no conversion. |
 | `/api/climate_advisor/config` | Integration configuration | `settings` list of `{key, value, label, description, category[, unit][, time_unit]}` — sensitive values redacted; temperature settings carry `unit` (always the temperature symbol) and are converted to the user's unit (see [Config Display Transforms](#config-display-transforms)). Issue #1341: a time setting carries `time_unit` (`min` or `s`; the value is already in that unit) and never `unit`, so a client that appends `unit` to a value shows what it always did; each row also carries `label_msg` / `description_msg` and, for a value that is words, `value_msg` (the value as `Msg.to_wire()`): `configured` / `not set` / `N configured`, and the temperature-source rows (`indoor_temp_source`, `outdoor_temp_source`), whose message is `settings.temp_source.*` (label, entity and failure reason as typed `Code` / string params). An enum-like value (`primary_engine`, `fan_mode`, `temp_unit`, ...) stays its stored code in `value`; the dashboard words it from the catalog key `settings.enum.<key>.<value>` |
-| `/api/climate_advisor/ai_status` | AI client health and budget | `status` (api_key removed), `recent_requests` (last 10) |
+| `/api/climate_advisor/ai_status` | AI client health and budget. **The same shared status in every zone** since Issue #1336 (one client per install): counters, circuit breaker and recent requests cover all zones | `status` (api_key removed), `recent_requests` (last 10). On AI Task, cost and token figures are 0 |
+| `/api/climate_advisor/ai_limits` | The chosen AI provider's limits against the requirements, for the pre-run warning (Issue #1336, read-only) | `provider`, `entity_id`, `integration`, `readable`, `checks`, `ok` - see [below](#get-apiclimate_advisorai_limits-issue-1336) |
 | `/api/climate_advisor/investigation_reports` | AI investigator report history | Direct return from `coordinator.get_investigation_report_history()` |
 | `/api/climate_advisor/event_log` | Internal event log | `events`, `total`, `hours` — `hours` param silently clamped if out of range. `is_truncated`, `oldest_available` (Issue #432) — see [Event Log Truncation Signal](#event-log-truncation-signal) |
 | `/api/climate_advisor/engines` | Prediction engine status | `get_engine_status()` of the learning engine plus `unit` and (Issue #1230 R1) `v4` - see [Engines and debug keys](#engines-and-debug-keys-for-v4) |
@@ -181,9 +185,65 @@ Errors: 400 several zones loaded and no `zone`/`entry_id` given (body `{message,
 | `/api/climate_advisor/resume_from_pause` | Resume automation from door/window pause | `status`, `message`, `restored_mode` |
 | `/api/climate_advisor/cancel_fan_override` | Cancel active fan override | `status`, `message` |
 | `/api/climate_advisor/toggle_automation` | Enable or disable automation engine | `status`, `automation_enabled`, `message` |
-| `/api/climate_advisor/ai_investigate` | Run AI Investigator skill | Delegated — returns `coordinator.ai_skills.async_execute(...)` result dict |
+| `/api/climate_advisor/ai_investigate` | Run AI Investigator skill | Delegated — returns `coordinator.ai_skills.async_execute(...)` result dict, plus `error_code`, `cut_short`, `cut_short_code` (Issue #1336); the streaming form is SSE, see [AI investigate stream fields](#ai-investigate-stream-fields-issue-1336) |
 | `/api/climate_advisor/delete_report` | Delete a stored investigation report (`report_type: "investigation"`, `timestamp`) | `success`, `found`; 400 `invalid_json` / `missing_timestamp` / `invalid_type` |
 | `/api/climate_advisor/submit_github_issue` | Create a GitHub issue from a report (needs the GitHub repo + token configured; the token is never logged or returned) | `success`, `issue_url`, `issue_number`; or `success: false` with `error` (`not_configured`, `network_error`, `github_api_<status>`); 400 `invalid_json` / `missing_title` |
+
+### GET /api/climate_advisor/ai_limits (Issue #1336)
+
+**What the occupant experiences.** Before an investigation starts, the dashboard checks the
+chosen AI provider's settings. If the output limit or context window is too small, it lists
+what to raise and where, with *Run anyway* and *Cancel*. If the provider's limits can't be
+read, a one-line note says so and the run starts. Reading this changes nothing.
+
+`GET /api/climate_advisor/ai_limits?entry_id=<id>` (or `?zone=`). Auth required, like every
+view. Built by `ai_limits.async_read_limits(hass, config)`, the same reader the options
+flow's `ai_limits_warning` step uses. Response:
+
+```json
+{"provider": "ha_ai_task" | "builtin_claude",
+ "entity_id": "<resolved entity or null>",
+ "integration": "<domain or null>",
+ "readable": true | false,
+ "checks": [{"kind": "output" | "context" | "combined",
+             "setting": "max_tokens" | "num_ctx",
+             "value": 3000, "required": 8192, "ok": false}],
+ "ok": true | false}
+```
+
+| Field | Meaning |
+|---|---|
+| `provider` | The install's `ai_provider` |
+| `entity_id` | The AI Task entity used: `ai_task_entity`, or HA's preferred entity when that is empty; `null` when none resolves (or for `builtin_claude`) |
+| `integration` | The entity's integration domain (`anthropic`, `openai_conversation`, `google_generative_ai_conversation`, `ollama`, ...), or `null` |
+| `readable` | Whether Climate Advisor knows where this provider stores its limits |
+| `checks` | One entry per readable limit. `required` is `AI_REQUIRED_OUTPUT_TOKENS` (8192) for `output`, `AI_REQUIRED_CONTEXT_TOKENS` (16384) for `context`, `AI_REQUIRED_COMBINED_TOKENS` (24576) for `combined`. `value` is the stored setting, or the integration's default when it is absent |
+| `ok` | `false` only when a readable check fails. Unreadable means `readable: false` and `checks: []`, with `ok: true` |
+
+| Provider | `checks` |
+|---|---|
+| Anthropic, OpenAI | one `output` check on `max_tokens` (absent = 3000) |
+| Google | one `output` check on `max_tokens` (absent = 19400) |
+| Ollama | one `combined` check on `num_ctx` (absent = 8192) |
+| OpenRouter, Nabu Casa Cloud, custom | none (`readable: false`) |
+| `builtin_claude` | one `output` check on `ai_max_tokens` |
+
+Detail and sources: [AI Integration: provider limits](ai-integration.md#provider-limits-climate-advisor-can-read).
+
+### AI investigate stream fields (Issue #1336)
+
+The `ai_investigate` SSE protocol is unchanged except for three additions. The non-streaming
+JSON result gets the same `error_code`, `cut_short` and `cut_short_code`.
+
+| Event | Added field | Value |
+|---|---|---|
+| `{"type": "status", "text": ...}` | `key`, plus `params` if any | `ai.status_gathering`, `ai.status_sending` or `ai.status_provider`. The dashboard renders `key` through `frontend/i18n/ai/<lang>.json` and falls back to `text` |
+| `{"type": "error", "message": ...}` | `error_code` | `ai_output_limit`, `ai_context_limit`, `ai_task_no_entity`, `ai_provider_error`, or `null` |
+| `done` | `cut_short` (bool), and `cut_short_code: "ai_report_cut_short"` when true | `true` when `parse_investigation_response` shows any required section empty while `full_text` is non-empty, or when `truncated` is true |
+
+On AI Task the text arrives as one `text` event, then `stop` (no streaming deltas or
+thinking). Contracts: [ai-skills-spec.md](ai-skills-spec.md#cut-short-and-error-codes-issue-1336),
+[claude-api-spec.md](claude-api-spec.md#error-classification).
 
 ## Sensitive Field Redaction
 
@@ -242,7 +302,7 @@ Every occupant-facing prose field keeps its name and its meaning. It is rendered
 |---|---|
 | 400 | Invalid parameter, missing or invalid JSON field, JSON parse failure |
 | 403 | AI feature disabled in config, or investigator feature not enabled |
-| 429 | Claude API rate limit exceeded |
+| 429 | AI request limit exceeded (either provider) |
 | 500 | AI investigation skill returned a failure result |
 | 503 | Coordinator not yet loaded, or AI client unavailable |
 
@@ -280,6 +340,8 @@ Every occupant-facing prose field keeps its name and its meaning. It is rendered
 3. `notify_service` is never returned as a raw value — redacted by hard-coded name check independent of its metadata flags.
 4. Unknown config keys submitted via suggestion-accept are never persisted to the HA config entry — the allowlist is `CONFIG_METADATA.keys()`.
 5. All numeric range parameters are clamped, not rejected — no 400 is issued for an out-of-range numeric param.
+6. `ai_limits` never blocks anything and writes nothing; it only reads the chosen entity's registry entry and subentry options (Issue #1336, [boundary exception §3](HA-BOUNDARY-EXCEPTIONS.md#3-ai-task-generate-data-and-the-limit-lookup-issue-1336)).
+7. `ai_status` is install-wide: the same response for every zone (Issue #1336).
 
 ## Disclosure Path
 

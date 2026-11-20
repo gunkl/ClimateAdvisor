@@ -111,16 +111,19 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 - HA service calls to the `notify` domain — the user-configured notification service, plus `notify.send_email` for the email briefing
 - `turn_on` / `turn_off` on each zone's configured whole-house fan entity (`CONF_FAN_ENTITY`: the `fan.*` or `switch.*` entity chosen in setup) — no other service on it, and no other fan or switch entity
 - `weather.get_forecasts` (read-only) on each zone's configured weather entity
+- `ai_task.generate_data`, through the Python helper `ai_task.async_generate_data`, on the AI Task entity the owner picked, or on HA's preferred AI Task entity when none is picked; nothing else in `ai_task`. Read-only: that entity's entity-registry entry and its config subentry options, for the limit check. Approved by the owner 2026-11-20 (Issue #1336); see `docs/HA-BOUNDARY-EXCEPTIONS.md` §3 and `docs/ai-integration.md`
+- The Anthropic cloud API, called directly by the built-in Claude client with the owner's own API key (`claude_api.py`, `anthropic` package). Built-in Claude is deprecated (Issue #1336) and stays listed here until the release that removes it
 - Data files in the HA config root, and only these:
   - the per-zone files whose base names are listed in `const.py` `ENTRY_SCOPED_FILES`, the single source of truth (today: state, chart log, learning DB, forecast archive, v4 archive, v4 backtest, v4 model, AI investigation history). Each is stored per zone as `<stem>_<entry_id>.json` and deleted when the zone is deleted; `tests/test_zone_removal_cleanup.py` fails if the package writes a per-zone file that is not listed. The v4 backtest file is read-only to the integration (`tools/predict_backtest.py --publish` writes it)
   - the old one-per-install `climate_advisor_investigation_reports.json` (`INVESTIGATION_REPORTS_FILE`), only until it is split once into every zone's own copy and removed (Issue #1415)
   - the short-lived temp files the atomic writes of those files create and rename into place
-- Approved exceptions logged in `docs/HA-BOUNDARY-EXCEPTIONS.md` (today: the dev-only test integrations, which Climate Advisor's own code never touches)
+- Approved exceptions logged in `docs/HA-BOUNDARY-EXCEPTIONS.md` (today: the dev-only test integrations, which Climate Advisor's own code never touches, and the `ai_task` call above)
 
 **Everything else is OUT OF SCOPE.** This includes but is not limited to:
 - Modifying other integrations or their config
 - Writing to `configuration.yaml`, `automations.yaml`, `scripts.yaml`, or any other HA config file
-- Calling any HA service not listed above (e.g., `homeassistant.restart`, `input_boolean.turn_on`), or any service on an entity other than the configured thermostat, fan and weather entities
+- Calling any HA service not listed above (e.g., `homeassistant.restart`, `input_boolean.turn_on`, `ai_task.generate_image`, `conversation.process`), or any service on an entity other than the configured thermostat, fan, weather and AI Task entities
+- Writing anything to the AI provider's integration (its config entry, subentries or options), or reading more of it than the chosen entity's registry entry and that entity's subentry options. Climate Advisor never changes the provider's settings; it only reads the chosen entity's limits and tells the occupant which setting to raise
 - Creating files outside the integration directory other than the data files listed above. A new per-zone data file is added to `ENTRY_SCOPED_FILES`; any other new file in the config root is a boundary change and goes through the violation protocol below
 - Modifying HA add-on configurations
 - Deploying files outside `/config/custom_components/climate_advisor/` on the remote server

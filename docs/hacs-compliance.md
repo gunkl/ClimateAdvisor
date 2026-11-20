@@ -1,6 +1,6 @@
 # HACS Compliance Brief
 
-**Anchor:** `hacs-compliance` | **Tier:** 2 | **Status:** Current as of 2026-08-21
+**Anchor:** `hacs-compliance` | **Tier:** 2 | **Status:** Current as of 2026-11-20 (Issue #1336 manifest notes)
 
 This document captures all requirements for ClimateAdvisor to remain compliant with HACS
 (Home Assistant Community Store). ClimateAdvisor is in the HACS default store
@@ -39,11 +39,12 @@ any human reviewer sees the PR.
 | `codeowners` | Yes | `["@gunkl"]` | GitHub usernames of maintainers |
 | `config_flow` | Yes | `true` | All CA config is via config flow |
 | `dependencies` | Yes | `["weather", "climate", "http"]` | Required HA integrations |
+| `after_dependencies` | No | `["ai_task"]` | Issue #1336: load order only, so HA's AI Task is set up before Climate Advisor when the occupant uses it. Not a hard dependency: Climate Advisor runs without any AI provider. Do not move `ai_task` into `dependencies` |
 | `documentation` | Yes | GitHub repo URL | Must resolve to a real page |
 | `integration_type` | Yes | `"service"` | See section above — do not change |
-| `iot_class` | Yes | `"cloud_polling"` | Corrected from `local_polling` in Issue #543 — the HACS default-store reviewer flagged the original value because CA calls the Anthropic cloud API, not just local HA entities. Do not revert. |
+| `iot_class` | Yes | `"cloud_polling"` | Corrected from `local_polling` in Issue #543 — the HACS default-store reviewer flagged the original value because CA calls the Anthropic cloud API, not just local HA entities. Do not revert. Still correct after Issue #1336 moved the AI Investigator to HA's AI Task (any provider, including a local Ollama): the GitHub-issues context provider calls the cloud, and so does deprecated built-in Claude until it is removed. Keep `cloud_polling` after the removal too. |
 | `issue_tracker` | Yes | GitHub issues URL | Must resolve to real issues page |
-| `requirements` | Yes | `["anthropic>=0.49.0"]` | pip packages |
+| `requirements` | Yes | `["anthropic>=0.49.0"]` | pip packages. Needed only by deprecated built-in Claude (Issue #1336); dropped in the release that removes it. The AI Task path needs no package |
 | `version` | Yes | current semver | Must match `const.py VERSION` |
 
 ## hacs.json Required Fields
@@ -59,6 +60,8 @@ Minimum required: `name` field. CA's `hacs.json` also sets `render_readme`,
   "hide_default_branch": true
 }
 ```
+
+The 2026.3.0 minimum already covers AI Task (HA 2025.8) and the Anthropic integration's AI Task entities (HA 2025.12), so Issue #1336 needed no bump.
 
 **Rule:** `render_readme: true` means HACS renders `README.md` as the store page. The README
 must always look good and show accurate version information.

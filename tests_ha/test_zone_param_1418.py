@@ -86,14 +86,14 @@ async def test_zone_param_reaches_the_named_zone_and_only_unscoped_requests_rais
         assert _issue(hass) is None, "a zone-scoped request raised the ambiguous-zone card"
 
         # Two different zones named: refused, nothing changed in either zone.
-        before = {e.entry_id: hass.data[CA_DOMAIN][e.entry_id].automation_enabled for e in (zone1, upstairs, studio)}
+        before = {e.entry_id: e.runtime_data.automation_enabled for e in (zone1, upstairs, studio)}
         resp = await client.post(
             "/api/climate_advisor/toggle_automation",
             params={"zone": upstairs.entry_id, "entry_id": studio.entry_id},
         )
         assert resp.status == 400
         assert (await resp.json())["zone_selection_required"] is True
-        after = {e.entry_id: hass.data[CA_DOMAIN][e.entry_id].automation_enabled for e in (zone1, upstairs, studio)}
+        after = {e.entry_id: e.runtime_data.automation_enabled for e in (zone1, upstairs, studio)}
         assert after == before
 
         # A genuinely unscoped GET: first zone's data, and the card says which request and which zone.
@@ -109,7 +109,7 @@ async def test_zone_param_reaches_the_named_zone_and_only_unscoped_requests_rais
         resp = await client.post("/api/climate_advisor/toggle_automation")
         assert resp.status == 400
         assert "?zone=" in (await resp.json())["message"]
-        after = {e.entry_id: hass.data[CA_DOMAIN][e.entry_id].automation_enabled for e in (zone1, upstairs, studio)}
+        after = {e.entry_id: e.runtime_data.automation_enabled for e in (zone1, upstairs, studio)}
         assert after == before
         assert "refused" in (_issue(hass).translation_placeholders or {}).get("outcome", "")
     finally:

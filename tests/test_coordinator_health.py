@@ -52,6 +52,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed  # noqa: E402
 
 from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator  # noqa: E402
 from custom_components.climate_advisor.learning import LearningState  # noqa: E402
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 _FIXED_NOW = datetime(2026, 7, 11, 6, 35, 0, tzinfo=UTC)
 
@@ -388,9 +389,8 @@ class TestRestoreStateRestoresHealthFields:
 
 def _make_view_request(coordinator, climate_state=None):
     hass = MagicMock()
-    from custom_components.climate_advisor.const import DOMAIN
 
-    hass.data = {DOMAIN: {"entry1": coordinator}}
+    set_loaded_zones(hass, {"entry1": coordinator})
     hass.states.get.return_value = climate_state
     req = MagicMock()
     req.app = {"hass": hass}

@@ -23,6 +23,7 @@ from custom_components.climate_advisor import automation as auto  # noqa: E402
 from custom_components.climate_advisor import i18n  # noqa: E402
 from custom_components.climate_advisor.record_text import MsgText, msg_of  # noqa: E402
 from custom_components.climate_advisor.whf_safety_decision import WhfSafetyAction, WhfSafetyDecision  # noqa: E402
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 
 @pytest.fixture(autouse=True)
@@ -212,10 +213,9 @@ def test_the_unused_phrase_helpers_are_gone():
 
 # -- API ------------------------------------------------------------------------------------------------------------
 def _request(coordinator, hours: str | None = None) -> MagicMock:
-    from custom_components.climate_advisor.const import DOMAIN
 
     hass = MagicMock()
-    hass.data = {DOMAIN: {"entry1": coordinator}}
+    set_loaded_zones(hass, {"entry1": coordinator})
     hass.config.language = "fr"
     req = MagicMock()
     req.app = {"hass": hass}

@@ -91,7 +91,7 @@ def persist_accepted_changes(hass: HomeAssistant, coordinator: ClimateAdvisorCoo
     entry_changes = {k: v for k, v in changes.items() if k in CONFIG_METADATA}
     if not entry_changes:
         return
-    entry_id = next((eid for eid, c in hass.data.get(DOMAIN, {}).items() if c is coordinator), None)
+    entry_id = next((eid for eid, c in zone_registry.loaded_zones(hass).items() if c is coordinator), None)
     config_entry = hass.config_entries.async_get_entry(entry_id) if entry_id else None
     if config_entry:
         hass.config_entries.async_update_entry(config_entry, data={**config_entry.data, **entry_changes})

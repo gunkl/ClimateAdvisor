@@ -115,13 +115,10 @@ def bind_zone_for_executor(fn: Callable[..., Any]) -> Callable[..., Any]:
     return _wrapped
 
 
-# Deliberately NOT stored under hass.data[DOMAIN]: api.py's _get_coordinator()
-# resolves via zone_registry.get_coordinator()/get_default_coordinator()
-# (Issue #796 Gap 4), both of which assume every value in hass.data[DOMAIN]
-# IS a coordinator (e.g. `next(iter(entries.values()))`) — inserting this
-# handler into that same dict before the coordinator is added would make
-# every REST view resolve the log handler instead of the coordinator and
-# crash with AttributeError.
+# Install-wide (one handler for every zone), so it lives under its own hass.data
+# key, not on a config entry. Issue #1639: zones are no longer in hass.data at
+# all (each coordinator is its entry's runtime_data, see zone_registry.py); the
+# older reason, that hass.data[DOMAIN] held only coordinators, no longer applies.
 _HASS_DATA_KEY = "climate_advisor_log_capture"
 
 

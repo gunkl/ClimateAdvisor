@@ -77,10 +77,10 @@ def _entities(platform):
     coord = MagicMock()
     coord.config = {}
     coord.data = {}
-    hass = MagicMock()
-    hass.data = {DOMAIN: {"zone1": coord}}
+    entry = _entry()
+    entry.runtime_data = coord  # Issue #1639: the platforms read the zone's coordinator from its entry
     added: list = []
-    asyncio.run(platform.async_setup_entry(hass, _entry(), added.extend))
+    asyncio.run(platform.async_setup_entry(MagicMock(), entry, added.extend))
     return added
 
 

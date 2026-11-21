@@ -20,7 +20,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.climate_advisor import v4_shadow
-from custom_components.climate_advisor.const import DOMAIN, V4_FIT_HOUR, V4_FIT_MINUTE
+from custom_components.climate_advisor.const import V4_FIT_HOUR, V4_FIT_MINUTE
 from tests_ha.test_unload_cleanup import _setup_zone
 
 
@@ -66,7 +66,7 @@ async def test_nightly_timer_fits_the_zone_and_unload_leaves_nothing(
 ) -> None:
     engine = _install(monkeypatch)
     entry = await _setup_zone(hass, tmp_path)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     assert coordinator._v4_store.v4_model is None
 
     # The real 03:15 local timer fires the fit through HA's own scheduler.
@@ -99,7 +99,7 @@ async def test_unload_during_a_running_fit_drops_its_result_and_cancels_the_task
 ) -> None:
     engine = _install(monkeypatch)
     entry = await _setup_zone(hass, tmp_path)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
 
     engine.release.clear()  # the next fit blocks in the executor
     assert coordinator._v4_start_fit("nightly") is True
@@ -155,7 +155,7 @@ async def test_chart_data_carries_the_status_chart_v2_keys_and_the_engine_block(
 
     _install(monkeypatch)
     entry = await _setup_zone(hass, tmp_path)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     climate = coordinator.config["climate_entity"]
     coordinator._chart_log.append(
         hvac="idle",
@@ -213,7 +213,7 @@ async def test_a_ca_only_model_is_visible_on_the_chart_and_the_accuracy_page(
     """
     _install(monkeypatch)
     entry = await _setup_zone(hass, tmp_path)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     now = dt_util.now()
     for k in range(16, 0, -1):
         coordinator._chart_log.append(

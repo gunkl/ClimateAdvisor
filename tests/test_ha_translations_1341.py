@@ -97,8 +97,8 @@ def _sensor_entities() -> list:
     entry = MagicMock()
     entry.entry_id = "zone1"
     entry.title = "House"
+    entry.runtime_data = coordinator  # Issue #1639: the platforms read the zone's coordinator from its entry
     hass = MagicMock()
-    hass.data = {DOMAIN: {"zone1": coordinator}}
     added: list = []
     import asyncio
 

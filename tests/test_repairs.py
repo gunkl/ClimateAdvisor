@@ -421,30 +421,28 @@ class TestZoneResolutionAmbiguousIssue:
         assert len(_zone_resolution_ambiguous_calls(mock_create)) == 3
 
     def test_cleared_when_unloaded_back_to_one_zone(self):
-        from custom_components.climate_advisor import async_unload_entry
         from tools.sim_harness._loop import run_coro
-        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+        from tools.sim_harness.build_coordinator import async_unload_entry_like_ha, build_headless_multi_zone
 
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
         entry_to_unload = zones["zone_1"]["entry"]
 
         with patch("custom_components.climate_advisor.ir.async_delete_issue") as mock_delete:
-            run_coro(async_unload_entry(fake_hass, entry_to_unload))
+            run_coro(async_unload_entry_like_ha(fake_hass, entry_to_unload))
 
         calls = _zone_resolution_ambiguous_calls(mock_delete)
         assert len(calls) == 1, f"expected exactly one zone_resolution_ambiguous clear, got {calls}"
 
     def test_not_cleared_while_more_than_one_zone_remains(self):
         """Three zones, unload one: two remain — the issue must stay active, not clear."""
-        from custom_components.climate_advisor import async_unload_entry
         from tools.sim_harness._loop import run_coro
-        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+        from tools.sim_harness.build_coordinator import async_unload_entry_like_ha, build_headless_multi_zone
 
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=3)
         entry_to_unload = zones["zone_2"]["entry"]
 
         with patch("custom_components.climate_advisor.ir.async_delete_issue") as mock_delete:
-            run_coro(async_unload_entry(fake_hass, entry_to_unload))
+            run_coro(async_unload_entry_like_ha(fake_hass, entry_to_unload))
 
         assert _zone_resolution_ambiguous_calls(mock_delete) == []
 

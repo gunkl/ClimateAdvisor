@@ -35,10 +35,10 @@ from custom_components.climate_advisor.const import (
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
-    DOMAIN,
 )
 from custom_components.climate_advisor.engine_inputs import TouAvWindow  # noqa: E402
 from custom_components.climate_advisor.learning import DailyRecord
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 
 def _make_request(entry_id: str | None = None) -> MagicMock:
@@ -69,7 +69,7 @@ class TestGetCoordinator:
     def test_returns_coordinator_when_loaded(self):
         coord = MagicMock()
         hass = MagicMock()
-        hass.data = {DOMAIN: {"entry_1": coord}}
+        set_loaded_zones(hass, {"entry_1": coord})
         coordinator, ambiguous_refused = _get_coordinator(hass, _make_request())
         assert coordinator is coord
         assert ambiguous_refused is False
@@ -83,7 +83,7 @@ class TestGetCoordinator:
 
     def test_returns_none_when_domain_empty(self):
         hass = MagicMock()
-        hass.data = {DOMAIN: {}}
+        set_loaded_zones(hass, {})
         coordinator, ambiguous_refused = _get_coordinator(hass, _make_request())
         assert coordinator is None
         assert ambiguous_refused is False
@@ -457,7 +457,7 @@ class TestToggleAutomationView:
 
 def _make_view_request(coordinator, climate_state=None):
     hass = MagicMock()
-    hass.data = {DOMAIN: {"entry1": coordinator}}
+    set_loaded_zones(hass, {"entry1": coordinator})
     hass.states.get.return_value = climate_state
     req = MagicMock()
     req.app = {"hass": hass}
@@ -1122,7 +1122,7 @@ class TestCancelViewsGraceCancellation:
 
     def _make_request(self, coordinator) -> MagicMock:
         hass = MagicMock()
-        hass.data = {DOMAIN: {"entry1": coordinator}}
+        set_loaded_zones(hass, {"entry1": coordinator})
         hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
         req = MagicMock()
         req.app = {"hass": hass}
@@ -1274,7 +1274,7 @@ class TestEventLogAndActivityRecordTruncationSignal:
 
     def _make_request(self, coordinator, hours: str | None = None) -> MagicMock:
         hass = MagicMock()
-        hass.data = {DOMAIN: {"entry1": coordinator}}
+        set_loaded_zones(hass, {"entry1": coordinator})
         req = MagicMock()
         req.app = {"hass": hass}
         query = {"hours": hours} if hours is not None else {}
@@ -1423,7 +1423,7 @@ class TestIssue911ZoneScopedHandlers:
 
     def _make_request(self, coordinator) -> MagicMock:
         hass = MagicMock()
-        hass.data = {DOMAIN: {"entry1": coordinator}}
+        set_loaded_zones(hass, {"entry1": coordinator})
         req = MagicMock()
         req.app = {"hass": hass}
         req.query = {}
@@ -1558,7 +1558,8 @@ def test_briefing_view_renders_in_language_and_adds_msg_sibling():
         coordinator.zone_label = "z"
         coordinator._last_briefing = text
         coordinator._briefing_sent_today = False
-        hass = SimpleNamespace(config=SimpleNamespace(language=lang), data={DOMAIN: {"entry1": coordinator}})
+        hass = SimpleNamespace(config=SimpleNamespace(language=lang), data={}, config_entries=MagicMock())
+        set_loaded_zones(hass, {"entry1": coordinator})
         req = MagicMock()
         req.app = {"hass": hass}
         req.query = {}

@@ -41,6 +41,7 @@ from custom_components.climate_advisor.ai_skills_investigator import (  # noqa: 
 )
 from custom_components.climate_advisor.claude_api import ClaudeAPIClient  # noqa: E402
 from custom_components.climate_advisor.const import INVESTIGATION_REPORT_HISTORY_CAP  # noqa: E402
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -956,10 +957,9 @@ class TestInvestigatorRateLimit:
 
 
 def _make_investigate_request(coordinator: MagicMock, body: dict | None = None) -> MagicMock:
-    from custom_components.climate_advisor.const import DOMAIN
 
     hass = coordinator.hass if isinstance(coordinator.hass, MagicMock) else MagicMock()
-    hass.data = {DOMAIN: {"entry1": coordinator}}
+    set_loaded_zones(hass, {"entry1": coordinator})
 
     req = MagicMock()
     req.app = {"hass": hass}
@@ -980,11 +980,10 @@ async def _post_investigate(coordinator: MagicMock, body: dict | None = None):
 
 async def _get_investigation_reports(coordinator: MagicMock):
     from custom_components.climate_advisor.api import ClimateAdvisorInvestigationReportsView
-    from custom_components.climate_advisor.const import DOMAIN
 
     view = ClimateAdvisorInvestigationReportsView()
     hass = MagicMock()
-    hass.data = {DOMAIN: {"entry1": coordinator}}
+    set_loaded_zones(hass, {"entry1": coordinator})
     req = MagicMock()
     req.app = {"hass": hass}
     # Issue #796 Gap 4: _get_coordinator() reads request.query.get("entry_id").

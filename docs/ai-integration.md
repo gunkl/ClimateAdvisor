@@ -106,13 +106,13 @@ request limits count across all zones together.
   Values take effect on reload, like every other options section (Issue #573); reloading the
   edited zone refreshes the shared client.
 - **One shared client** lives in `hass.data[f"{DOMAIN}_ai"]` as
-  `{"client": ClaudeAPIClient, "skills": AISkillRegistry}`, outside `hass.data[DOMAIN]` so
-  the zone count and `zone_registry` lookups are unchanged. `coordinator.claude_client` and
+  `{"client": ClaudeAPIClient, "skills": AISkillRegistry}`, install-wide, so not on a config
+  entry (each zone's coordinator is its `entry.runtime_data`, Issue #1639). `coordinator.claude_client` and
   `coordinator.ai_skills` point at the shared objects, so callers don't change. It is created
   when `ai_settings_sync.is_ai_configured(entry.data)` (AI on, and a key for built-in Claude;
   AI Task can rely on HA's preferred entity). Each zone's setup or reload calls
   `client.update_config(...)` with its entry data. The last zone to unload removes it, in
-  the same `if not hass.data[DOMAIN]:` block that removes the panel.
+  the same `if not remaining:` block of `async_unload_entry()` that removes the panel.
 - **What stays per zone:** each investigation still sends only its own zone's context and
   saves to its own zone's report history (Issue #1415). The circuit breaker, the daily
   counters and `ai_status` are install-wide: every zone shows the same AI status.

@@ -11,12 +11,12 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from custom_components.climate_advisor.api import ClimateAdvisorSendBriefingView
-from custom_components.climate_advisor.const import DOMAIN
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 
 def _make_request(body: dict | None, coordinator) -> MagicMock:
     hass = MagicMock()
-    hass.data = {DOMAIN: {"entry1": coordinator}}
+    set_loaded_zones(hass, {"entry1": coordinator})
 
     req = MagicMock()
     req.app = {"hass": hass}

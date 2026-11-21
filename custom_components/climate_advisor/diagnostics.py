@@ -23,6 +23,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from . import zone_registry
 from .const import CONFIG_METADATA, DOMAIN, REDACTED_CONFIG_KEYS, VERSION
 from .diagnostic_snapshot import async_build_diagnostic_snapshot, recent_hvac_events
 
@@ -57,7 +58,7 @@ def _chart_data_summary(coordinator: Any) -> dict[str, Any]:
 
 async def async_get_diagnostics_payload(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     """Build the shared, redacted diagnostics payload for one config entry."""
-    zones = hass.data.get(DOMAIN, {})
+    zones = zone_registry.loaded_zones(hass)  # Issue #1639: runtime_data of every loaded zone
     coordinator = zones.get(entry.entry_id)
 
     all_entries = hass.config_entries.async_entries(DOMAIN)

@@ -250,10 +250,10 @@ class TestThresholdSensorShape:
 
         from custom_components.climate_advisor import sensor as sensor_mod
 
-        hass = MagicMock()
-        hass.data = {"climate_advisor": {"zone1": _coordinator()}}
+        entry = _entry()
+        entry.runtime_data = _coordinator()  # Issue #1639: the platform reads the zone's coordinator from its entry
         added: list = []
-        asyncio.run(sensor_mod.async_setup_entry(hass, _entry(), added.extend))
+        asyncio.run(sensor_mod.async_setup_entry(MagicMock(), entry, added.extend))
         names = [type(e).__name__ for e in added]
         assert names.count("ClimateAdvisorHeatThresholdSensor") == 1
         assert names.count("ClimateAdvisorCoolThresholdSensor") == 1

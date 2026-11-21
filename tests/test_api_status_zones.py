@@ -99,20 +99,19 @@ class TestZoneCountAndListThreeZones:
         expected_order = [fake_hass.config_entries.async_entries(DOMAIN)[i].entry_id for i in range(3)]
         assert [z["entry_id"] for z in body["zones"]] == expected_order
 
-    def test_dict_iteration_order_is_not_what_drives_the_result(self):
-        """Insert hass.data[DOMAIN] in a deliberately scrambled key order and
-        confirm the response order still follows async_entries(DOMAIN), not
-        dict order — proving list_zones() doesn't fall back to dict iteration.
+    def test_zone_that_is_not_loaded_is_not_listed_and_order_holds(self):
+        """Issue #1639: a zone is listed only while its config entry is LOADED (its coordinator is the entry's
+        runtime_data; there is no hass.data dict whose order could drift any more). A zone still setting up drops out
+        and the others keep the async_entries(DOMAIN) order.
         """
+        from tools.sim_harness.ha_stubs import ConfigEntryState
+
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=3)
-        loaded = fake_hass.data[DOMAIN]
-        scrambled = dict(reversed(list(loaded.items())))
-        loaded.clear()
-        loaded.update(scrambled)
+        zones["zone_1"]["entry"].state = ConfigEntryState.SETUP_IN_PROGRESS
 
         body = _get_status(fake_hass)
 
-        assert [z["title"] for z in body["zones"]] == ["Zone A", "Zone B", "Zone C"]
+        assert [z["title"] for z in body["zones"]] == ["Zone A", "Zone C"]
 
 
 class TestBootstrapNeverGuesses:
@@ -189,9 +188,9 @@ class TestZoneCountAfterTeardown:
 
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=3)
 
-        from custom_components.climate_advisor import async_unload_entry
+        from tools.sim_harness.build_coordinator import async_unload_entry_like_ha
 
-        run_coro(async_unload_entry(fake_hass, zones["zone_1"]["entry"]))
+        run_coro(async_unload_entry_like_ha(fake_hass, zones["zone_1"]["entry"]))
 
         body = _get_status(fake_hass)
         assert body["zone_count"] == 2

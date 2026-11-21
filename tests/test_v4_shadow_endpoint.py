@@ -16,9 +16,10 @@ import pytest
 
 from custom_components.climate_advisor import prediction_accuracy as pa
 from custom_components.climate_advisor.api import API_VIEWS, ClimateAdvisorPredictionAccuracyView
-from custom_components.climate_advisor.const import API_PREDICTION_ACCURACY, DOMAIN, V4_BACKTEST_FILE
+from custom_components.climate_advisor.const import API_PREDICTION_ACCURACY, V4_BACKTEST_FILE
 from custom_components.climate_advisor.storage_paths import resolve_entry_scoped_path
 from custom_components.climate_advisor.v4_archive import V4Archive, slot_key
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 _NOW = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
 _CLIMATE = "climate.hall"
@@ -291,7 +292,7 @@ def test_load_backtest_reads_the_zones_file_only(tmp_path: Path) -> None:
 
 def _request(coordinator, query: dict | None = None):
     hass = MagicMock()
-    hass.data = {DOMAIN: {"zoneA": coordinator} if coordinator is not None else {}}
+    set_loaded_zones(hass, {"zoneA": coordinator} if coordinator is not None else {})
     hass.config_entries.async_entries = MagicMock(return_value=[])
     ran_in_executor: list = []
 
@@ -379,14 +380,14 @@ def test_view_with_several_zones_and_no_zone_refuses_instead_of_guessing(
     view = ClimateAdvisorPredictionAccuracyView()
     a, b = _coordinator(tmp_path), _coordinator(tmp_path)
     req, ran = _request(a)
-    req.app["hass"].data = {DOMAIN: {"zoneA": a, "zoneB": b}}
+    set_loaded_zones(req.app["hass"], {"zoneA": a, "zoneB": b})
     resp = asyncio.run(view.get(req))
     assert resp.status == 400
     assert _payload(resp)["zone_selection_required"] is True
     assert ran == [] and not a.v4_accuracy_inputs.called and not b.v4_accuracy_inputs.called
     # With the zone named, the same install answers for that zone.
     req, _ = _request(a, {"zone": "zoneB"})
-    req.app["hass"].data = {DOMAIN: {"zoneA": a, "zoneB": b}}
+    set_loaded_zones(req.app["hass"], {"zoneA": a, "zoneB": b})
     resp = asyncio.run(view.get(req))
     assert resp.status == 200 and b.v4_accuracy_inputs.called and not a.v4_accuracy_inputs.called
 

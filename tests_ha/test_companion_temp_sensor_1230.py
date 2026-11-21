@@ -15,7 +15,6 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_registry import RegistryEntryDisabler
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.climate_advisor.const import DOMAIN
 from tests_ha.test_unload_cleanup import _seed_entry, _setup_zone
 
 TEMP = "sensor.santa_maria_hallway_current_temperature"
@@ -63,7 +62,7 @@ async def test_device_temperature_sensor_is_logged_in_a_chart_row(hass: HomeAssi
     climate_id = _seed_entry()["data"]["climate_entity"]
     _register(hass, climate_id)
     entry = await _setup_zone(hass, tmp_path)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
 
     for entity_id, value in ((TEMP, "68.54"), (HUMIDITY, "40"), (DISABLED_TEMP, "70"), (OTHER_DEVICE_TEMP, "75")):
         hass.states.async_set(entity_id, value, {"unit_of_measurement": "°F", "device_class": "temperature"})
@@ -95,7 +94,7 @@ async def test_control_reads_the_finer_sensor_and_falls_back(hass: HomeAssistant
     climate_id = _seed_entry()["data"]["climate_entity"]
     _register(hass, climate_id)
     entry = await _setup_zone(hass, tmp_path)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     assert coordinator._companion.entities == (TEMP,)
 
     climate_attrs = dict(hass.states.get(climate_id).attributes)

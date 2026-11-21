@@ -117,6 +117,7 @@ from .dashboard_api import DASHBOARD_VIEWS
 from .services import _resolve_zone_coordinator as _resolve_zone_coordinator  # re-exported for callers and tests
 from .services import async_setup_services
 from .storage_paths import remove_entry_scoped_files
+from .zone_registry import ClimateAdvisorConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -143,13 +144,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 # per-entry-derived, confirmed by reading api.py) and the dashboard panel
 # (PANEL_URL, PANEL_FRONTEND_PATH — both fixed module-level string constants
 # in const.py) are shared, domain-wide resources, not per-zone resources — the
-# same collision shape as ZONE_SCOPED_SERVICES above. Deliberately NOT stored
-# under hass.data[DOMAIN]: api.py's _get_coordinator() resolves via
-# zone_registry.get_coordinator()/get_default_coordinator() (Gap 4), both of
-# which assume every value in hass.data[DOMAIN] IS a coordinator (e.g.
-# `next(iter(entries.values()))`) — log_capture.py's identical comment
-# explains why inserting a non-coordinator value into that dict would still
-# break it today. Tracks whether this zone's async_setup_entry() call (or an
+# same collision shape as ZONE_SCOPED_SERVICES above. Install-wide, so under its
+# own hass.data key (Issue #1639: the zones themselves are entry.runtime_data,
+# see zone_registry.py). Tracks whether this zone's async_setup_entry() call (or an
 # earlier zone's) has already registered — or attempted and determined
 # already-registered — the shared views/panel, so a second-and-later zone's
 # setup never attempts a duplicate registration in the first place.
@@ -602,18 +599,11 @@ def _panel_asset_bytes(frontend_path: Path) -> bytes:
     return b"".join(chunks)
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: ClimateAdvisorConfigEntry) -> bool:
     """Set up Climate Advisor from a config entry."""
-    hass.data.setdefault(DOMAIN, {})
-
     # Issue #578: capture real WARNING+/ERROR log records for the AI
     # Investigator's "System Errors/Warnings" section (see log_capture.py).
-    # Stored outside hass.data[DOMAIN] on purpose — api.py's _get_coordinator()
-    # resolves via zone_registry.get_coordinator()/get_default_coordinator()
-    # (Gap 4), both of which assume every value in hass.data[DOMAIN] IS a
-    # coordinator, so putting this handler in that dict before the
-    # coordinator is added would make every REST view resolve the log
-    # handler instead of the coordinator.
+    # Install-wide, so under its own hass.data key (Issue #1639: the zones themselves are entry.runtime_data).
     log_capture.install(hass)
 
     # Issue #1341: read the translation catalogs (blocking file reads) once, in the executor, before
@@ -716,7 +706,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Perform initial data fetch
     await coordinator.async_config_entry_first_refresh()
 
-    hass.data[DOMAIN][entry.entry_id] = coordinator
+    # Issue #1639 (quality scale runtime-data): the zone's coordinator lives on its own config entry. Home Assistant
+    # drops it again when the entry unloads, and zone_registry lists a zone only while its entry is LOADED, so an
+    # unloaded, reloading or failed zone is never answered from a stale coordinator.
+    entry.runtime_data = coordinator
 
     # Issue #813 correction: this used to unconditionally raise
     # zone_resolution_ambiguous here just because a 2nd zone was loaded, with
@@ -765,7 +758,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Wrapped in zone_scope() so the warning below (and any future log line
         # added to this block) attributes to the zone whose async_setup_entry()
         # actually ran it, instead of falling back to "unknown zone" — the
-        # coordinator for this zone is already in hass.data[DOMAIN] as of the
+        # coordinator for this zone is already on entry.runtime_data as of the
         # assignment above, so its zone_label is fully resolvable here.
         with log_capture.zone_scope(coordinator.zone_label):
             try:
@@ -835,19 +828,23 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         _LOGGER.exception("Climate Advisor: could not clean up files of removed zone %s", entry.entry_id)
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: ClimateAdvisorConfigEntry) -> bool:
     """Unload a Climate Advisor config entry."""
-    coordinator: ClimateAdvisorCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
+    coordinator: ClimateAdvisorCoordinator = entry.runtime_data
     await coordinator.async_shutdown()
+    # Issue #1639: the zones still loaded besides this one. HA has already moved this entry to
+    # UNLOAD_IN_PROGRESS, so it is not in async_loaded_entries(); it is excluded by id as well, so the count does
+    # not depend on that ordering.
+    remaining = [eid for eid in zone_registry.loaded_zones(hass) if eid != entry.entry_id]
 
     # Issue #796 Transitional Safety Window: clear side of the
     # zone_resolution_ambiguous Repairs issue raised in async_setup_entry()
     # above. Its own standalone check against the <= 1 threshold — NOT nested
-    # inside the "if not hass.data[DOMAIN]:" block below, which only fires at
+    # inside the "if not remaining:" block below, which only fires at
     # exactly 0 remaining zones (a different threshold, used for the
     # domain-wide service/panel teardown that block owns). Going from 2 zones
     # to 1 must clear this issue even though that block doesn't fire yet.
-    if len(hass.data[DOMAIN]) <= 1:
+    if len(remaining) <= 1:
         ir.async_delete_issue(hass, DOMAIN, "zone_resolution_ambiguous")
         # Clear zone_registry's WARNING throttle state in lockstep with the
         # Repairs issue above — see reset_warning_state()'s docstring.
@@ -856,7 +853,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # The log-capture handler is process-wide, not per-entry — only detach it
     # once no other config entries (this integration is effectively single-
     # instance, but guard the general case) are still using it.
-    if not hass.data[DOMAIN]:
+    if not remaining:
         log_capture.uninstall(hass)
 
         # Issue #1637: the five zone-scoped services are NOT removed here any more. They are registered once

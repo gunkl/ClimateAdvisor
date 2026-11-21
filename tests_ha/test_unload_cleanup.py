@@ -124,7 +124,7 @@ async def test_unload_waits_for_a_coordinator_save_task(hass: HomeAssistant, tmp
     drains every task), so this test holds the save open and checks that unload waits.
     """
     entry = await _setup_zone(hass, tmp_path)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
 
     release = asyncio.Event()
 

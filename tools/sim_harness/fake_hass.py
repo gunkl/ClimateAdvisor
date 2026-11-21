@@ -638,6 +638,14 @@ class _FakeConfigEntries:
         """
         return list(self._entries.values())
 
+    def async_loaded_entries(self, domain: str) -> list[Any]:
+        """Real ``async_loaded_entries(domain)``: the registered entries whose state is LOADED, in stable order.
+
+        Issue #1639: zone_registry enumerates zones through this (each entry's coordinator is its
+        ``runtime_data``), so a zone that is setting up, unloading or failed is not listed, as in HA.
+        """
+        return [entry for entry in self._entries.values() if str(getattr(entry, "state", "")) == "loaded"]
+
     def async_update_entry(
         self,
         entry: Any,
@@ -766,11 +774,10 @@ class FakeHass:
         self.bus = _FakeBus(task_runner=self.async_create_task)
         self._scheduler: Any | None = None  # set via set_scheduler()
 
-        # Issue #796: real dict (not a MagicMock attribute) so
-        # hass.data.setdefault(DOMAIN, {}) / hass.data[DOMAIN][entry.entry_id]
-        # = coordinator (__init__.py:363,431) work unmodified when
-        # async_setup_entry() is driven directly, and so log_capture.install()/
-        # uninstall() (which read/write hass.data) work too.
+        # Issue #796: real dict (not a MagicMock attribute) so the install-wide
+        # keys (log_capture.install()/uninstall(), the panel flag, the shared AI
+        # client) work unmodified when async_setup_entry() is driven directly.
+        # Issue #1639: zone coordinators are NOT here; they are entry.runtime_data.
         self.data: dict[str, Any] = {}
         # False by default: async_setup_entry()'s `if hass.is_running:` branch
         # runs weather-entity validation synchronously, which needs

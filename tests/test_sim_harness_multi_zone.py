@@ -42,12 +42,13 @@ class TestBuildHeadlessMultiZone:
         for label, info in zones.items():
             assert info["coordinator"] is not None
             assert info["entry"].entry_id.startswith(label)
-            # Real async_setup_entry() populates hass.data[DOMAIN][entry_id] —
+            # Real async_setup_entry() sets entry.runtime_data (Issue #1639) —
             # confirm the harness's returned coordinator IS that same object,
-            # not a second hand-built stand-in.
-            from custom_components.climate_advisor.const import DOMAIN
+            # not a second hand-built stand-in, and that the entry is LOADED.
+            from custom_components.climate_advisor import zone_registry
 
-            assert fake_hass.data[DOMAIN][info["entry"].entry_id] is info["coordinator"]
+            assert info["entry"].runtime_data is info["coordinator"]
+            assert zone_registry.get_coordinator(fake_hass, info["entry"].entry_id) is info["coordinator"]
 
     def test_zones_do_not_share_mutable_harness_state(self):
         """Each zone must get its own coordinator/config/learning objects.

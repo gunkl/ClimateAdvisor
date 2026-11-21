@@ -22,9 +22,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
 from .coordinator import ClimateAdvisorCoordinator
 from .entity import ClimateAdvisorEntity
+from .zone_registry import ClimateAdvisorConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,11 +34,11 @@ PARALLEL_UPDATES = 0
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: ClimateAdvisorConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Climate Advisor switch entities from a config entry."""
-    coordinator: ClimateAdvisorCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ClimateAdvisorCoordinator = entry.runtime_data
     async_add_entities(
         [
             ClimateAdvisorAutomationSwitch(coordinator, entry),

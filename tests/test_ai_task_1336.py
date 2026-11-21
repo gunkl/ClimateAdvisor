@@ -35,9 +35,9 @@ from custom_components.climate_advisor.const import (
     AI_SETTINGS_BACKUP_KEY,
     AI_SHARED_DATA_KEY,
     AI_TASK_NAME,
-    DOMAIN,
     ISSUE_AI_SETTINGS_UNIFIED,
 )
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 _GEN = "custom_components.climate_advisor.claude_api._async_ai_task_generate"
 
@@ -328,7 +328,7 @@ class TestCutShort:
         )
         coord.async_store_investigation_report = AsyncMock()
         hass = MagicMock()
-        hass.data = {DOMAIN: {"entry1": coord}}
+        set_loaded_zones(hass, {"entry1": coord})
         req = MagicMock(app={"hass": hass}, headers={}, query={})
         req.json = AsyncMock(return_value={})
         resp = asyncio.run(ClimateAdvisorInvestigateView().post(req))

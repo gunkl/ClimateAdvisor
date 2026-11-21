@@ -59,7 +59,6 @@ from .const import (
     DAY_TYPE_HOT,
     DAY_TYPE_MILD,
     DAY_TYPE_WARM,
-    DOMAIN,
     OCCUPANCY_AWAY,
     OCCUPANCY_GUEST,
     OCCUPANCY_HOME,
@@ -68,6 +67,7 @@ from .const import (
 from .coordinator import ClimateAdvisorCoordinator
 from .entity import ClimateAdvisorEntity
 from .temperature import FAHRENHEIT, convert_delta, display_delta, display_temp
+from .zone_registry import ClimateAdvisorConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,11 +77,11 @@ PARALLEL_UPDATES = 0
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: ClimateAdvisorConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Climate Advisor sensors from a config entry."""
-    coordinator: ClimateAdvisorCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ClimateAdvisorCoordinator = entry.runtime_data
 
     entities = [
         ClimateAdvisorDayTypeSensor(coordinator, entry),

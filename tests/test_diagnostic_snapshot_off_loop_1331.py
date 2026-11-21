@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from custom_components.climate_advisor import diagnostic_snapshot
-from custom_components.climate_advisor.const import DOMAIN
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 _CQ = "custom_components.climate_advisor.diagnostic_snapshot.build_control_quality"
 
@@ -82,7 +82,7 @@ def _coordinator(threads: _Threads) -> MagicMock:
 
 def _hass(coord: MagicMock) -> MagicMock:
     hass = MagicMock()
-    hass.data = {DOMAIN: {"entry1": coord}}
+    set_loaded_zones(hass, {"entry1": coord})
     hass.states.get.return_value = None
 
     def _executor_job(fn, *args):

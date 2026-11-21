@@ -23,6 +23,7 @@ from custom_components.climate_advisor.api import (
 from custom_components.climate_advisor.const import API_ZONES, VERSION
 from custom_components.climate_advisor.dashboard_api import DASHBOARD_VIEWS
 from tools.sim_harness.build_coordinator import build_headless_multi_zone
+from tools.sim_harness.ha_stubs import ConfigEntryState
 
 
 def _request(fake_hass, query: dict | None = None, path: str = API_ZONES) -> MagicMock:
@@ -58,7 +59,8 @@ def test_zones_lists_every_zone_in_stable_order_and_raises_nothing():
 def test_zones_with_no_zone_loaded_is_an_empty_list_not_an_error():
     """Climate Advisor still starting: the dashboards read an empty list as "wait and retry"."""
     _zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
-    fake_hass.data.pop("climate_advisor", None)
+    for entry in fake_hass.config_entries.async_entries():  # Issue #1639: no entry has finished setting up yet
+        entry.state = ConfigEntryState.SETUP_IN_PROGRESS
     body = _get(ClimateAdvisorZonesView(), fake_hass)
     assert body["zones"] == [] and body["zone_count"] == 0
 

@@ -579,6 +579,17 @@ def _async_at_started(hass: Any, at_start_cb: Any) -> Any:
 EVENT_HOMEASSISTANT_STARTED = "homeassistant_started"
 
 
+class ConfigEntryState(_enum.StrEnum):
+    """The ``homeassistant.config_entries.ConfigEntryState`` values the harness models (Issue #1639)."""
+
+    NOT_LOADED = "not_loaded"
+    SETUP_IN_PROGRESS = "setup_in_progress"
+    LOADED = "loaded"
+    SETUP_ERROR = "setup_error"
+    UNLOAD_IN_PROGRESS = "unload_in_progress"
+    FAILED_UNLOAD = "failed_unload"
+
+
 class ConfigEntry:
     """Minimal stand-in for homeassistant.config_entries.ConfigEntry (Issue #796).
 
@@ -612,6 +623,10 @@ class ConfigEntry:
         self.version = version
         self.options = dict(options or {})
         self._on_unload: list[Any] = []
+        # Issue #1639: production lists a zone only while its entry is LOADED and keeps its coordinator on
+        # ``runtime_data``; the harness's setup/unload helpers (build_coordinator.py) move ``state`` and drop
+        # ``runtime_data`` the way HA's ConfigEntry.async_setup/async_unload do.
+        self.state = ConfigEntryState.NOT_LOADED
 
     def async_on_unload(self, func: Any) -> None:
         """Real ConfigEntry.async_on_unload: register a callback run when the entry unloads.
@@ -627,6 +642,28 @@ class ConfigEntry:
             result = self._on_unload.pop()()
             if inspect.isawaitable(result):
                 await result
+
+
+def set_loaded_zones(hass: Any, coordinators: dict[str, Any], *, titles: dict[str, str] | None = None) -> list[Any]:
+    """Make ``coordinators`` (``{entry_id: coordinator}``) the loaded zones of a MagicMock ``hass`` (Issue #1639).
+
+    Production finds zones through ``hass.config_entries.async_loaded_entries(DOMAIN)`` and each entry's
+    ``runtime_data`` (zone_registry.loaded_zones), no longer through ``hass.data[DOMAIN]``. This builds one LOADED
+    stub ``ConfigEntry`` per zone (title = ``titles[entry_id]`` or the entry_id), wires ``async_loaded_entries`` to
+    return them in the given order, and gives ``hass`` a real ``data`` dict when it has none (the install-wide keys,
+    such as zone_registry's warning throttle, need one). ``async_entries``/``async_get_entry`` are left as the test
+    set them. Returns the entries.
+    """
+    entries = []
+    for entry_id, coordinator in coordinators.items():
+        entry = ConfigEntry(entry_id=entry_id, title=(titles or {}).get(entry_id, entry_id))
+        entry.runtime_data = coordinator
+        entry.state = ConfigEntryState.LOADED
+        entries.append(entry)
+    if not isinstance(getattr(hass, "data", None), dict):
+        hass.data = {}
+    hass.config_entries.async_loaded_entries = lambda domain=None: list(entries)
+    return entries
 
 
 class _SensorStateClass(_enum.StrEnum):
@@ -769,6 +806,7 @@ def install_ha_stubs() -> None:
     # parity/forward-compatibility rather than because anything currently
     # evaluates it at import time.
     config_entries.ConfigEntry = ConfigEntry
+    config_entries.ConfigEntryState = ConfigEntryState
     config_entries.current_entry = _current_entry
 
     # Issue #1102 (F6): real-semantics async_at_started, and the STARTED event name it

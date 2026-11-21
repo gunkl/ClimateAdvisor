@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "للاحتفاظ بالدفء",
   "briefing.reopen_evening": "أعد فتح النوافذ حوالي {time} عندما يبرد هواء المساء من جديد{ac_off, select, yes {. وسأوقف المكيّف.} other {.}}",
   "briefing.steps": "📋 خطوات اليوم\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 اقتراحات بناءً على الأنماط الأخيرة\n----------------------------------------\n{items}\n\nللرد على هذه الاقتراحات، افتح لوحة معلومات Climate Advisor وانتقل إلى علامة تبويب AI.",
+  "briefing.suggestions": "💡 اقتراحات بناءً على الأنماط الأخيرة\n----------------------------------------\n{items}\n\nللرد على هذه الاقتراحات، افتح لوحة معلومات Climate Advisor وانتقل إلى علامة تبويب التحليل.",
   "briefing.title": "🏠 خطة مناخ منزلك لهذا اليوم",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  خفض وقت النوم: إبقاء خفض الغياب",

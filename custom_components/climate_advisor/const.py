@@ -151,7 +151,7 @@ CONF_EMAIL_ENTITY_HEALTH = "email_entity_health"  # Issue #805
 # briefing push/email — otherwise the same person gets one copy per zone. Gates only the
 # automatic/scheduled briefing_time trigger (push_briefing/email_briefing above still control
 # whether that one notifying zone sends push vs. email vs. both); manual "Send Briefing" from
-# the debug tab always sends regardless of this flag (deliberate manual test action).
+# the dashboard's Actions always sends regardless of this flag (deliberate manual test action).
 CONF_BRIEFING_NOTIFICATIONS_ENABLED = "briefing_notifications_enabled"
 
 # Startup coalescing window: suppress override detection for this many seconds after restart
@@ -811,7 +811,7 @@ PANEL_FRONTEND_PATH = "climate-advisor"
 # displays the new option with a proper description.
 CONFIG_METADATA = {
     "weather_entity": {
-        "label": "Weather Entity",
+        "label": "Weather Service",
         "description": (
             "The weather integration used for forecast data."
             " Determines day type classification and all downstream automation decisions."
@@ -819,14 +819,14 @@ CONFIG_METADATA = {
         "category": "core",
     },
     "climate_entity": {
-        "label": "Thermostat Entity",
+        "label": "Thermostat",
         "description": (
             "The climate entity Climate Advisor controls. All HVAC mode and temperature commands go to this entity."
         ),
         "category": "core",
     },
     "comfort_heat": {
-        "label": "Comfort Heat",
+        "label": "Comfortable Heating Temperature",
         "description": (
             "Target temperature when heating is active. Lowering saves energy but may feel cooler."
             " Used for morning wake-up and occupancy-home restores."
@@ -835,7 +835,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "comfort_cool": {
-        "label": "Comfort Cool",
+        "label": "Comfortable Cooling Temperature",
         "description": (
             "Target temperature when cooling is active. Raising saves energy but may feel warmer."
             " The economizer uses this as the threshold for window cooling decisions."
@@ -844,7 +844,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "setback_heat": {
-        "label": "Setback Heat",
+        "label": "Away Heating Temperature",
         "description": (
             "Temperature when heating and away from home."
             " Lower values save more energy but take longer to recover when you return."
@@ -853,7 +853,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "setback_cool": {
-        "label": "Setback Cool",
+        "label": "Away Cooling Temperature",
         "description": (
             "Temperature when cooling and away from home."
             " Higher values save more energy but take longer to cool down when you return."
@@ -862,7 +862,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "vacation_heat": {
-        "label": "Vacation Heat",
+        "label": "Vacation Heating Temperature",
         "description": (
             "Temperature when heating and on vacation (Issue #1347)."
             " When not set, vacation uses the away heat temperature minus 3°F."
@@ -871,7 +871,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "vacation_cool": {
-        "label": "Vacation Cool",
+        "label": "Vacation Cooling Temperature",
         "description": (
             "Temperature when cooling and on vacation (Issue #1347)."
             " When not set, vacation uses the away cool temperature plus 3°F."
@@ -894,7 +894,7 @@ CONFIG_METADATA = {
         "category": "core",
     },
     "outdoor_temp_source": {
-        "label": "Outdoor Temp Source",
+        "label": "Outdoor Temperature Source",
         "description": (
             "Where outdoor temperature is read from:"
             " the weather service, a dedicated sensor, or an input_number helper. The Settings value also"
@@ -904,7 +904,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_source_label",
     },
     "indoor_temp_source": {
-        "label": "Indoor Temp Source",
+        "label": "Indoor Temperature Source",
         "description": (
             "Where indoor temperature is read from:"
             " the thermostat's built-in sensor, a dedicated sensor, or an input_number helper."
@@ -967,7 +967,7 @@ CONFIG_METADATA = {
         "category": "sensors",
     },
     "sensor_polarity_inverted": {
-        "label": "Sensor Polarity Inverted",
+        "label": "Invert Sensor Polarity",
         "description": (
             "Enable if your sensors report 'off' when open (some reed switches work this way)."
             " Incorrect polarity means HVAC pauses when doors are closed."
@@ -975,7 +975,7 @@ CONFIG_METADATA = {
         "category": "sensors",
     },
     "sensor_debounce_seconds": {
-        "label": "Sensor Debounce (minutes)",
+        "label": "Sensor Debounce Delay",
         "time_unit": "min",
         "description": (
             "How long a door/window sensor's state must hold steady before Climate Advisor acts on"
@@ -989,7 +989,7 @@ CONFIG_METADATA = {
         "default": DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     },
     "manual_grace_seconds": {
-        "label": "Manual Grace Period (minutes)",
+        "label": "Manual Change Pause",
         "time_unit": "min",
         "description": (
             "After you manually change the thermostat — either the HVAC mode or the target temperature —"
@@ -1006,7 +1006,7 @@ CONFIG_METADATA = {
         "category": "notifications",
     },
     "automation_grace_seconds": {
-        "label": "Automation Grace Period (minutes)",
+        "label": "Automated Change Cooldown",
         "time_unit": "min",
         "description": (
             "After Climate Advisor resumes HVAC (all doors/windows closed),"
@@ -1022,7 +1022,7 @@ CONFIG_METADATA = {
         "category": "notifications",
     },
     "override_confirm_seconds": {
-        "label": "Override Confirmation Delay (minutes)",
+        "label": "Override Confirmation Delay",
         "time_unit": "min",
         "description": (
             "Time between system changes and confirmation of manual override."
@@ -1044,7 +1044,7 @@ CONFIG_METADATA = {
         "category": "fan",
     },
     "hvac_fan_restrict_mode": {
-        "label": "HVAC Fan Mode Restriction",
+        "label": "HVAC Fan Restriction",
         "description": (
             "Restricts when the HVAC fan (thermostat blower circulation) is allowed to run,"
             " based on which HVAC mode last ran. Does not affect the whole-house fan."
@@ -1057,7 +1057,7 @@ CONFIG_METADATA = {
         "default": DEFAULT_HVAC_FAN_RESTRICT_MODE,
     },
     "nat_vent_soft_start_enabled": {
-        "label": "Nat-Vent Soft-Start (Purge Mode)",
+        "label": "Nat-Vent Soft-Start",
         "description": (
             "When enabled, the whole-house fan may start at outdoor/indoor temperature parity"
             " (not waiting for outdoor to be measurably cooler) once today's outdoor temperature"
@@ -1099,7 +1099,7 @@ CONFIG_METADATA = {
         "category": "fan",
     },
     "fan_state_feedback": {
-        "label": "Fan state feedback reliable",
+        "label": "Fan State Feedback Reliable",
         "description": (
             "Turn ON if your fan entity or state sensor reports actual motor state "
             "(not just the last command sent). Leave OFF if you're not sure — CA will "
@@ -1161,7 +1161,7 @@ CONFIG_METADATA = {
         "category": "occupancy",
     },
     "welcome_home_debounce_seconds": {
-        "label": "Welcome Home Quiet Period (minutes)",
+        "label": "Welcome Home Quiet Period",
         "time_unit": "min",
         "description": (
             "Minimum time between welcome home notifications. If someone leaves and returns"
@@ -1172,7 +1172,7 @@ CONFIG_METADATA = {
         "default": DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     },
     "wake_time": {
-        "label": "Wake Time",
+        "label": "Wake-up Time",
         "description": (
             "When morning comfort temperatures are restored."
             " Earlier times mean the house is comfortable when you get up but use more energy overnight."
@@ -1180,14 +1180,14 @@ CONFIG_METADATA = {
         "category": "schedule",
     },
     "sleep_time": {
-        "label": "Sleep Time",
+        "label": "Bedtime",
         "description": (
             "When bedtime temperatures take effect. The system transitions to your sleep temperatures at this time."
         ),
         "category": "schedule",
     },
     "sleep_heat": {
-        "label": "Sleep Temperature (Heat)",
+        "label": "Sleep Heating Temperature",
         "description": (
             "Target temperature during sleep hours when you are home."
             " Independent from your away setback — use this to stay warmer at night"
@@ -1197,7 +1197,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "sleep_cool": {
-        "label": "Sleep Temperature (Cool)",
+        "label": "Sleep Cooling Temperature",
         "description": (
             "Target temperature during sleep hours when you are home."
             " Independent from your away setback — use this to stay cooler at night"
@@ -1207,7 +1207,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "briefing_time": {
-        "label": "Briefing Time",
+        "label": "Daily Briefing Time",
         "description": (
             "When the daily climate briefing is generated and sent."
             " Should be before wake_time so you see it when you get up."
@@ -1237,7 +1237,7 @@ CONFIG_METADATA = {
         "default": DEFAULT_SHADOW_ENGINE,
     },
     "learning_enabled": {
-        "label": "Learning Engine",
+        "label": "Enable Learning & Suggestions",
         "description": (
             "When enabled, Climate Advisor tracks patterns"
             " (manual overrides, window compliance, runtime) and generates adaptive suggestions over time."
@@ -1262,25 +1262,25 @@ CONFIG_METADATA = {
         ),
     },
     "min_preheat_minutes": {
-        "label": "Minimum Pre-heat Time (min)",
+        "label": "Minimum Pre-heat Time",
         "time_unit": "min",
         "description": "Shortest pre-heat window the system will ever schedule.",
         "category": "advanced",
     },
     "max_preheat_minutes": {
-        "label": "Maximum Pre-heat Time (min)",
+        "label": "Maximum Pre-heat Time",
         "time_unit": "min",
         "description": "Longest pre-heat window the system will ever schedule.",
         "category": "advanced",
     },
     "default_preheat_minutes": {
-        "label": "Default Pre-heat Time (min)",
+        "label": "Default Pre-heat Time",
         "time_unit": "min",
         "description": "Pre-heat duration used before enough observations are collected.",
         "category": "advanced",
     },
     "default_tou_lead_minutes": {
-        "label": "Default TOU Pre-conditioning Lead Time (min)",
+        "label": "TOU Pre-conditioning Lead Time",
         "time_unit": "min",
         "description": (
             "How long before a scheduled high-cost period the system starts pre-conditioning,"
@@ -1289,7 +1289,7 @@ CONFIG_METADATA = {
         "category": "advanced",
     },
     "energy_rate": {
-        "label": "Energy Rate (per kWh)",
+        "label": "Energy Rate",
         "description": (
             "What a kilowatt-hour costs you, in your own currency. Optional: with the heating and cooling"
             " power below it lets the Analysis tab estimate each day's cost. Left blank, no cost is shown."
@@ -1298,18 +1298,18 @@ CONFIG_METADATA = {
         "no_default": True,
     },
     "heat_power_kw": {
-        "label": "Heating Power (kW)",
+        "label": "Heating Power",
         "description": (
-            "Average electrical power your heating draws while it runs (check the nameplate or a smart plug)."
+            "Average electrical power your heating draws while it runs (in kW; check the nameplate or a smart plug)."
             " Optional: used with the energy rate to estimate daily cost. Left blank, no cost is shown."
         ),
         "category": "advanced",
         "no_default": True,
     },
     "cool_power_kw": {
-        "label": "Cooling Power (kW)",
+        "label": "Cooling Power",
         "description": (
-            "Average electrical power your cooling draws while it runs (check the nameplate or a smart plug)."
+            "Average electrical power your cooling draws while it runs (in kW; check the nameplate or a smart plug)."
             " Optional: used with the energy rate to estimate daily cost. Left blank, no cost is shown."
         ),
         "category": "advanced",
@@ -1327,7 +1327,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_delta",
     },
     "comfort_mode_switch_min_interval_s": {
-        "label": "Minimum Time Between Heat/Cool Switches (sec)",
+        "label": "Heat/Cool Switch Interval",
         "time_unit": "s",
         "description": (
             "Minimum wait between routine heat/cool switches, to prevent rapid back-and-forth. A real breach"
@@ -1336,7 +1336,7 @@ CONFIG_METADATA = {
         "category": "advanced",
     },
     "comfort_deadband_hot_f": {
-        "label": "Comfort Edge Overshoot Tolerance — Hot Days",
+        "label": "Hot Day Overshoot Tolerance",
         "description": (
             "On a hot day: how many degrees past a comfort edge the house may go, right after the opposite"
             " mode ran (within the Recent Run Window), before the opposite mode is switched on. On a hot day"
@@ -1348,7 +1348,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_delta",
     },
     "comfort_deadband_warm_f": {
-        "label": "Comfort Edge Overshoot Tolerance — Warm Days",
+        "label": "Warm Day Overshoot Tolerance",
         "description": (
             "On a warm day: how many degrees past a comfort edge the house may go, right after the opposite"
             " mode ran (within the Recent Run Window), before the opposite mode is switched on. On a warm day"
@@ -1360,7 +1360,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_delta",
     },
     "comfort_deadband_mild_f": {
-        "label": "Comfort Edge Overshoot Tolerance — Mild Days",
+        "label": "Mild Day Overshoot Tolerance",
         "description": (
             "On a mild or off-classified day: how many degrees past a comfort edge the house may go, right"
             " after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched"
@@ -1372,7 +1372,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_delta",
     },
     "comfort_deadband_cool_f": {
-        "label": "Comfort Edge Overshoot Tolerance — Cool Days",
+        "label": "Cool Day Overshoot Tolerance",
         "description": (
             "On a cool day: how many degrees past a comfort edge the house may go, right after the opposite"
             " mode ran (within the Recent Run Window), before the opposite mode is switched on. On a cool day"
@@ -1384,7 +1384,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_delta",
     },
     "comfort_deadband_cold_f": {
-        "label": "Comfort Edge Overshoot Tolerance — Cold Days",
+        "label": "Cold Day Overshoot Tolerance",
         "description": (
             "On a cold day: how many degrees past a comfort edge the house may go, right after the opposite"
             " mode ran (within the Recent Run Window), before the opposite mode is switched on. On a cold day"
@@ -1396,7 +1396,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_delta",
     },
     "comfort_family_recency_window_min": {
-        "label": "Recent Run Window (min)",
+        "label": "Recent Run Window",
         "time_unit": "min",
         "description": (
             'How long the heat or cool side counts as having "recently run" (equipment that actually ran,'
@@ -1408,7 +1408,7 @@ CONFIG_METADATA = {
         "category": "advanced",
     },
     "aggressive_savings": {
-        "label": "Prefer Savings Over Comfort",
+        "label": "Prefer savings over comfort",
         "description": (
             "When enabled, favors energy savings: the economizer skips AC-assisted cooling"
             " (ventilation only when windows open), and setbacks may be more aggressive."
@@ -1417,7 +1417,7 @@ CONFIG_METADATA = {
         "category": "advanced",
     },
     "threshold_hot": {
-        "label": "Hot Day Threshold",
+        "label": "Hot day threshold",
         "description": (
             "Days whose forecast high is at or above this temperature are classified as Hot. Default: 85°F / 29°C."
         ),
@@ -1425,7 +1425,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "threshold_warm": {
-        "label": "Warm Day Threshold",
+        "label": "Warm day threshold",
         "description": (
             "Days whose forecast high is at or above this temperature (but below Hot) are"
             " classified as Warm. Default: 75°F / 24°C."
@@ -1434,7 +1434,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "threshold_mild": {
-        "label": "Mild Day Threshold",
+        "label": "Mild day threshold",
         "description": (
             "Days whose forecast high is at or above this temperature (but below Warm) are"
             " classified as Mild. Default: 60°F / 16°C."
@@ -1443,7 +1443,7 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "threshold_cool": {
-        "label": "Cool Day Threshold",
+        "label": "Cool day threshold",
         "description": (
             "Days whose forecast high is at or above this temperature (but below Mild) are"
             " classified as Cool; below is Cold. Default: 45°F / 7°C."
@@ -1452,11 +1452,11 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "briefing_notifications_enabled": {
-        "label": "Send Daily Briefing Notifications (This Zone)",
+        "label": "Daily Briefing Notifications",
         "description": (
             "On a multi-zone install, only one zone should send the scheduled daily briefing"
             " push/email — otherwise you get one copy per zone. Turn this ON for exactly one"
-            " zone. Manually clicking Send Briefing on the debug tab always sends, even when"
+            " zone. Using Send briefing under Actions on the dashboard always sends, even when"
             " this is off."
         ),
         "category": "notifications",
@@ -1487,7 +1487,7 @@ CONFIG_METADATA = {
         "category": "notifications",
     },
     "email_briefing": {
-        "label": "Email: Full Daily Briefing",
+        "label": "Email: Daily Briefing",
         "description": "Send the full daily briefing via email with complete forecast and plan details.",
         "category": "notifications",
     },
@@ -1497,12 +1497,12 @@ CONFIG_METADATA = {
         "category": "notifications",
     },
     "email_grace_expired": {
-        "label": "Email: Grace Period Expired",
+        "label": "Email: Grace Expired",
         "description": "Send an email when a grace period expires and normal sensor behavior resumes.",
         "category": "notifications",
     },
     "email_grace_repause": {
-        "label": "Email: Re-paused",
+        "label": "Email: HVAC Re-paused",
         "description": "Email when HVAC is re-paused because a door/window is still open after grace.",
         "category": "notifications",
     },
@@ -1572,21 +1572,21 @@ CONFIG_METADATA = {
         "category": "ai_settings",
     },
     "ai_max_tokens": {
-        "label": "Max Response Length (tokens)",
+        "label": "Maximum Response Length",
         "description": (
             "Maximum length of AI responses in tokens. Higher values allow more detailed analysis but cost more."
         ),
         "category": "ai_settings",
     },
     "ai_temperature": {
-        "label": "Creativity (temperature)",
+        "label": "Creativity",
         "description": (
             "Controls randomness in AI responses. 0 = deterministic, 1.0 = most creative. 0.3 recommended for analysis."
         ),
         "category": "ai_settings",
     },
     "ai_monthly_budget": {
-        "label": "Monthly Budget Cap ($)",
+        "label": "Monthly Budget Cap",
         "description": (
             "Maximum estimated monthly spend in USD. Set to 0 for no limit. AI features pause when budget is reached."
         ),

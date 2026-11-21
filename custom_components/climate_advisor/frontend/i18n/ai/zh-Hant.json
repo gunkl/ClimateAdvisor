@@ -1,5 +1,7 @@
 {
   "ai.limits.advice": "請在 Home Assistant 中該整合的設定裡調高此值。若仍要執行，報告可能不完整或失敗。",
+  "ai.limits.builtin_place": "Climate Advisor 的 AI 設定",
+  "ai.limits.builtin_setting": "最大回應長度",
   "ai.limits.cancel": "取消",
   "ai.limits.cancelled": "已取消調查。",
   "ai.limits.check": "{kind, select, output {輸出上限} context {上下文視窗} other {合併上下文視窗（輸入與輸出）}}：{integration} 中的 {setting} 為 {value}，至少需要 {required}。",

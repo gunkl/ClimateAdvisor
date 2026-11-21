@@ -364,7 +364,7 @@
           "email_entity_health": "E-mail: entiteit niet gevonden"
         },
         "data_description": {
-          "briefing_notifications_enabled": "Bij een installatie met meerdere zones moet slechts één zone de geplande dagelijkse briefing als push/e-mail versturen — anders ontvang je een kopie per zone. Zet dit AAN voor precies één zone. Handmatig klikken op Briefing versturen op het debug-tabblad verstuurt altijd, ook als dit uit staat.",
+          "briefing_notifications_enabled": "Bij een installatie met meerdere zones moet slechts één zone de geplande dagelijkse briefing als push/e-mail versturen — anders ontvang je een kopie per zone. Zet dit AAN voor precies één zone. „Briefing versturen” onder „Acties” op het dashboard verstuurt altijd, ook als dit uit staat.",
           "push_briefing": "Stuur elke ochtend een korte TLDR-briefing naar je telefoon.",
           "push_door_window_pause": "Stuur een pushnotificatie als de HVAC wordt gepauzeerd doordat een deur of raam te lang open staat.",
           "push_occupancy_home": "Stuur een pushnotificatie als iemand thuiskomt en de comforttemperatuur wordt hersteld.",

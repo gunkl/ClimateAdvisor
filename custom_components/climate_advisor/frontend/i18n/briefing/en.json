@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "to trap the warmth",
   "briefing.reopen_evening": "Reopen windows around {time} when the evening air cools back down{ac_off, select, yes { — I'll turn off the AC.} other {.}}",
   "briefing.steps": "📋 Today's Steps\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 Suggestions Based on Recent Patterns\n----------------------------------------\n{items}\n\nTo respond to these suggestions, open the Climate Advisor dashboard and visit the AI tab.",
+  "briefing.suggestions": "💡 Suggestions Based on Recent Patterns\n----------------------------------------\n{items}\n\nTo respond to these suggestions, open the Climate Advisor dashboard and visit the Analysis tab.",
   "briefing.title": "🏠 Your Home Climate Plan for Today",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  Bedtime Setback: away setback held",

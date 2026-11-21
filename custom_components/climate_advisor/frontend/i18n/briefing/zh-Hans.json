@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "为了留住暖意",
   "briefing.reopen_evening": "大约{time}，傍晚空气重新变凉时请再次打开窗户{ac_off, select, yes {——我会关闭空调。} other {。}}",
   "briefing.steps": "📋 今日步骤\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 基于近期规律的建议\n----------------------------------------\n{items}\n\n如需回应这些建议，请打开Climate Advisor仪表板并访问AI选项卡。",
+  "briefing.suggestions": "💡 基于近期规律的建议\n----------------------------------------\n{items}\n\n如需回应这些建议，请打开Climate Advisor仪表板并访问“分析”选项卡。",
   "briefing.title": "🏠 您今日的家居气候计划",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  就寝节能：保持离家节能设置",

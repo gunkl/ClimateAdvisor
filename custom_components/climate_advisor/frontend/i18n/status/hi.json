@@ -10,7 +10,7 @@
   "status.auto.nat_vent": "प्राकृतिक वेंटिलेशन",
   "status.auto.nat_vent_soft_start": "प्राकृतिक वेंटिलेशन — सॉफ्ट स्टार्ट (हवा निकासी)",
   "status.auto.override_pending": "मैन्युअल बदलाव लंबित (पुष्टि हो रही है...)",
-  "status.auto.override_stuck": "मैन्युअल बदलाव (अटका हुआ — डिबग टैब देखें)",
+  "status.auto.override_stuck": "मैन्युअल बदलाव (अटका हुआ — डीबग टैब देखें)",
   "status.auto.paused_away": "रुका हुआ — बाहर (खिड़कियाँ बंद होने पर फिर शुरू होगा){grace}",
   "status.auto.paused_door_window": "रुका हुआ — दरवाज़ा/खिड़की खुली है{grace}",
   "status.auto.paused_vacation": "रुका हुआ — छुट्टी (खिड़कियाँ बंद होने पर फिर शुरू होगा){grace}",

@@ -1997,7 +1997,7 @@
         html += `<div class="settings-group"><h3>${catLabel}</h3>`;
         items.forEach(s => {
           const displayValue = s.value == null ? '<span style="color:var(--text-secondary)">not set</span>'
-            : escapeHtml(String(s.value)) + (s.unit ? escapeHtml(s.unit) : '');
+            : escapeHtml(String(s.value)) + (s.unit ? escapeHtml(s.unit) : s.time_unit ? ' ' + escapeHtml(s.time_unit) : '');
           html += `
             <div class="setting-row">
               <div class="setting-info">
@@ -2227,11 +2227,14 @@
   // an unreadable one a one-line note, and a failed request runs silently. The check only ever warns.
   const _AI_REQ = { output: 8192, context: 16384, combined: 24576 }; // const.AI_REQUIRED_*
   let _aiLastLimits = null;
-  function _aiIntegration(l) { return (l && l.integration) || (l && l.provider === 'builtin_claude' ? 'climate_advisor' : '—'); }
+  // Issue #1660: built-in Claude's limit is the "Maximum Response Length" field in AI settings, named as shown.
+  function _aiBuiltin(l) { return !!l && l.provider === 'builtin_claude'; }
+  function _aiIntegration(l) { return _aiBuiltin(l) ? "Climate Advisor's AI settings" : ((l && l.integration) || '—'); }
+  function _aiSetting(l, c) { return _aiBuiltin(l) ? 'Maximum Response Length' : (c.setting || ''); }
   function _aiFailedChecks(l) { return (l && Array.isArray(l.checks) ? l.checks : []).filter((c) => c && c.ok === false); }
   function _aiCheckLine(l, c) {
     const kind = c.kind === 'output' ? 'Output limit' : c.kind === 'context' ? 'Context window' : 'Combined context window (input and output)';
-    return kind + ': ' + (c.setting || '') + ' in ' + _aiIntegration(l) + ' is ' + Number(c.value || 0).toLocaleString('en')
+    return kind + ': ' + _aiSetting(l, c) + ' in ' + _aiIntegration(l) + ' is ' + Number(c.value || 0).toLocaleString('en')
       + '; it needs at least ' + Number(c.required || 0).toLocaleString('en') + '.';
   }
   function _aiNotice(code) {
@@ -2243,7 +2246,7 @@
     if (code === 'ai_report_cut_short') {
       const c = _aiFailedChecks(_aiLastLimits)[0];
       return 'The report came back cut short: some sections are missing. ' + (c
-        ? 'Raise ' + (c.setting || '') + ' in ' + _aiIntegration(_aiLastLimits) + ' to at least ' + n(c.required || _AI_REQ.output) + ', then run it again.'
+        ? 'Raise ' + _aiSetting(_aiLastLimits, c) + ' in ' + _aiIntegration(_aiLastLimits) + ' to at least ' + n(c.required || _AI_REQ.output) + ', then run it again.'
         : "Raise the AI provider's output limit to at least " + n(_AI_REQ.output) + " tokens in that integration's settings, then run it again.");
     }
     return null;
@@ -2380,7 +2383,7 @@
             status.textContent = result.truncated_empty
               ? '⚠ Model produced no visible output despite using the full response budget. Increasing max response length may not help — try a different reasoning effort or model.'
               : result.truncated
-              ? '⚠ Report truncated — hit max response length. Increase ‘Investigator Max Response Length’ in AI settings and re-run.'
+              ? '⚠ Report truncated — hit max response length. Increase ‘Maximum Response Length’ in AI settings and re-run.'
               : 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
             loadUnifiedHistory();
             break;
@@ -2401,7 +2404,7 @@
 
     } catch (err) {
       const hint = err.message.toLowerCase().includes('not enabled')
-        ? ' \u2014 enable it in Home Assistant \u2192 Settings \u2192 Integrations \u2192 Climate Advisor \u2192 Configure \u2192 AI Settings'
+        ? ' \u2014 enable it in Home Assistant \u2192 Settings \u2192 Devices & services \u2192 Climate Advisor \u2192 Configure \u2192 AI settings'
         : '';
       status.textContent = 'Error: ' + err.message + hint;
       if (content) content.innerHTML = _aiNoticeHtml(err.errorCode);
@@ -2504,7 +2507,7 @@
         + '⚠ Model produced no visible output despite using the full response budget. Increasing max response length may not help — try a different reasoning effort or model.</div>'
       : result.truncated
       ? '<div style="background:var(--warning);color:#000;font-size:0.82rem;padding:6px 10px;border-radius:4px;margin-bottom:8px;">'
-        + '⚠ Report truncated — hit max response length. Increase ‘Investigator Max Response Length’ in AI settings and re-run.</div>'
+        + '⚠ Report truncated — hit max response length. Increase ‘Maximum Response Length’ in AI settings and re-run.</div>'
       : '';
     const data = result.data || {};
     const sourceLabel = result.source === 'fallback'

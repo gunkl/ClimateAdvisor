@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "sıcaklığı içeride tutmak için",
   "briefing.reopen_evening": "Akşam havası serinleyince, {time} civarında pencereleri yeniden açın{ac_off, select, yes { — klimayı kapatacağım.} other {.}}",
   "briefing.steps": "📋 Bugünün adımları\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 Son örüntülere dayalı öneriler\n----------------------------------------\n{items}\n\nBu önerilere yanıt vermek için Climate Advisor panosunu açın ve AI sekmesine gidin.",
+  "briefing.suggestions": "💡 Son örüntülere dayalı öneriler\n----------------------------------------\n{items}\n\nBu önerilere yanıt vermek için Climate Advisor panosunu açın ve Analiz sekmesine gidin.",
   "briefing.title": "🏠 Bugün için ev iklim planınız",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  Gece düşürme: evde yokken ayarı korunuyor",

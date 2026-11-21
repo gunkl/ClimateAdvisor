@@ -1072,7 +1072,7 @@ The override confirmation delay is a debounce window between detecting a thermos
 
 | Constant | Config key | Default | Label |
 |---|---|---|---|
-| `CONF_OVERRIDE_CONFIRM_PERIOD` | `"override_confirm_seconds"` | `600` s (10 min) | "Override Confirmation Delay (minutes)" |
+| `CONF_OVERRIDE_CONFIRM_PERIOD` | `"override_confirm_seconds"` | `600` s (10 min) | "Override Confirmation Delay" |
 
 Set `override_confirm_seconds = 0` to confirm overrides immediately — the `_confirm_override()` path is taken synchronously with no pending window.
 

@@ -93,8 +93,6 @@ SUGGESTION_KEYS = frozenset(
         "low_window_compliance",
         "frequent_overrides",
         "short_departures",
-        "comfort_violations",
-        "frequent_door_pauses",
         "thermal_model_ready",
         "forecast_bias_significant",
         "high_runtime_mild_days",
@@ -2698,51 +2696,9 @@ class LearningEngine:
                     )
                 )
 
-        # --- Pattern: Comfort violations (too cold/hot despite automation) ---
-        violation_days = [r for r in non_vacation if r.get("comfort_violations_minutes", 0) > 30]
-        if len(violation_days) > 5:
-            suggestion_key = "comfort_violations"
-            if suggestion_key not in recently_dismissed and suggestion_key not in recently_accepted_or_incorrect:
-                pairs.append(
-                    (
-                        suggestion_key,
-                        i18n.Msg("learning.suggestion.comfort_violations", days=len(violation_days)),
-                    )
-                )
-
-        # --- Pattern: Door/window pauses happening frequently ---
-        pause_total = sum(r.get("door_window_pause_events", 0) for r in non_vacation)
-        if pause_total > 20:
-            suggestion_key = "frequent_door_pauses"
-            if suggestion_key not in recently_dismissed and suggestion_key not in recently_accepted_or_incorrect:
-                # Aggregate per-sensor pause data across 14-day window
-                sensor_totals: dict[str, int] = {}
-                for r in non_vacation:
-                    for sensor, count in r.get("door_pause_by_sensor", {}).items():
-                        sensor_totals[sensor] = sensor_totals.get(sensor, 0) + count
-
-                if sensor_totals:
-                    top_sensor = max(sensor_totals, key=sensor_totals.get)  # type: ignore[arg-type]
-                    top_count = sensor_totals[top_sensor]
-                    top_name = top_sensor.replace("_", " ").title()
-                    pairs.append(
-                        (
-                            suggestion_key,
-                            i18n.Msg(
-                                "learning.suggestion.frequent_door_pauses_sensor",
-                                count=pause_total,
-                                sensor=top_name,
-                                top_count=top_count,
-                            ),
-                        )
-                    )
-                else:
-                    pairs.append(
-                        (
-                            suggestion_key,
-                            i18n.Msg("learning.suggestion.frequent_door_pauses", count=pause_total),
-                        )
-                    )
+        # Issue #1652 (owner decision): no comfort_violations or frequent_door_pauses suggestion. Learning never
+        # proposes a longer door/window pause or milder away temperatures; a stored record naming either key
+        # (dismissed list, settings history, suggestion_sent) is simply ignored.
 
         # Design note: thermal_model_ready and forecast_bias_significant are
         # informational one-time suggestions included in the daily briefing.
@@ -2823,64 +2779,28 @@ class LearningEngine:
         _LOGGER.info("Suggestion feedback recorded — key=%s verdict=%s", suggestion_key, verdict)
 
     def accept_suggestion(self, suggestion_key: str) -> dict[str, Any]:
-        """Accept a suggestion and return the config changes to apply.
+        """Acknowledge a suggestion: record it, so the learner holds it back for 30 days. Changes no setting.
 
-        Returns:
-            Dict of configuration changes the coordinator should apply.
+        Issue #1652 (owner decision): every suggestion is advice. Before, each key mapped to a "setting change" that
+        no code read, so Accept looked like it changed something and did not. Returns ``{}`` (kept so callers and
+        automations that read the result keep working).
         """
-        # This is a placeholder — in a full implementation, each suggestion key
-        # maps to a specific set of config changes.
-        changes: dict[str, Any] = {}
-        # Issue #874: tracked separately from `changes` so informational-only keys
-        # (below) don't fall through to the "not recognized" WARNING — they ARE
-        # recognized, they just have no config change to apply.
-        recognized = True
-
-        if suggestion_key == "low_window_compliance":
-            changes["disable_window_recommendations"] = True
-        elif suggestion_key == "frequent_overrides":
-            changes["request_setpoint_analysis"] = True
-        elif suggestion_key == "short_departures":
-            changes["occupancy_setback_minutes"] = 5
-        elif suggestion_key == "comfort_violations":
-            changes["setback_modifier"] = 2  # Less aggressive setback
-            changes["morning_preheat_offset_minutes"] = 15  # Start earlier
-        elif suggestion_key == "frequent_door_pauses":
-            changes["door_pause_seconds"] = 300  # Extend to 5 minutes
-        elif suggestion_key in ("thermal_model_ready", "forecast_bias_significant", "high_runtime_mild_days"):
-            pass  # informational-only / no single deterministic config change
+        if suggestion_key in SUGGESTION_KEYS:
+            _LOGGER.info("Learning suggestion acknowledged — key=%s (advice only, no setting changes)", suggestion_key)
         else:
-            recognized = False
-
-        if changes:
-            _LOGGER.info(
-                "Learning suggestion accepted — key=%s, changes=%s",
-                suggestion_key,
-                changes,
-            )
-        elif recognized:
-            _LOGGER.info(
-                "Learning suggestion accepted — key=%s, no automatic config change available",
-                suggestion_key,
-            )
-        else:
-            _LOGGER.warning(
-                "Suggestion key %r not recognized — no changes applied",
-                suggestion_key,
-            )
-
+            _LOGGER.warning("Suggestion key %r not recognized — nothing recorded", suggestion_key)
+            return {}
         self._state.settings_history.append(
             {
                 "timestamp": datetime.now().isoformat(),
                 "suggestion": suggestion_key,
-                "changes": changes,
+                "changes": {},
             }
         )
         # Cap to prevent unbounded growth
         if len(self._state.settings_history) > 200:
             self._state.settings_history = self._state.settings_history[-200:]
-
-        return changes
+        return {}
 
     def reset(self, scope: str = "all") -> None:
         """Reset learning data for the given scope.

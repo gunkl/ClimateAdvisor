@@ -70,6 +70,7 @@ from datetime import datetime
 from enum import Enum
 
 from . import i18n
+from .code_words import family_w
 from .const import DAY_TYPE_COLD, DAY_TYPE_COOL, DAY_TYPE_HOT, DAY_TYPE_WARM
 from .record_text import MsgText
 
@@ -208,7 +209,7 @@ def _settling_hold(
         target_family=current,
         reason=_reason(
             "reason_cf_settling_guard",
-            current=str(current),
+            current=family_w(str(current)),
             ran=f"{ran:.0f}",
             window=f"{inputs.recency_window_min:.0f}",
             zone=zone,

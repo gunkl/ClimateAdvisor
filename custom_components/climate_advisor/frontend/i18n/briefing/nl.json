@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "om de warmte vast te houden",
   "briefing.reopen_evening": "Open de ramen weer rond {time}, wanneer de avondlucht afkoelt{ac_off, select, yes { — dan zet ik de airco uit.} other {.}}",
   "briefing.steps": "📋 Stappen voor vandaag\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 Suggesties op basis van recente patronen\n----------------------------------------\n{items}\n\nOm op deze suggesties te reageren, open je het Climate Advisor-dashboard en ga je naar het tabblad AI.",
+  "briefing.suggestions": "💡 Suggesties op basis van recente patronen\n----------------------------------------\n{items}\n\nOm op deze suggesties te reageren, open je het Climate Advisor-dashboard en ga je naar het tabblad Analyse.",
   "briefing.title": "🏠 Je klimaatplan voor vandaag",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  Nachtverlaging: afwezigheidsverlaging blijft",

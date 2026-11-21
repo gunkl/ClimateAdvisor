@@ -1,14 +1,11 @@
 {
   "learning.override_detail": "주로 {direction, select, up {올리는} other {내리는}} 방향으로 약 {delta}",
   "learning.override_detail_peak": "주로 {direction, select, up {올리는} other {내리는}} 방향으로 약 {delta}, 대개 {hour}:00경",
-  "learning.suggestion.comfort_violations": "최근 14일 중 {days}일 동안 집이 쾌적 온도 범위를 30분 넘게 벗어났습니다. 절약 온도의 강도를 낮추시겠습니까, 아니면 아침 예열을 더 일찍 시작하시겠습니까?",
   "learning.suggestion.forecast_bias_significant": "사용 중인 날씨 서비스가 이 지역의 최고 기온을 실제보다 꾸준히 약 {delta} {direction, select, higher {높게} other {낮게}} 예보하는 것을 확인했습니다. 예보 정확도를 높이기 위해 보정을 적용하고 있으며, 덕분에 예열과 사전 냉방이 지역 조건을 반영합니다.",
-  "learning.suggestion.frequent_door_pauses": "최근 2주 동안 문이나 창문이 열려 있어 냉난방이 {count, plural, other {#회}} 일시 정지되었습니다. 특정 문이 주된 원인이라면 그 문의 일시 정지 지연 시간을 늘리시겠습니까, 아니면 모니터링에서 제외하시겠습니까?",
-  "learning.suggestion.frequent_door_pauses_sensor": "최근 2주 동안 문이나 창문이 열려 있어 냉난방이 {count, plural, other {#회}} 일시 정지되었습니다. {sensor}이(가) 가장 자주 원인이었습니다({top_count, plural, other {#회}}). 이 센서의 일시 정지 지연 시간을 늘리시겠습니까, 아니면 모니터링에서 제외하시겠습니까?",
-  "learning.suggestion.frequent_overrides": "최근 2주 동안 온도 조절기를 {count, plural, other {#회}} 수동으로 변경하셨습니다({detail}). Climate Advisor가 쾌적 온도 설정을 조정하거나 예약된 온도 상승을 추가하도록 하시겠습니까?",
-  "learning.suggestion.frequent_overrides_no_detail": "최근 2주 동안 온도 조절기를 {count, plural, other {#회}} 수동으로 변경하셨습니다. 쾌적 온도 설정이 선호와 맞지 않을 수 있습니다. Climate Advisor가 수동 변경 패턴을 분석하고 새 설정을 제안하도록 하시겠습니까?",
-  "learning.suggestion.high_runtime_mild_days": "온화하고 따뜻한 날에 냉난방이 평균 {minutes, plural, other {#분}} 동작하여 예상보다 길었습니다. 문이나 창문이 열려 있거나 설정 온도가 너무 엄격할 수 있습니다. 문/창문 센서를 더 추가하시겠습니까, 아니면 온화한 날의 설정 온도를 조정하시겠습니까?",
-  "learning.suggestion.low_window_compliance": "창문 열기를 권장한 최근 {days, plural, other {#일}} 동안 실제로 창문을 연 시간은 {compliance, number, ::percent}에 그쳤습니다. Climate Advisor가 창문 관련 동작 제안을 중단하고 최적화된 일정으로 냉난방에 맡기도록 하시겠습니까? 에너지를 조금 더 사용하지만 직접 하실 일은 없습니다.",
-  "learning.suggestion.short_departures": "30~45분 정도의 짧은 외출이 잦아, 돌아오기 전에 절약 온도가 적용되기에는 시간이 부족합니다. 이런 짧은 외출에는 절약 온도 지연 시간을 15분에서 5분으로 줄이시겠습니까, 아니면 1시간 미만 외출에는 절약 온도를 건너뛰시겠습니까?",
+  "learning.suggestion.frequent_overrides": "최근 2주 동안 온도 조절기를 {count, plural, other {#회}} 수동으로 변경하셨습니다({detail}). 쾌적 온도가 맞지 않으시면 설정에서 변경하세요. Climate Advisor가 새 온도를 유지합니다.",
+  "learning.suggestion.frequent_overrides_no_detail": "최근 2주 동안 온도 조절기를 {count, plural, other {#회}} 수동으로 변경하셨습니다. 쾌적 온도 설정이 선호와 맞지 않을 수 있습니다. 설정에서 변경할 수 있습니다.",
+  "learning.suggestion.high_runtime_mild_days": "온화하고 따뜻한 날에 냉난방이 평균 {minutes, plural, other {#분}} 동작하여 예상보다 길었습니다. 센서가 없는 문이나 창문이 열려 있거나, 쾌적 온도 범위가 집에 필요한 것보다 좁을 수 있습니다. 문/창문 센서를 추가하거나 설정에서 쾌적 온도 범위를 넓히면 도움이 될 수 있습니다.",
+  "learning.suggestion.low_window_compliance": "창문 열기를 권장한 최근 {days, plural, other {#일}} 동안 실제로 창문을 연 시간은 {compliance, number, ::percent}에 그쳤습니다. 창문을 여는 것은 선택 사항입니다. 창문을 닫아 두어도 Climate Advisor가 냉난방으로 쾌적함을 유지하며, 에너지를 조금 더 사용합니다.",
+  "learning.suggestion.short_departures": "30~45분 정도의 짧은 외출이 잦아, 돌아오기 전에 절약 온도가 적용되기에는 시간이 부족합니다. 귀가 시 집이 서늘하거나 더운 것이 불편하시면 설정에서 외출 온도를 완화하세요.",
   "learning.suggestion.thermal_model_ready": "집의 단열 특성과 냉난방 성능을 추정할 만큼 열 관측 데이터가 충분히 모였습니다. 예열 시점과 취침 시 절약 온도는 집의 실제 동작에 맞춰 자동으로 조정됩니다. 별도로 하실 일은 없습니다."
 }

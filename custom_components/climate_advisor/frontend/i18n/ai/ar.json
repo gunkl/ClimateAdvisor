@@ -1,5 +1,7 @@
 {
   "ai.limits.advice": "ارفعها في إعدادات ذلك التكامل في Home Assistant. إذا شغّلته رغم ذلك، فقد يأتي التقرير مقتطعًا أو يفشل.",
+  "ai.limits.builtin_place": "إعدادات الذكاء الاصطناعي في Climate Advisor",
+  "ai.limits.builtin_setting": "الحد الأقصى لطول الرد",
   "ai.limits.cancel": "إلغاء",
   "ai.limits.cancelled": "تم إلغاء التحقيق.",
   "ai.limits.check": "{kind, select, output {حد الإخراج} context {نافذة السياق} other {نافذة السياق المشتركة (الإدخال والإخراج)}}: قيمة {setting} في {integration} هي {value}، والمطلوب {required} على الأقل.",

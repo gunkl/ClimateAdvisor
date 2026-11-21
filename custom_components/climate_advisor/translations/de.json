@@ -364,7 +364,7 @@
           "email_entity_health": "E-Mail: Entität nicht gefunden"
         },
         "data_description": {
-          "briefing_notifications_enabled": "Bei mehreren Zonen sollte nur eine Zone das geplante Tagesbriefing per Push/E-Mail senden — sonst erhältst du eine Kopie pro Zone. Aktiviere dies für genau eine Zone. Ein manueller Klick auf „Briefing senden“ im Debug-Tab sendet immer, auch wenn dies aus ist.",
+          "briefing_notifications_enabled": "Bei mehreren Zonen sollte nur eine Zone das geplante Tagesbriefing per Push/E-Mail senden — sonst erhältst du eine Kopie pro Zone. Aktiviere dies für genau eine Zone. „Briefing senden“ unter „Aktionen“ im Dashboard sendet immer, auch wenn dies aus ist.",
           "push_briefing": "Jeden Morgen ein kurzes Kurzbriefing aufs Handy senden.",
           "push_door_window_pause": "Eine Push-Benachrichtigung senden, wenn die Heizung/Klimaanlage pausiert wird, weil eine Tür oder ein Fenster zu lange offen ist.",
           "push_occupancy_home": "Eine Push-Benachrichtigung senden, wenn jemand nach Hause kommt und die Komforttemperatur wiederhergestellt wird.",

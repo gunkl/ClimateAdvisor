@@ -364,7 +364,7 @@
           "email_entity_health": "E-posta: varlık bulunamadı"
         },
         "data_description": {
-          "briefing_notifications_enabled": "Çok bölgeli bir kurulumda zamanlanmış günlük özet anlık bildirimini/e-postasını yalnızca bir bölge göndermelidir; aksi halde her bölge için bir kopya alırsınız. Bunu tam olarak bir bölge için AÇIN. Hata ayıklama sekmesinde Özeti gönder'e elle tıklamak, bu kapalı olsa bile her zaman gönderir.",
+          "briefing_notifications_enabled": "Çok bölgeli bir kurulumda zamanlanmış günlük özet anlık bildirimini/e-postasını yalnızca bir bölge göndermelidir; aksi halde her bölge için bir kopya alırsınız. Bunu tam olarak bir bölge için AÇIN. Panodaki “Eylemler” altında “Özeti gönder”i kullanmak, bu kapalı olsa bile her zaman gönderir.",
           "push_briefing": "Her sabah telefonunuza kısa bir özet gönderin.",
           "push_door_window_pause": "Bir kapı veya pencere çok uzun süre açık kaldığı için HVAC duraklatıldığında anlık bildirim gönderin.",
           "push_occupancy_home": "Biri eve geldiğinde ve konfor sıcaklığı geri yüklendiğinde anlık bildirim gönderin.",

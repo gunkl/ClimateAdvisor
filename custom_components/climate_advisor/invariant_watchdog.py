@@ -81,7 +81,7 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_WHOLE_HOUSE,
 )
-from .hvac_action import is_hvac_compressor_active
+from .hvac_action import hvac_action_word, is_hvac_compressor_active
 from .promise_journal import JOURNAL_MAX_AGE, NAT_VENT_END_KINDS, Command, Episode, Mark, PromiseInput, Reading, RunKey
 from .thermostat_profile import fan_command_starts_blower
 
@@ -127,7 +127,7 @@ def check_ac_whf_mutex(
         return None
     if not is_hvac_compressor_active(hvac_action):
         return None
-    _msg = i18n.Msg("notify.invariant_ac_whf_mutex", hvac_action=hvac_action)
+    _msg = i18n.Msg("notify.invariant_ac_whf_mutex", hvac_action=hvac_action_word(hvac_action))
     return InvariantViolation(
         name="ac_whf_mutex",
         detail=i18n.render_en(_msg),

@@ -1,5 +1,7 @@
 {
   "ai.limits.advice": "Zwiększ go w ustawieniach tej integracji w Home Assistant. Jeśli mimo to uruchomisz, raport może być niekompletny lub się nie udać.",
+  "ai.limits.builtin_place": "sekcji „Ustawienia AI” Climate Advisor",
+  "ai.limits.builtin_setting": "Maksymalna długość odpowiedzi",
   "ai.limits.cancel": "Anuluj",
   "ai.limits.cancelled": "Analiza anulowana.",
   "ai.limits.check": "{kind, select, output {Limit wyjścia} context {Okno kontekstu} other {Wspólne okno kontekstu (wejście i wyjście)}}: {setting} w {integration} wynosi {value}; potrzeba co najmniej {required}.",
@@ -11,7 +13,7 @@
   "ai.notice.ai_output_limit": "Dostawca AI zatrzymał się na limicie wyjścia, zanim raport był gotowy. Zwiększ maksymalną liczbę tokenów do co najmniej {required} w ustawieniach tej integracji.",
   "ai.notice.ai_provider_error": "Dostawca AI zwrócił błąd, więc nie udało się napisać raportu. Sprawdź tę integrację w Home Assistant i spróbuj ponownie.",
   "ai.notice.ai_report_cut_short": "Raport wrócił niekompletny: brakuje niektórych sekcji. {has_setting, select, yes {Zwiększ {setting} w {integration} do co najmniej {required}, a potem uruchom go ponownie.} other {Zwiększ limit wyjścia dostawcy AI do co najmniej {required} tokenów w ustawieniach tej integracji, a potem uruchom go ponownie.}}",
-  "ai.notice.ai_task_no_entity": "Nie wybrano encji AI Task, a Home Assistant nie ma preferowanej. Wybierz encję AI Task w ustawieniach AI Climate Advisor albo ustaw domyślną w Ustawienia > System > AI.",
+  "ai.notice.ai_task_no_entity": "Nie wybrano encji AI Task, a Home Assistant nie ma preferowanej. Wybierz encję AI Task w sekcji „Ustawienia AI” Climate Advisor albo ustaw domyślną w Ustawienia > System > AI.",
   "ai.status_gathering": "Zbieranie danych systemu…",
   "ai.status_provider": "Oczekiwanie, aż dostawca AI napisze raport…",
   "ai.status_sending": "Wysyłanie danych do dostawcy AI…"

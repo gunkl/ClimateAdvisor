@@ -364,7 +364,7 @@
           "email_entity_health": "E-mail: entità non trovata"
         },
         "data_description": {
-          "briefing_notifications_enabled": "In un’installazione con più zone, solo una zona dovrebbe inviare il riepilogo giornaliero programmato via push/e-mail, altrimenti si riceve una copia per zona. Attivare per una sola zona. Premere manualmente Invia riepilogo nella scheda di debug lo invia sempre, anche se questa opzione è disattivata.",
+          "briefing_notifications_enabled": "In un’installazione con più zone, solo una zona dovrebbe inviare il riepilogo giornaliero programmato via push/e-mail, altrimenti si riceve una copia per zona. Attivare per una sola zona. «Invia riepilogo» in «Azioni» nella dashboard invia sempre, anche se questa opzione è disattivata.",
           "push_briefing": "Invia ogni mattina un breve riepilogo al telefono.",
           "push_door_window_pause": "Invia una notifica push quando la climatizzazione viene messa in pausa perché una porta o una finestra è aperta da troppo tempo.",
           "push_occupancy_home": "Invia una notifica push quando qualcuno arriva a casa e viene ripristinata la temperatura di comfort.",

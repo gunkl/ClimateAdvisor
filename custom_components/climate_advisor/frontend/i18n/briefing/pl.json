@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "aby zatrzymać ciepło",
   "briefing.reopen_evening": "Otwórz okna ponownie około {time}, gdy wieczorne powietrze ostygnie{ac_off, select, yes { — wyłączę wtedy klimatyzację.} other {.}}",
   "briefing.steps": "📋 Dzisiejsze kroki\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 Sugestie na podstawie ostatnich wzorców\n----------------------------------------\n{items}\n\nAby odpowiedzieć na te sugestie, otwórz panel Climate Advisor i przejdź do karty AI.",
+  "briefing.suggestions": "💡 Sugestie na podstawie ostatnich wzorców\n----------------------------------------\n{items}\n\nAby odpowiedzieć na te sugestie, otwórz panel Climate Advisor i przejdź do karty Analiza.",
   "briefing.title": "🏠 Twój dzisiejszy plan klimatu w domu",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  Obniżenie na noc: utrzymane jak przy nieobecności",

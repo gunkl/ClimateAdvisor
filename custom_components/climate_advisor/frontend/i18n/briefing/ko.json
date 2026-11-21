@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "따뜻함을 가두기 위해",
   "briefing.reopen_evening": "{time}경 저녁 공기가 다시 시원해지면 창문을 여세요{ac_off, select, yes {. 에어컨은 제가 끄겠습니다.} other {.}}",
   "briefing.steps": "📋 오늘의 단계\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 최근 패턴에 따른 제안\n----------------------------------------\n{items}\n\n이 제안에 응답하려면 Climate Advisor 대시보드를 열고 AI 탭으로 이동하세요.",
+  "briefing.suggestions": "💡 최근 패턴에 따른 제안\n----------------------------------------\n{items}\n\n이 제안에 응답하려면 Climate Advisor 대시보드를 열고 분석 탭으로 이동하세요.",
   "briefing.title": "🏠 오늘의 우리 집 냉난방 계획",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  취침 시 절약 온도: 외출 절약 온도 유지",

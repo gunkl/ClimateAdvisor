@@ -1,5 +1,7 @@
 {
   "ai.limits.advice": "Bunu Home Assistant'ta o entegrasyonun ayarlarından yükseltin. Yine de çalıştırırsanız rapor yarım kalabilir ya da başarısız olabilir.",
+  "ai.limits.builtin_place": "Climate Advisor Yapay zekâ ayarları",
+  "ai.limits.builtin_setting": "Azami yanıt uzunluğu",
   "ai.limits.cancel": "İptal",
   "ai.limits.cancelled": "İnceleme iptal edildi.",
   "ai.limits.check": "{kind, select, output {Çıktı sınırı} context {Bağlam penceresi} other {Ortak bağlam penceresi (girdi ve çıktı)}}: {integration} içindeki {setting} değeri {value}; en az {required} gerekiyor.",

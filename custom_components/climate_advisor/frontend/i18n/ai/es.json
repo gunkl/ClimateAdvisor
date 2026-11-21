@@ -1,5 +1,7 @@
 {
   "ai.limits.advice": "Súbelo en la configuración de esa integración en Home Assistant. Si lo ejecutas de todos modos, el informe puede quedar incompleto o fallar.",
+  "ai.limits.builtin_place": "«Ajustes de la IA» de Climate Advisor",
+  "ai.limits.builtin_setting": "Longitud máxima de la respuesta",
   "ai.limits.cancel": "Cancelar",
   "ai.limits.cancelled": "Investigación cancelada.",
   "ai.limits.check": "{kind, select, output {Límite de salida} context {Ventana de contexto} other {Ventana de contexto combinada (entrada y salida)}}: {setting} en {integration} es {value}; necesita al menos {required}.",
@@ -11,7 +13,7 @@
   "ai.notice.ai_output_limit": "El proveedor de IA se detuvo en su límite de salida antes de terminar el informe. Sube su número máximo de tokens a al menos {required} en la configuración de esa integración.",
   "ai.notice.ai_provider_error": "El proveedor de IA devolvió un error, así que no se pudo escribir el informe. Revisa esa integración en Home Assistant y vuelve a intentarlo.",
   "ai.notice.ai_report_cut_short": "El informe llegó incompleto: faltan algunas secciones. {has_setting, select, yes {Sube {setting} en {integration} a al menos {required} y vuelve a ejecutarlo.} other {Sube el límite de salida del proveedor de IA a al menos {required} tokens en la configuración de esa integración y vuelve a ejecutarlo.}}",
-  "ai.notice.ai_task_no_entity": "No hay ninguna entidad AI Task elegida y Home Assistant no tiene una preferida. Elige una entidad AI Task en la configuración de IA de Climate Advisor o define una predeterminada en Configuración > Sistema > IA.",
+  "ai.notice.ai_task_no_entity": "No hay ninguna entidad AI Task elegida y Home Assistant no tiene una preferida. Elige una entidad AI Task en «Ajustes de la IA» de Climate Advisor o define una predeterminada en Configuración > Sistema > IA.",
   "ai.status_gathering": "Recopilando datos del sistema…",
   "ai.status_provider": "Esperando a que el proveedor de IA escriba el informe…",
   "ai.status_sending": "Enviando los datos al proveedor de IA…"

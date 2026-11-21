@@ -1,5 +1,5 @@
 # ruff: noqa: E501, F821
-"""Real-browser check of the right-to-left layout and the viewer-language dashboard (Issue #1341, PR C). Not collected by pytest.
+"""Real-browser check of the right-to-left layout and the viewer-language dashboard (Issue #1341, PR C). Not collected by pytest. Also Traditional Chinese (Issue #1656).
 
     pwvenv/bin/python tests/browser/check_i18n_rtl.py <repo-root> <screenshot-dir>
 
@@ -74,7 +74,7 @@ def shot(pg, label: str, selector: str | None = None) -> None:
 
 
 def run(browser) -> None:
-    for lang in ("ar", "en"):
+    for lang in ("ar", "en", "zh-Hant"):  # zh-Hant (#1656): Chinese line breaking and width, left to right
         for vlabel, vp in (("1280", {"width": 1280, "height": 1000}), ("390", {"width": 390, "height": 900})):
             for scheme in ("light", "dark"):
                 tag = f"{lang}-{vlabel}-{scheme}"

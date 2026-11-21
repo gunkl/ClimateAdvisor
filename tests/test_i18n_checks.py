@@ -166,9 +166,10 @@ def test_changed_english_makes_every_translation_stale_until_relocked(tree):
     assert checks.check_stale() == []
     _edit(tree[0] / "common" / "en.json", **{"common.unknown": "Not known"})
     errors = checks.check_stale()
-    assert len(errors) == 15 and all("common.unknown" in e and "English changed" in e for e in errors)
+    others = len(checks.engine().LANGUAGES) - 1  # every translation of the changed key goes stale
+    assert len(errors) == others and all("common.unknown" in e and "English changed" in e for e in errors)
     assert cli.write_lock("common", "fr") > 0
-    assert len(checks.check_stale()) == 14
+    assert len(checks.check_stale()) == others - 1
     assert cli.write_lock("common", None) > 0
     assert checks.check_stale() == []
 
@@ -223,7 +224,7 @@ def test_cli_missing_stale_lock_and_check_exit_codes(tree, capsys):
     assert cli.main(["check"]) == 1  # now only stale (not locked)
     assert "[FAIL] stale" in capsys.readouterr().out
     assert cli.main(["stale", "--area", "common"]) == 0
-    assert capsys.readouterr().out.splitlines()[-1] == "15 stale"
+    assert capsys.readouterr().out.splitlines()[-1] == f"{len(checks.engine().LANGUAGES) - 1} stale"
     assert cli.main(["lock", "--area", "common", "--lang", "all"]) == 0
     assert cli.main(["check"]) == 0
 

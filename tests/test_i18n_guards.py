@@ -37,6 +37,7 @@ def test_committed_repository_passes_every_guard():
         "ha parity",
         "stale",
         "length budgets",
+        "zh-Hant wording",
         "ratchet py_literals",
         "ratchet english_matching",
         "ratchet js_dom_literals",

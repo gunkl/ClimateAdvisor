@@ -3,6 +3,17 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.58] — 2026-11-21
+
+### Added
+- #1656: **Traditional Chinese (Taiwan)**, Climate Advisor's 17th language. If your Home Assistant is set to Traditional Chinese (`zh-Hant`, `zh-TW`, `zh-HK`), Climate Advisor now speaks it everywhere: entity names and states, the setup and options wizard, services, Repairs, notifications, the daily briefing and the dashboard. Before, those languages fell back to English.
+  - **Written for Taiwan from the English, not converted from Simplified Chinese.** The wording follows Home Assistant's own Traditional Chinese, so it reads like the rest of your Home Assistant: 溫控器, 暖氣/冷氣, 感測器, 設定, 排程, 離家, 您.
+  - **A guard keeps it that way.** A new check fails if a Traditional Chinese string contains a Simplified character or a mainland-only word.
+  - **Corrections are welcome.** Open an issue with the `translation: zh-Hant` label (see `docs/i18n-spec.md`). Thanks to the contributor who asked for it in #1636 and offered to review it.
+
+### Fixed
+- In the dashboard's **Next 24 hours** list, a weekday plus a 12-hour time (for example "Sat 12:38 AM", or 週六 上午12:38) could run into the step text beside it. The weekday now moves above the time when the pair doesn't fit, and the time never breaks.
+
 ## [0.9.57] — 2026-11-21
 
 ### Changed

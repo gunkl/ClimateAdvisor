@@ -1,1 +1,16 @@
-{}
+{
+  "common.duration.hours": "{n, plural, other {# 小時}}",
+  "common.duration.hours_frac": "{n, number, ::.0} 小時",
+  "common.duration.min": "{n, plural, other {# 分鐘}}",
+  "common.mode.auto": "自動",
+  "common.mode.cool": "冷氣",
+  "common.mode.fan_only": "僅送風",
+  "common.mode.heat": "暖氣",
+  "common.mode.heat_cool": "暖氣/冷氣",
+  "common.mode.off": "關閉",
+  "common.tou_skip.condition_off": "其啟用條件為關閉",
+  "common.tou_skip.condition_off_entity": "其啟用條件為關閉（{entity}）",
+  "common.tou_skip.not_applied_cool": "冷氣設定溫度維持不變",
+  "common.tou_skip.not_applied_heat": "暖氣設定溫度維持不變",
+  "common.unknown": "未知"
+}

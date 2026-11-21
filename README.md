@@ -144,6 +144,8 @@ Everything is editable afterwards under **Configure**. The options there also co
 - AI settings, which apply to every zone (see [AI Investigator](#ai-investigator));
 - GitHub settings, for submitting reports as issues.
 
+Every setting, with what it does, its default and its range, is listed in [Configuration options](docs/configuration-options.md).
+
 ### Thermostat requirements
 
 Climate Advisor is the scheduler and the thermostat is the executor. Set the thermostat so it keeps Climate Advisor's commands:
@@ -383,6 +385,7 @@ The [debugging guide](docs/09-DEBUGGING-GUIDE.md) goes deeper, for developers an
 | Strategy and design | [01-STRATEGY-AND-DESIGN](docs/01-STRATEGY-AND-DESIGN.md) |
 | Architecture | [02-ARCHITECTURE-REFERENCE](docs/02-ARCHITECTURE-REFERENCE.md) |
 | How decisions are computed | [08-COMPUTATION-REFERENCE](docs/08-COMPUTATION-REFERENCE.md) |
+| Every setting: what it does, default, range | [configuration-options](docs/configuration-options.md) |
 | Troubleshooting for users | [Troubleshooting](#troubleshooting) |
 | Debugging guide (developers, advanced users) | [09-DEBUGGING-GUIDE](docs/09-DEBUGGING-GUIDE.md) |
 | Prediction engines (choice, fallback, what they control) | [prediction-engines-spec](docs/prediction-engines-spec.md) |

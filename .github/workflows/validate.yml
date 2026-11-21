@@ -42,7 +42,7 @@ jobs:
       # The fixture's expected text embeds one ICU/CLDR release (tests/fixtures/i18n_conformance.json header), so Node
       # is pinned: 22.12.0 ships ICU 76.1. tests/i18n_conformance.mjs fails with a clear message if the ICU differs.
       - name: Set up Node.js (pinned for the i18n ICU data)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22.12.0
 

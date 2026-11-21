@@ -466,7 +466,8 @@ def resolve_language(code: str | None) -> str:
     """Map any HA/browser language code to one of ``LANGUAGES`` (exact, case-insensitive, primary subtag, else en).
 
     ``zh``/``zh-CN``/``zh-SG``/``zh-Hans-*`` (any region) map to ``zh-Hans``; ``zh-TW``/``zh-HK``/``zh-MO``/``zh-Hant``
-    (any Traditional marker without an explicit Hans script) map to ``zh-Hant`` (Issue #1656). The cases live in ``tests/fixtures/i18n_language_resolution.json`` (shared with the JS runtime).
+    (any Traditional marker without an explicit Hans script) map to ``zh-Hant`` (Issue #1656). The cases live in
+    ``tests/fixtures/i18n_language_resolution.json`` (shared with the JS runtime).
     """
     if not code or not isinstance(code, str):
         return DEFAULT_LANGUAGE

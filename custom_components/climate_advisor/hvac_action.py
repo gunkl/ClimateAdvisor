@@ -11,7 +11,8 @@ found 12 independent re-declarations across ``coordinator.py``,
 ``automation.py``, ``ai_skills_context.py``, and ``invariant_watchdog.py``.
 This module is the single source of truth for both predicates, mirroring the
 existing ``fan_status.py``/``temperature.py`` precedent: a tiny,
-dependency-free utility module.
+utility module (its only import is the stdlib-only ``i18n``
+engine, for the code-to-word helpers at the bottom, Issue #1659).
 
 There are deliberately **two** constants here, not one — they answer
 different questions and must never be merged:
@@ -34,6 +35,8 @@ the whole-house-fan mutex protection those guards exist for.
 """
 
 from __future__ import annotations
+
+from . import i18n
 
 HVAC_ACTION_COMPRESSOR_ACTIVE: frozenset[str] = frozenset({"heating", "cooling"})
 
@@ -97,3 +100,34 @@ def thermostat_reports_running(hvac_mode: str | None, hvac_action: str | None, *
     if is_hvac_compressor_active(hvac_action):
         return True
     return is_fan_only_session(hvac_mode, hvac_action) and not ca_ventilating
+
+
+# Issue #1659: the HA codes a message may show inside a sentence, each with a catalog word in every language
+# (``common.hvac_action.<code>`` / ``common.hvac_mode_word.<code>``; English keeps the code itself, so English
+# text is unchanged). Passing the raw code put an English word into a translated sentence (zh-Hant "空調正在 cooling").
+HVAC_ACTION_WORD_CODES: frozenset[str] = frozenset(
+    {"heating", "cooling", "drying", "fan", "idle", "off", "preheating", "defrosting"}
+)
+HVAC_MODE_WORD_CODES: frozenset[str] = frozenset(
+    {"off", "heat", "cool", "heat_cool", "auto", "dry", "fan_only", "unknown", "unavailable"}
+)
+
+
+def hvac_action_word(hvac_action: object) -> i18n.Code | str:
+    """A message param for an ``hvac_action`` code: its word in the viewer's language (Issue #1659).
+
+    A missing value reads as "unknown"; a code HA does not define passes through as its text (never raises)."""
+    if hvac_action is None or hvac_action == "":
+        return i18n.Code("common.hvac_mode_word.unknown")
+    code = str(hvac_action).lower()
+    return i18n.Code(f"common.hvac_action.{code}") if code in HVAC_ACTION_WORD_CODES else str(hvac_action)
+
+
+def hvac_mode_word(hvac_mode: object) -> i18n.Code | str:
+    """A message param for an ``hvac_mode`` (or climate state) code: its word in the viewer's language (Issue #1659).
+
+    A missing value reads as "unknown"; a code HA does not define passes through as its text (never raises)."""
+    if hvac_mode is None or hvac_mode == "":
+        return i18n.Code("common.hvac_mode_word.unknown")
+    code = str(hvac_mode).lower()
+    return i18n.Code(f"common.hvac_mode_word.{code}") if code in HVAC_MODE_WORD_CODES else str(hvac_mode)

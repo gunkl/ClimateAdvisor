@@ -43,6 +43,7 @@ from datetime import datetime
 from enum import Enum
 
 from . import i18n
+from .hvac_action import hvac_action_word, hvac_mode_word
 
 # Fan modes in which a physical whole-house fan exists (mirrors const.FAN_MODE_WHOLE_HOUSE / _BOTH;
 # kept literal so this leaf has no package imports).
@@ -325,13 +326,13 @@ def decide_whf_safety(inputs: WhfSafetyInputs) -> WhfSafetyDecision:
         if hvac_t is not None and (fan_t is None or hvac_t > fan_t):
             return _decision(
                 WhfSafetyAction.STOP_MUTEX_FAN,
-                i18n.Msg("notify.whf_reason_occupant_hvac_after_fan", mode=str(inputs.thermostat_mode)),
+                i18n.Msg("notify.whf_reason_occupant_hvac_after_fan", mode=hvac_mode_word(inputs.thermostat_mode)),
                 stale_sensor_count=stale,
             )
         if fan_t is not None and not inputs.whf_owns_hvac:
             return _decision(
                 WhfSafetyAction.SUPPRESS_HVAC,
-                i18n.Msg("notify.whf_reason_occupant_fan_after_hvac", mode=str(inputs.thermostat_mode)),
+                i18n.Msg("notify.whf_reason_occupant_fan_after_hvac", mode=hvac_mode_word(inputs.thermostat_mode)),
                 stale_sensor_count=stale,
             )
 
@@ -377,8 +378,8 @@ def _rule2_state_backstop(inputs: WhfSafetyInputs, stale: int) -> WhfSafetyDecis
             WhfSafetyAction.STOP_MUTEX_FAN,
             i18n.Msg(
                 "notify.whf_reason_backstop_stop_fan",
-                mode=str(inputs.thermostat_mode),
-                action=str(inputs.hvac_action),
+                mode=hvac_mode_word(inputs.thermostat_mode),
+                action=hvac_action_word(inputs.hvac_action),
                 seconds=round(inputs.overlap_for_s),
             ),
             stale_sensor_count=stale,
@@ -388,8 +389,8 @@ def _rule2_state_backstop(inputs: WhfSafetyInputs, stale: int) -> WhfSafetyDecis
         WhfSafetyAction.SUPPRESS_HVAC,
         i18n.Msg(
             "notify.whf_reason_backstop_suppress_hvac",
-            mode=str(inputs.thermostat_mode),
-            action=str(inputs.hvac_action),
+            mode=hvac_mode_word(inputs.thermostat_mode),
+            action=hvac_action_word(inputs.hvac_action),
             seconds=round(inputs.overlap_for_s),
         ),
         stale_sensor_count=stale,

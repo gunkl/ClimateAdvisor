@@ -17845,7 +17845,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         pre-cool [min(floor, target), target], pre-heat [target, max(ceiling, target)]); the schedule band is the
         home / sleep / Away / Vacation band (``AutomationEngine._resolved_comfort_band()``). Occupant: a pre-cool
         pulling the house from 74 F toward 68 F is inside the 68-76 F comfort range, so the person is comfortable and
-        those minutes must not feed the ``comfort_violations`` suggestion; a house outside both is a real miss. The
+        those minutes must not count against the comfort score; a house outside both is a real miss. The
         cached chart band keeps the #786 shape for a bank (the target on the opposite edge: an Away pre-heat to 63 F
         reads 60-63), which counted a house above an Away pre-heat target as uncomfortable.
 

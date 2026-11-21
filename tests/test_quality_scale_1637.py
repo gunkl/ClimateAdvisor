@@ -298,11 +298,9 @@ class TestServiceErrors:
         assert isinstance(caught.value.__cause__, OSError)
 
 
-def test_service_accept_persists_settings_like_the_dashboard():
-    """Issue #1652: the service saves an accepted change into the zone's entry through the same step as the
-    dashboard (before, only the dashboard path had it), and the change is a real setting: "door pauses are
-    frequent" lengthens the door/window debounce from the zone's 10 minutes to 15, live and in the entry.
-    """
+def test_service_accept_is_an_acknowledgement_that_changes_no_setting():
+    """Issue #1652 (owner decision): every suggestion is advice. Accepting one through the service records the
+    acknowledgement and changes nothing in the zone's settings or its config entry."""
     from tools.sim_harness._loop import run_coro
     from tools.sim_harness.build_coordinator import build_headless_multi_zone
 
@@ -310,15 +308,38 @@ def test_service_accept_persists_settings_like_the_dashboard():
     zone = zones["zone_0"]
     entry = zone["entry"]
     coordinator = zone["coordinator"]
-    coordinator.config["sensor_debounce_seconds"] = 600
+    config_before = dict(coordinator.config)
+    entry_before = dict(hass.config_entries.async_get_entry(entry.entry_id).data)
     run_coro(
         hass.services.async_call(
             DOMAIN,
             "respond_to_suggestion",
-            {"entry_id": entry.entry_id, "action": "accept", "suggestion_key": "frequent_door_pauses"},
+            {"entry_id": entry.entry_id, "action": "accept", "suggestion_key": "short_departures"},
         )
     )
-    stored = hass.config_entries.async_get_entry(entry.entry_id).data
-    assert stored["sensor_debounce_seconds"] == 900
-    assert coordinator.config["sensor_debounce_seconds"] == 900
-    assert coordinator.automation_engine.config["sensor_debounce_seconds"] == 900  # the engine reads the same dict
+    assert dict(coordinator.config) == config_before
+    assert dict(hass.config_entries.async_get_entry(entry.entry_id).data) == entry_before
+    assert coordinator.learning._state.settings_history[-1]["suggestion"] == "short_departures"
+    assert coordinator.learning._state.settings_history[-1]["changes"] == {}
+
+
+def test_removed_suggestion_keys_are_rejected_by_the_service():
+    """Issue #1652: frequent_door_pauses and comfort_violations no longer exist; the service rejects them."""
+    import pytest
+    from homeassistant.exceptions import ServiceValidationError
+
+    from tools.sim_harness._loop import run_coro
+    from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+    zones, hass, _scheduler = build_headless_multi_zone(zone_count=1)
+    entry = zones["zone_0"]["entry"]
+    for key in ("frequent_door_pauses", "comfort_violations"):
+        with pytest.raises(ServiceValidationError) as caught:
+            run_coro(
+                hass.services.async_call(
+                    DOMAIN,
+                    "respond_to_suggestion",
+                    {"entry_id": entry.entry_id, "action": "accept", "suggestion_key": key},
+                )
+            )
+        assert caught.value.translation_key == "unknown_suggestion"

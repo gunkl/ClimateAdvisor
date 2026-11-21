@@ -174,16 +174,8 @@ def test_pause_and_runtime_and_static_suggestions_english(tmp_path: Path) -> Non
     assert got["high_runtime_mild_days"].endswith(
         "Adding door/window sensors or widening the comfort range in Settings can help."
     )
-    assert got["frequent_door_pauses"] == (
-        "HVAC has been paused 42 times due to open doors/windows in the past two weeks. Front Door was the most "
-        "frequent trigger (28 times). A longer sensor debounce delay keeps short openings from pausing it; the "
-        "delay applies to every door and window. To stop Front Door from pausing the HVAC, remove it from the "
-        "door/window sensors in Settings."
-    )
-    assert got["comfort_violations"] == (
-        "The house has been outside your comfort range for more than 30 minutes on 14 of the last 14 days. "
-        "Milder away temperatures leave the house less to make up when you come home."
-    )
+    # Issue #1652 (owner decision): frequent door pauses and comfort misses no longer produce a suggestion.
+    assert "frequent_door_pauses" not in got and "comfort_violations" not in got
     assert got["short_departures"].startswith("You frequently leave for 30–45 minute periods")
 
 

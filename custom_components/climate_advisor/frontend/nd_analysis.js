@@ -359,30 +359,20 @@
     if (!L) { err(host, D.errs[0] || T('no_data')); return; }
     var list = L.suggestions || [];
     if (!list.length) { host.innerHTML = '<div class="empty">' + esc(T('sug.none')) + '</div>'; return; }
-    // Issue #1652: an actionable suggestion lists the setting changes Accept makes (from this zone's current settings);
-    // advice (nothing to change) offers "Got it" instead of Accept, which only records that it was seen.
+    // Issue #1652: every suggestion is advice. "Got it" sends accept (an acknowledgement: no setting changes, the
+    // suggestion is held back 30 days); Dismiss hides it.
     host.innerHTML = list.map(function (s) {
-      var k = esc(s.key), lines = changeLines(s);
-      var plan = s.actionable && lines.length ? '<div class="small">' + esc(T('sug.will_change')) + '</div>' + lines.map(function (l) { return '<div class="small">' + esc(l) + '</div>'; }).join('') : '';
-      var primary = s.actionable
-        ? '<button type="button" class="btn small primary" data-sug="' + k + '" data-act="accept">' + esc(T('sug.accept')) + '</button>'
-        : '<button type="button" class="btn small primary" data-sug="' + k + '" data-act="accept" data-ack="1">' + esc(T('sug.ack')) + '</button>';
-      return '<div class="kv" id="sug-' + k + '" style="grid-template-columns:1fr"><div>' + esc(s.text) + '</div>' + plan + '<div class="row" id="sug-actions-' + k + '">' +
-        primary + '<button type="button" class="btn small" data-sug="' + k + '" data-act="dismiss">' + esc(T('sug.dismiss')) + '</button></div></div>';
+      var k = esc(s.key);
+      return '<div class="kv" id="sug-' + k + '" style="grid-template-columns:1fr"><div>' + esc(s.text) + '</div><div class="row" id="sug-actions-' + k + '">' +
+        '<button type="button" class="btn small primary" data-sug="' + k + '" data-act="accept">' + esc(T('sug.ack')) + '</button>' +
+        '<button type="button" class="btn small" data-sug="' + k + '" data-act="dismiss">' + esc(T('sug.dismiss')) + '</button></div></div>';
     }).join('');
   }
-  // The change lines in the viewer's language (wire messages), falling back to the backend's rendering.
-  function changeLines(r) {
-    var msgs = (r && r.changes_msg) || [], texts = (r && r.changes_text) || [];
-    return msgs.length ? msgs.map(function (m, i) { return CAI18N.has(m.key) ? CAI18N.tw(m) : String(texts[i] || ''); }) : texts.map(String);
-  }
-  async function respond(key, action, ack) {
+  async function respond(key, action) {
     var box = $('sug-actions-' + key);
     try {
-      var r = await ND.api('respond_suggestion', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: action, suggestion_key: key }) });
-      var label = action === 'dismiss' ? 'sug.dismissed' : (ack || !changeLines(r).length ? 'sug.acknowledged' : 'sug.accepted');
-      var changed = action === 'accept' ? changeLines(r).map(function (l) { return '<div class="small">' + esc(l) + '</div>'; }).join('') : '';
-      if (box) box.innerHTML = '<span class="badge ok">' + esc(T(label)) + '</span>' + changed + ' <span class="small">' + esc(T('sug.accurate')) + '</span> ' +
+      await ND.api('respond_suggestion', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: action, suggestion_key: key }) });
+      if (box) box.innerHTML = '<span class="badge ok">' + esc(T(action === 'accept' ? 'sug.acknowledged' : 'sug.dismissed')) + '</span> <span class="small">' + esc(T('sug.accurate')) + '</span> ' +
         '<button type="button" class="btn small" data-sug="' + esc(key) + '" data-fb="correct">' + esc(T('sug.correct')) + '</button> <button type="button" class="btn small" data-sug="' + esc(key) + '" data-fb="incorrect">' + esc(T('sug.incorrect')) + '</button>';
       setTimeout(function () { if (D.learning) { D.learning.suggestions = (D.learning.suggestions || []).filter(function (s) { return s.key !== key; }); renderSuggestions(); } }, 8000);
     } catch (e) { ND.toast(e.message, 'err'); }
@@ -759,7 +749,7 @@
     });
     $('an-suggestions').addEventListener('click', function (e) {
       var b = e.target.closest('button[data-sug]'); if (!b) return;
-      if (b.getAttribute('data-fb')) feedback(b.getAttribute('data-sug'), b.getAttribute('data-fb')); else respond(b.getAttribute('data-sug'), b.getAttribute('data-act'), b.getAttribute('data-ack') === '1');
+      if (b.getAttribute('data-fb')) feedback(b.getAttribute('data-sug'), b.getAttribute('data-fb')); else respond(b.getAttribute('data-sug'), b.getAttribute('data-act'));
     });
     updateReportType();
   }

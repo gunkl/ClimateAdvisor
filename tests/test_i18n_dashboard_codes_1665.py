@@ -44,7 +44,9 @@ def _setback_reasons() -> set[str]:
 
 def _chart_events() -> set[str]:
     src = _py("coordinator.py")
-    return set(re.findall(r'^\s+event="(\w+)",', src, re.M)) | set(re.findall(r'_append_occupancy_chart_row\("(\w+)"\)', src))
+    return set(re.findall(r'^\s+event="(\w+)",', src, re.M)) | set(
+        re.findall(r'_append_occupancy_chart_row\("(\w+)"\)', src)
+    )
 
 
 def _report_sources() -> set[str]:
@@ -79,8 +81,20 @@ def _day_types() -> set[str]:
 
 def test_backend_code_sets_are_found():
     # a refactor that moves a code must move this pin with it, never empty it silently
-    assert _setback_reasons() == {"override_confirm_pending", "occupancy", "manual_override", "paused_by_door", "no_classification"}
-    assert _chart_events() >= {"classification_change", "override", "hvac_action_change", "occupancy_change", "occupancy_setback"}
+    assert _setback_reasons() == {
+        "override_confirm_pending",
+        "occupancy",
+        "manual_override",
+        "paused_by_door",
+        "no_classification",
+    }
+    assert _chart_events() >= {
+        "classification_change",
+        "override",
+        "hvac_action_change",
+        "occupancy_change",
+        "occupancy_setback",
+    }
     assert _report_sources() >= {"ai", "fallback", "error"}
     assert _activity_sources() == {"automation", "manual", "system", "sensor"}
     assert _grades() == {"none", "low", "medium", "high"}
@@ -99,7 +113,11 @@ WORD_TABLES = [
     ("dashboard", "dashboard.night.level.", _offered_night_grades),
     ("dashboard", "dashboard.chart.event.", _chart_events),
     ("dashboard", "dashboard.status.fan_speed_", _remote_speeds),
-    ("settings", "settings.ai.status.", lambda: {"active", "disabled", "circuit_open", "budget_exceeded", "inactive", "error"}),
+    (
+        "settings",
+        "settings.ai.status.",
+        lambda: {"active", "disabled", "circuit_open", "budget_exceeded", "inactive", "error"},
+    ),
     ("settings", "settings.ai.breaker.", lambda: {"closed", "open", "half_open"}),
     ("common", "common.hvac_mode_word.", lambda: {"heat", "cool", "off", "auto", "heat_cool", "fan_only", "dry"}),
 ]
@@ -122,9 +140,22 @@ def test_non_english_words_are_translated():
     # A word equal to the English code in most languages means it was never translated (loanwords like "AI" or
     # "sensor" are fine in a few languages, so the bar is "translated in at least 12 of the 16").
     en = _cat("dashboard", "en")
-    keys = [k for k in en if k.startswith(("dashboard.analysis.level.", "dashboard.analysis.day_type.", "dashboard.analysis.trend.",
-                                           "dashboard.analysis.days.skip_reason.", "dashboard.analysis.source.",
-                                           "dashboard.night.level.", "dashboard.chart.event.", "dashboard.status.fan_speed_"))]
+    keys = [
+        k
+        for k in en
+        if k.startswith(
+            (
+                "dashboard.analysis.level.",
+                "dashboard.analysis.day_type.",
+                "dashboard.analysis.trend.",
+                "dashboard.analysis.days.skip_reason.",
+                "dashboard.analysis.source.",
+                "dashboard.night.level.",
+                "dashboard.chart.event.",
+                "dashboard.status.fan_speed_",
+            )
+        )
+    ]
     assert len(keys) == 36
     for key in keys:
         same = [lang for lang in LANGS[1:] if _cat("dashboard", lang)[key] == en[key]]
@@ -134,9 +165,13 @@ def test_non_english_words_are_translated():
 def test_english_words_keep_the_english_text():
     # English's word is the code (spaced out where the old code did), so English text is unchanged by the fix
     en = _cat("dashboard", "en")
-    for prefix, codes in (("dashboard.analysis.level.", _grades()), ("dashboard.analysis.day_type.", _day_types()),
-                          ("dashboard.analysis.source.", _activity_sources() | _report_sources()),
-                          ("dashboard.night.level.", _offered_night_grades()), ("dashboard.status.fan_speed_", _remote_speeds())):
+    for prefix, codes in (
+        ("dashboard.analysis.level.", _grades()),
+        ("dashboard.analysis.day_type.", _day_types()),
+        ("dashboard.analysis.source.", _activity_sources() | _report_sources()),
+        ("dashboard.night.level.", _offered_night_grades()),
+        ("dashboard.status.fan_speed_", _remote_speeds()),
+    ):
         for c in codes:
             assert en[prefix + c] == c, prefix + c
     for c in _setback_reasons():
@@ -149,23 +184,63 @@ def test_english_words_keep_the_english_text():
 SPOTS = [
     # (source, the fixed form, the old raw form)
     (NIGHT, "level: I.word(N + 'level.', o.confidence || 'medium')", "level: o.confidence || 'medium'"),
-    (ANALYSIS, "grade: iso(CAI18N.word('dashboard.analysis.level.', c.grade || 'none'))", "grade: iso(c.grade || 'none')"),
+    (
+        ANALYSIS,
+        "grade: iso(CAI18N.word('dashboard.analysis.level.', c.grade || 'none'))",
+        "grade: iso(c.grade || 'none')",
+    ),
     (ANALYSIS, "value: iso(CAI18N.word('dashboard.analysis.level.', c || 'na'))", "value: iso(c || 'n/a')"),
-    (ANALYSIS, "house: iso(CAI18N.word('dashboard.analysis.level.', tm.confidence_k_passive || 'none'))", "house: iso(tm.confidence_k_passive"),
-    (ANALYSIS, "hvac: iso(CAI18N.word('dashboard.analysis.level.', tm.confidence || 'none'))", "hvac: iso(tm.confidence ||"),
-    (ANALYSIS, "day_type: r.day_type ? CAI18N.word('dashboard.analysis.day_type.', r.day_type) : '?'", "day_type: r.day_type || '?'"),
-    (ANALYSIS, "CAI18N.word('dashboard.analysis.day_type.', r.day_type || '—') + ' · ' + CAI18N.word('dashboard.analysis.trend.', r.trend_direction || '—')",
-     "(r.trend_direction || '—')"),
+    (
+        ANALYSIS,
+        "house: iso(CAI18N.word('dashboard.analysis.level.', tm.confidence_k_passive || 'none'))",
+        "house: iso(tm.confidence_k_passive",
+    ),
+    (
+        ANALYSIS,
+        "hvac: iso(CAI18N.word('dashboard.analysis.level.', tm.confidence || 'none'))",
+        "hvac: iso(tm.confidence ||",
+    ),
+    (
+        ANALYSIS,
+        "day_type: r.day_type ? CAI18N.word('dashboard.analysis.day_type.', r.day_type) : '?'",
+        "day_type: r.day_type || '?'",
+    ),
+    (
+        ANALYSIS,
+        "CAI18N.word('dashboard.analysis.day_type.', r.day_type || '—') + ' · ' "
+        "+ CAI18N.word('dashboard.analysis.trend.', r.trend_direction || '—')",
+        "(r.trend_direction || '—')",
+    ),
     (ANALYSIS, "p ? CAI18N.word('dashboard.analysis.day_type.', p.day_type || '—')", "(p.day_type || '—')"),
-    (ANALYSIS, "CAI18N.word('common.hvac_mode_word.', r.hvac_mode_recommended || '—')", "return r.hvac_mode_recommended || '—'"),
+    (
+        ANALYSIS,
+        "CAI18N.word('common.hvac_mode_word.', r.hvac_mode_recommended || '—')",
+        "return r.hvac_mode_recommended || '—'",
+    ),
     (ANALYSIS, "CAI18N.word('common.hvac_mode_word.', p.hvac_mode || '—')", "(p.hvac_mode || '—')"),
-    (ANALYSIS, "reason: CAI18N.word('dashboard.analysis.days.skip_reason.', r.setback_skipped_reason,", "reason: String(r.setback_skipped_reason)"),
+    (
+        ANALYSIS,
+        "reason: CAI18N.word('dashboard.analysis.days.skip_reason.', r.setback_skipped_reason,",
+        "reason: String(r.setback_skipped_reason)",
+    ),
     (ANALYSIS, "CAI18N.word('settings.ai.status.', a.status)", "status: iso(a.status || 'unknown')"),
-    (ANALYSIS, "circuit: iso(CAI18N.word('settings.ai.breaker.', a.circuit_breaker_state || ''))", "circuit: iso(a.circuit_breaker_state"),
+    (
+        ANALYSIS,
+        "circuit: iso(CAI18N.word('settings.ai.breaker.', a.circuit_breaker_state || ''))",
+        "circuit: iso(a.circuit_breaker_state",
+    ),
     (ANALYSIS, "esc(CAI18N.word('dashboard.analysis.source.', r.source))", "esc(r.source)"),
     (ANALYSIS, "source: iso(CAI18N.word('dashboard.analysis.source.', result.source))", "source: iso(result.source)"),
-    (ANALYSIS, "source: iso(CAI18N.word('dashboard.analysis.source.', res.source || 'error'))", "source: iso(res.source || 'error')"),
-    (ANALYSIS, "esc(CAI18N.word('dashboard.analysis.source.', res.source || 'unknown'))", "esc(res.source || 'unknown')"),
+    (
+        ANALYSIS,
+        "source: iso(CAI18N.word('dashboard.analysis.source.', res.source || 'error'))",
+        "source: iso(res.source || 'error')",
+    ),
+    (
+        ANALYSIS,
+        "esc(CAI18N.word('dashboard.analysis.source.', res.source || 'unknown'))",
+        "esc(res.source || 'unknown')",
+    ),
     (STATUS, "speed: word('fan_speed', d.fan_remote_speed)", "speed: d.fan_remote_speed"),
     (CHART, "EN['event.' + ev] !== undefined ? _t('event.' + ev)", "escapeHtml(String(closest.event)"),
 ]

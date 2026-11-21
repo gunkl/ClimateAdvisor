@@ -65,7 +65,27 @@ def test_hass_language():
     assert i18n.hass_language(object()) == "en"
 
 
+def test_hass_language_tag_keeps_any_language():
+    """Issue #1657: the AI output language is HA's own code, not clamped to the shipped languages."""
+
+    class Hass:
+        class config:  # noqa: N801
+            language = "sv"
+
+    assert i18n.hass_language_tag(Hass()) == "sv"
+    Hass.config.language = " pt_BR "
+    assert i18n.hass_language_tag(Hass()) == "pt-BR"
+    Hass.config.language = "zh-Hant-TW"
+    assert i18n.hass_language_tag(Hass()) == "zh-Hant-TW"
+    for bad in (None, "", "not a language!", 42, "e"):
+        Hass.config.language = bad
+        assert i18n.hass_language_tag(Hass()) == "en", bad
+    assert i18n.hass_language_tag(object()) == "en"
+
+
 # ------------------------------------------------------------------------------------------ catalogs
+
+
 def test_index_json_is_the_single_source_of_the_lists():
     index = json.loads((FRONTEND / "i18n" / "index.json").read_text(encoding="utf-8"))
     assert tuple(index["languages"]) == i18n.LANGUAGES

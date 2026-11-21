@@ -153,7 +153,7 @@ The panel registers `entry.html?v=<hash>`. `_panel_asset_bytes` (`__init__.py`) 
 - **D6** Entities and states use HA's own method: `_attr_translation_key`, names and state translations in `translations/`, prose-state sensors render a `Msg` in `hass.config.language` and expose stable `code`/`params` attributes.
 - **D7** Workflow: an in-repo tool, no external service (Q5); machine drafts with a glossary and a translation memory; all keys ship translated (Q4); the `en-XA` pseudo-locale tests a branch before translations exist.
 - **D8** Layout: physical CSS to logical, mirrored direction arrows, `<bdi>` around numbers/times/names, `overflow-wrap: anywhere` and `hyphens: auto`, `line-break: strict` for CJK.
-- **D9** AI: the investigation skill is told to write occupant-facing sections in the language; `## SECTION` headers stay English; AI context uses `render_en`.
+- **D9** AI: the investigation skill is told to write occupant-facing sections in the language; `## SECTION` headers stay English; AI context uses `render_en`. Issue #1657: the report language is `i18n.hass_language_tag(hass)`, HA's own language code as given (any language HA supports, e.g. `sv`, `pt-BR`, `zh-TW`), not the shipped language from `hass_language`: the model writes it, no catalog is needed. English (any region) adds no instruction. The dashboard labels around the report still follow the shipped languages.
 
 ## Owner decisions (2026-11-14)
 

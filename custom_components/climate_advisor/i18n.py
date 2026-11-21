@@ -494,6 +494,26 @@ def hass_language(hass: Any) -> str:
     return resolve_language(getattr(getattr(hass, "config", None), "language", None))
 
 
+def hass_language_tag(hass: Any) -> str:
+    """``hass.config.language`` as given (any language HA supports, not only ``LANGUAGES``); en when unreadable.
+
+    Issue #1657: the AI report is written by a model, not from catalogs, so it is not limited to the shipped
+    languages. Dashboard text still uses :func:`hass_language`.
+    """
+    code = getattr(getattr(hass, "config", None), "language", None)
+    if not isinstance(code, str):
+        return DEFAULT_LANGUAGE
+    code = code.strip().replace("_", "-")
+    primary, *rest = code.split("-")
+    well_formed = (
+        code.isascii()
+        and primary.isalpha()
+        and 2 <= len(primary) <= 3
+        and all(part.isalnum() and 1 <= len(part) <= 8 for part in rest)
+    )
+    return code if well_formed else DEFAULT_LANGUAGE
+
+
 # ------------------------------------------------------------------------------------------------ plurals
 _PREC = 400  # Decimal precision: enough for any finite double plus three fraction digits
 

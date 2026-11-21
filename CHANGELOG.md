@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.54] — 2026-11-20
+
+### Changed (CI only; nothing changes in your house)
+- The README's test badges now refresh once a day (07:37 UTC, after the nightly) and on demand, instead of after every push to `main`. Each refresh re-runs both test tiers with coverage, about 13 minutes of CI, and the badges change little between merges. The required PR checks still stop a failing change before it merges.
+
 ## [0.9.53] — 2026-11-20
 
 ### Fixed

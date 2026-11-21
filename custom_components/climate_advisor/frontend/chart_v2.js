@@ -2215,7 +2215,10 @@
     const sym = _unitSym();
     const fmtT = t => _fmtT(t, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     const head = '<tr><th scope="col">' + escapeHtml(_t('table.time')) + '</th>' + m.cols.map(c => '<th scope="col">' + escapeHtml(_t('table.col', { name: c.short, unit: c.unit || sym })) + '</th>').join('') + '<th scope="col">' + escapeHtml(_t('table.thermostat')) + '</th></tr>';
-    const stateTxt = st => ({ heating: 1, cooling: 1, fan: 1 })[st] ? _t('table.state_' + st) : st;
+    // Issue #1659: any other hvac_action (idle, off, drying, ...) shows its common.hvac_action word, not the code.
+    const stateTxt = st => ({ heating: 1, cooling: 1, fan: 1 })[st] ? _t('table.state_' + st)
+      : (st && _lang() !== 'en' && _catReady && window.CAI18N.has('common.hvac_action.' + st)
+        ? window.CAI18N.t('common.hvac_action.' + st) : st);
     const body = m.rows.map(r => '<tr' + (r.t > Date.now() ? ' class="future"' : '') + '><th scope="row">' + escapeHtml(fmtT(r.t)) + '</th>' +
       r.cells.map(v => '<td>' + (v == null ? '—' : _num(v, 1)) + '</td>').join('') + '<td>' + escapeHtml(stateTxt(r.state || '')) + '</td></tr>').join('');
     wrap.querySelector('table').innerHTML = '<caption>' + escapeHtml(_t(m.cols.some(c => c.unit === '%') ? 'table.caption_hum' : 'table.caption', { unit: sym, n: Math.round(m.step / 60000) })) + '</caption><thead>' + head + '</thead><tbody>' + body + '</tbody>';

@@ -622,6 +622,17 @@ class HvacCommandResult(Enum):
     SUPERSEDED = "superseded"  # a newer write replaced this one while its mode command was in flight
 
 
+# Issue #1659: the outcomes the pre-cool status line names, each a word in every language
+# (``status.pre_cool.outcome.*``).
+_PRE_COOL_OUTCOME_WORDS = {
+    "blocked": "status.pre_cool.outcome.blocked",
+    "dry_run": "status.pre_cool.outcome.dry_run",
+    "failed": "status.pre_cool.outcome.failed",
+    "superseded": "status.pre_cool.outcome.superseded",
+    "not_sent": "status.pre_cool.outcome.not_sent",
+}
+
+
 def hvac_outcome_label(result: HvacCommandResult | None) -> str:
     """Activity Log ``outcome`` for an event that follows a write (Issue #1049, change 5).
 
@@ -12991,7 +13002,11 @@ class AutomationEngine:
             "not_applied",
             i18n.Msg(
                 "status.pre_cool.not_applied",
-                outcome=_pre_cool_outcome,
+                outcome=(
+                    i18n.Code(_PRE_COOL_OUTCOME_WORDS[_pre_cool_outcome])
+                    if _pre_cool_outcome in _PRE_COOL_OUTCOME_WORDS
+                    else _pre_cool_outcome
+                ),
                 target=i18n.Temp(pre_cool_target, self._temp_unit, 1),
             ),
         )

@@ -326,6 +326,18 @@ class _MockCoordinatorEntity:
     def __init__(self, coordinator, *args, **kwargs):
         self.coordinator = coordinator
 
+    @property
+    def available(self) -> bool:
+        """As in HA: available while the coordinator's last update succeeded (Issue #1642)."""
+        return bool(getattr(self.coordinator, "last_update_success", True))
+
+    async def async_added_to_hass(self) -> None:
+        """No coordinator listener in the stub."""
+
+    def async_on_remove(self, func) -> None:
+        """Remember a teardown callback, as HA's Entity does."""
+        self.__dict__.setdefault("_on_remove", []).append(func)
+
 
 class _MockSensorEntity:
     """Minimal stand-in for homeassistant.components.sensor.SensorEntity."""

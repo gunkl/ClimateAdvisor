@@ -254,3 +254,33 @@ def test_builtin_claude_limit_is_named_by_its_label_on_both_dashboards() -> None
     classic = (PKG / "frontend" / "index.html").read_text(encoding="utf-8")
     assert "_aiBuiltin(l) ? 'Maximum Response Length'" in classic
     assert "builtin_claude' ? 'climate_advisor'" not in classic
+
+
+def _options_labels(lang: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for step in _catalog("ha", "", lang)["options"]["step"].values():
+        labels.update(step.get("data") or {})
+    return labels
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_dashboard_settings_labels_are_the_options_flow_labels(lang: str) -> None:
+    """Issue #1663: the dashboard Settings tab names each setting exactly as Configure does, so a person who reads
+    it there finds the same name in the options flow. Units ride in the value (`time_unit`, temperature `unit`) or
+    the description, never in only one of the two labels."""
+    settings = _catalog("fe", "settings", lang)
+    options = _options_labels(lang)
+    keys = [m.group(1) for k in settings if (m := re.fullmatch(r"settings\.([a-z_0-9]+)\.label", k))]
+    drift = {
+        k: (settings[f"settings.{k}.label"], options[k])
+        for k in keys
+        if k in options and settings[f"settings.{k}.label"] != options[k]
+    }
+    assert not drift, f"[{lang}] dashboard label != options label: {drift}"
+
+
+def test_every_dashboard_setting_has_an_options_flow_label() -> None:
+    from custom_components.climate_advisor.const import CONFIG_METADATA
+
+    options = _options_labels("en")
+    assert not sorted(k for k in CONFIG_METADATA if k not in options), "a Settings-tab row with no options-flow label"

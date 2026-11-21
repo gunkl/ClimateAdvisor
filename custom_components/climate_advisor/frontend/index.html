@@ -1997,7 +1997,7 @@
         html += `<div class="settings-group"><h3>${catLabel}</h3>`;
         items.forEach(s => {
           const displayValue = s.value == null ? '<span style="color:var(--text-secondary)">not set</span>'
-            : escapeHtml(String(s.value)) + (s.unit ? escapeHtml(s.unit) : '');
+            : escapeHtml(String(s.value)) + (s.unit ? escapeHtml(s.unit) : s.time_unit ? ' ' + escapeHtml(s.time_unit) : '');
           html += `
             <div class="setting-row">
               <div class="setting-info">

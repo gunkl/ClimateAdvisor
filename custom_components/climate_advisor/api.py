@@ -1009,8 +1009,8 @@ class ClimateAdvisorConfigView(HomeAssistantView):
                 if value_msg is not None:
                     entry["value_msg"] = value_msg.to_wire()
                 # Explicit units (Issue #1341): `unit` stays temperature-only (the symbol, as documented); the
-                # static time unit ("min"/"s") rides in its own `time_unit` field, so a classic page that appends
-                # `unit` to the value shows what it always did.
+                # static time unit ("min"/"s") rides in its own `time_unit` field. Labels carry no unit (Issue #1663:
+                # they are the options-flow labels), so both dashboards show `time_unit` after the value.
                 if setting_unit is not None:
                     entry["unit"] = setting_unit
                 elif meta.get("time_unit"):

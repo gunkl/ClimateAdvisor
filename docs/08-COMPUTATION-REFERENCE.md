@@ -4260,7 +4260,7 @@ minutes_down=…` (INFO). Activity Log events: `indoor_sensor_unavailable`
 (not a failure) is a separate event, `indoor_source_changed`, from `_note_indoor_source()` in the same funnel (see
 "Indoor source changes" under Bug C).
 
-| Condition (`reason`) | Value used | Log | Activity Log | Settings → Indoor Temp Source |
+| Condition (`reason`) | Value used | Log | Activity Log | Settings → Indoor Temperature Source |
 |---|---|---|---|---|
 | Source needs an entity, none set (`not_configured`) | None (decisions pause) | WARNING once | `indoor_sensor_unavailable` | `Dedicated sensor — none selected (indoor decisions paused)` |
 | Entity not in state machine (`entity_missing`) | None | WARNING once | unavailable event | `Dedicated sensor — sensor.x (sensor entity not found — indoor decisions paused)` |

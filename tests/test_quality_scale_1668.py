@@ -63,10 +63,10 @@ def test_stdlib_reader_agrees_with_a_real_yaml_parser():
     assert badges.read_quality_scale(QUALITY_FILE) == _statuses_via_yaml()
 
 
-def test_committed_file_reaches_bronze():
+def test_committed_file_reaches_gold():
     badge = badges.quality_badge(badges.QUALITY_LABEL, badges.read_quality_scale(QUALITY_FILE))
-    assert badge["message"].startswith("Bronze · ")
-    assert badge["color"] == badges.TIER_COLORS["Bronze"]
+    assert badge["message"].startswith("Gold · ")
+    assert badge["color"] == badges.TIER_COLORS["Gold"]
 
 
 def _rules(**overrides: str) -> dict[str, str]:

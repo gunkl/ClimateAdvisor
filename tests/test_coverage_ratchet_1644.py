@@ -59,6 +59,16 @@ def test_module_at_or_within_tolerance_of_its_floor_passes():
     assert not ratchet.check(_cov(a__py=91.9), _floors(0.2, a__py=92.0)).errors
 
 
+def test_tolerance_never_reaches_below_the_target_once_a_floor_is_there():
+    # Issue #1671: Silver needs every module above 95 %; a module that reached it may not slip back under.
+    result = ratchet.check(_cov(a__py=94.9), _floors(0.5, a__py=95.1))
+    assert len(result.errors) == 1 and "fell below the 95% target (floor 95.1%)" in result.errors[0]
+    assert not ratchet.check(_cov(a__py=95.0), _floors(0.5, a__py=95.1)).errors
+    # Within tolerance above the target still passes, and a floor under the target keeps its full tolerance.
+    assert not ratchet.check(_cov(a__py=96.6), _floors(0.5, a__py=97.0)).errors
+    assert not ratchet.check(_cov(a__py=91.6), _floors(0.5, a__py=92.0)).errors
+
+
 def test_new_module_below_target_fails_and_above_target_is_a_note():
     result = ratchet.check(_cov(old__py=90.0, low__py=80.0, high__py=99.0), _floors(old__py=90.0))
     assert len(result.errors) == 1 and result.errors[0].startswith("low.py: new module at 80.0%")

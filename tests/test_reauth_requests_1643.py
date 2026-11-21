@@ -21,7 +21,7 @@ if "homeassistant" not in sys.modules:
     _install_ha_stubs()
 
 from custom_components.climate_advisor import reauth  # noqa: E402
-from custom_components.climate_advisor.const import CONF_AI_API_KEY, CONF_GITHUB_TOKEN  # noqa: E402
+from custom_components.climate_advisor.const import CONF_GITHUB_TOKEN  # noqa: E402
 
 
 def _entry(flows: list[dict] | None = None) -> MagicMock:

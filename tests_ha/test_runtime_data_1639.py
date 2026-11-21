@@ -55,9 +55,7 @@ async def test_zones_live_on_their_entries_through_unload_and_reload(make_house)
         assert studio_coordinator not in list(zone_registry.iter_coordinators(hass))
         assert list(zone_registry.loaded_zones(hass)) == [zone1.entry_id, upstairs.entry_id]
         with pytest.raises(ServiceValidationError) as caught:
-            await hass.services.async_call(
-                CA_DOMAIN, "force_reclassify", {"entry_id": studio.entry_id}, blocking=True
-            )
+            await hass.services.async_call(CA_DOMAIN, "force_reclassify", {"entry_id": studio.entry_id}, blocking=True)
         assert caught.value.translation_key == "unknown_zone"
 
         # Reload another zone (a settings save): its entry carries a NEW coordinator, which is the one resolved.

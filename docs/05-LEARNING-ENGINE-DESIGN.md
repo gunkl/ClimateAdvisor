@@ -73,7 +73,8 @@ Suggestions are generated when `generate_suggestions()` is called (typically dur
 ### Pattern: High Runtime on Mild/Warm Days
 
 **Detection:** Average HVAC runtime > 120 minutes on mild/warm day types.
-**Suggestion:** "Would you like to add more door/window sensors, or adjust the setpoints for mild days?"
+**Suggestion (advice):** "Doors or windows may be open without a sensor, or the comfort range may be narrower than the house needs. Adding door/window sensors or widening the comfort range in Settings can help."
+**If accepted ("Got it"):** nothing changes (Issue #1652). The old text offered to "adjust the setpoints for mild days"; there are no mild-day setpoints.
 **Root cause:** Usually indicates doors/windows being left open without sensors, or setpoints that are too aggressive for the house's thermal characteristics.
 
 ### Pattern: Short Departures

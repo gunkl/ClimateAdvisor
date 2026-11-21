@@ -170,6 +170,10 @@ def test_pause_and_runtime_and_static_suggestions_english(tmp_path: Path) -> Non
     assert got["high_runtime_mild_days"].startswith(
         "On mild and warm days, the HVAC has been running an average of 130 minutes"
     )
+    # Issue #1652: advice now; there are no mild-day setpoints for Accept to adjust
+    assert got["high_runtime_mild_days"].endswith(
+        "Adding door/window sensors or widening the comfort range in Settings can help."
+    )
     assert got["frequent_door_pauses"] == (
         "HVAC has been paused 42 times due to open doors/windows in the past two weeks. Front Door was the most "
         "frequent trigger (28 times). A longer sensor debounce delay keeps short openings from pausing it; the "

@@ -48,7 +48,7 @@
   "settings.automation_grace_seconds.description": "Climate Advisor が空調を再開した後(すべてのドアと窓が閉まった状態)、ドアが一瞬開いても再び一時停止しないようにする猶予時間です。",
   "settings.automation_grace_seconds.label": "自動制御の一時停止期間(分)",
   "settings.badge_changed": "変更あり",
-  "settings.briefing_notifications_enabled.description": "複数ゾーンの環境では、毎日のブリーフィングのプッシュ/メールを送るゾーンは 1 つだけにしてください。そうしないとゾーンごとに同じ通知が届きます。オンにするのは 1 ゾーンだけにしてください。デバッグタブの「ブリーフィング送信」は、オフでも常に送信されます。",
+  "settings.briefing_notifications_enabled.description": "複数ゾーンの環境では、毎日のブリーフィングのプッシュ/メールを送るゾーンは 1 つだけにしてください。そうしないとゾーンごとに同じ通知が届きます。オンにするのは 1 ゾーンだけにしてください。ダッシュボードの「操作」にある「ブリーフィングを送信」は、これがオフでも常に送信されます。",
   "settings.briefing_notifications_enabled.label": "毎日のブリーフィング通知を送信(このゾーン)",
   "settings.briefing_time.description": "毎日の気候ブリーフィングを作成して送信する時刻です。起きたときに見られるよう、wake_time より前にしてください。",
   "settings.briefing_time.label": "ブリーフィング時刻",

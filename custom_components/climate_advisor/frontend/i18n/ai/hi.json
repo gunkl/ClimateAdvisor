@@ -1,5 +1,7 @@
 {
   "ai.limits.advice": "Home Assistant में उस इंटीग्रेशन की सेटिंग्स में इसे बढ़ाएँ। अगर आप फिर भी चलाते हैं, तो रिपोर्ट अधूरी रह सकती है या विफल हो सकती है।",
+  "ai.limits.builtin_place": "Climate Advisor की AI सेटिंग्स",
+  "ai.limits.builtin_setting": "उत्तर की अधिकतम लंबाई",
   "ai.limits.cancel": "रद्द करें",
   "ai.limits.cancelled": "जाँच रद्द की गई।",
   "ai.limits.check": "{kind, select, output {आउटपुट सीमा} context {कॉन्टेक्स्ट विंडो} other {संयुक्त कॉन्टेक्स्ट विंडो (इनपुट और आउटपुट)}}: {integration} में {setting} {value} है; कम से कम {required} चाहिए।",

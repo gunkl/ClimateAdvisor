@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "para retener el calor",
   "briefing.reopen_evening": "Vuelve a abrir las ventanas hacia las {time}, cuando el aire de la noche se haya enfriado{ac_off, select, yes { — apagaré el aire acondicionado.} other {.}}",
   "briefing.steps": "📋 Pasos de hoy\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 Sugerencias según los patrones recientes\n----------------------------------------\n{items}\n\nPara responder a estas sugerencias, abre el panel de Climate Advisor y ve a la pestaña IA.",
+  "briefing.suggestions": "💡 Sugerencias según los patrones recientes\n----------------------------------------\n{items}\n\nPara responder a estas sugerencias, abre el panel de Climate Advisor y ve a la pestaña Análisis.",
   "briefing.title": "🏠 El plan de clima de tu casa para hoy",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  Ahorro al dormir: se mantiene el de ausencia",

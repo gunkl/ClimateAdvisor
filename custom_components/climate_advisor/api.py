@@ -1480,14 +1480,14 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                             # reasoning_effort or a much larger ceiling to answer at all.
                             _LOGGER.warning(
                                 "Investigation report produced zero visible output despite "
-                                "consuming the full response budget — raising Investigator "
-                                "Max Response Length may not fix this; consider trying a "
+                                "consuming the full response budget — raising Maximum "
+                                "Response Length may not fix this; consider trying a "
                                 "different reasoning effort for this model"
                             )
                         elif final_result["truncated"]:
                             _LOGGER.warning(
                                 "Investigation report truncated: hit max_tokens limit; "
-                                "consider raising Investigator Max Response Length"
+                                "consider raising Maximum Response Length (AI settings)"
                             )
                         elif final_result["cut_short"]:
                             _LOGGER.warning("Investigation report cut short: required sections missing")
@@ -1518,14 +1518,14 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 if result.get("truncated_empty"):
                     _LOGGER.warning(
                         "Investigation report produced zero visible output despite "
-                        "consuming the full response budget — raising Investigator "
-                        "Max Response Length may not fix this; consider trying a "
+                        "consuming the full response budget — raising Maximum "
+                        "Response Length may not fix this; consider trying a "
                         "different reasoning effort for this model"
                     )
                 elif result.get("truncated"):
                     _LOGGER.warning(
                         "Investigation report truncated: hit max_tokens limit; "
-                        "consider raising Investigator Max Response Length"
+                        "consider raising Maximum Response Length (AI settings)"
                     )
                 coordinator.claude_client.increment_investigator_counter()
                 await coordinator.async_store_investigation_report(result)

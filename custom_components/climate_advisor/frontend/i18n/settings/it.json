@@ -48,7 +48,7 @@
   "settings.automation_grace_seconds.description": "Dopo che Climate Advisor riprende la climatizzazione (con tutte le porte e finestre chiuse), questo periodo evita una nuova pausa immediata se una porta si apre per un attimo.",
   "settings.automation_grace_seconds.label": "Pausa dell’automazione (minuti)",
   "settings.badge_changed": "modificato",
-  "settings.briefing_notifications_enabled.description": "In un’installazione con più zone, solo una zona dovrebbe inviare il riepilogo giornaliero pianificato (push/e-mail), altrimenti ne ricevi una copia per zona. Attiva questa opzione per una sola zona. Il pulsante Invia riepilogo nella scheda Debug invia sempre, anche se questa opzione è disattivata.",
+  "settings.briefing_notifications_enabled.description": "In un’installazione con più zone, solo una zona dovrebbe inviare il riepilogo giornaliero pianificato (push/e-mail), altrimenti ne ricevi una copia per zona. Attiva questa opzione per una sola zona. «Invia riepilogo» in «Azioni» nella dashboard invia sempre, anche se questa opzione è disattivata.",
   "settings.briefing_notifications_enabled.label": "Invia riepilogo giornaliero (questa zona)",
   "settings.briefing_time.description": "Quando il riepilogo climatico giornaliero viene generato e inviato. Meglio prima dell’ora della sveglia, così lo vedi appena ti alzi.",
   "settings.briefing_time.label": "Ora del riepilogo",

@@ -1,6 +1,8 @@
 {
   "ar": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -19,6 +21,8 @@
   },
   "de": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -37,6 +41,8 @@
   },
   "es": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -55,6 +61,8 @@
   },
   "fr": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -73,6 +81,8 @@
   },
   "hi": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -91,6 +101,8 @@
   },
   "it": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -109,6 +121,8 @@
   },
   "ja": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -127,6 +141,8 @@
   },
   "ko": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -145,6 +161,8 @@
   },
   "nl": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -163,6 +181,8 @@
   },
   "pl": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -181,6 +201,8 @@
   },
   "pt": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -199,6 +221,8 @@
   },
   "ru": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -217,6 +241,8 @@
   },
   "tr": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -235,6 +261,8 @@
   },
   "uk": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -253,6 +281,8 @@
   },
   "zh-Hans": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",
@@ -271,6 +301,8 @@
   },
   "zh-Hant": {
     "ai.limits.advice": "05767eafee4e",
+    "ai.limits.builtin_place": "833ddd020e52",
+    "ai.limits.builtin_setting": "4e34896de25e",
     "ai.limits.cancel": "77dfd2135f4d",
     "ai.limits.cancelled": "b782b89a32b4",
     "ai.limits.check": "52b2a642b240",

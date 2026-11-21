@@ -48,7 +48,7 @@
   "settings.automation_grace_seconds.description": "Climate Advisor iklimlendirmeyi yeniden başlattıktan (tüm kapı/pencereler kapalı) sonra, bir kapı kısa süreliğine açılırsa hemen yeniden duraklatılmasını önleyen bekleme süresi.",
   "settings.automation_grace_seconds.label": "Otomasyon Bekleme Süresi (dakika)",
   "settings.badge_changed": "değişti",
-  "settings.briefing_notifications_enabled.description": "Çok bölgeli kurulumda yalnızca bir bölge zamanlanmış günlük özet bildirimini/e-postasını göndermelidir; aksi halde her bölge için bir kopya alırsınız. Bunu yalnızca bir bölge için AÇIN. Hata ayıklama sekmesindeki Özeti Gönder düğmesi, bu kapalı olsa bile her zaman gönderir.",
+  "settings.briefing_notifications_enabled.description": "Çok bölgeli kurulumda yalnızca bir bölge zamanlanmış günlük özet bildirimini/e-postasını göndermelidir; aksi halde her bölge için bir kopya alırsınız. Bunu yalnızca bir bölge için AÇIN. Panodaki “Eylemler” altında “Özeti gönder”i kullanmak, bu kapalı olsa bile her zaman gönderir.",
   "settings.briefing_notifications_enabled.label": "Günlük Özet Bildirimlerini Gönder (Bu Bölge)",
   "settings.briefing_time.description": "Günlük iklim özetinin oluşturulup gönderileceği saat. Kalktığınızda görebilmeniz için uyanma saatinden önce olmalıdır.",
   "settings.briefing_time.label": "Özet Saati",

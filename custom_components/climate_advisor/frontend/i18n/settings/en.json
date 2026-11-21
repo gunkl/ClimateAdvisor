@@ -48,7 +48,7 @@
   "settings.automation_grace_seconds.description": "After Climate Advisor resumes HVAC (all doors/windows closed), this grace window prevents immediate re-pausing if a door opens briefly.",
   "settings.automation_grace_seconds.label": "Automation Grace Period (minutes)",
   "settings.badge_changed": "changed",
-  "settings.briefing_notifications_enabled.description": "On a multi-zone install, only one zone should send the scheduled daily briefing push/email — otherwise you get one copy per zone. Turn this ON for exactly one zone. Manually clicking Send Briefing on the debug tab always sends, even when this is off.",
+  "settings.briefing_notifications_enabled.description": "On a multi-zone install, only one zone should send the scheduled daily briefing push/email — otherwise you get one copy per zone. Turn this ON for exactly one zone. Using Send briefing under Actions on the dashboard always sends, even when this is off.",
   "settings.briefing_notifications_enabled.label": "Send Daily Briefing Notifications (This Zone)",
   "settings.briefing_time.description": "When the daily climate briefing is generated and sent. Should be before wake_time so you see it when you get up.",
   "settings.briefing_time.label": "Briefing Time",

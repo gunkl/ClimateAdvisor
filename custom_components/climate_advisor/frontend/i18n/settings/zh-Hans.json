@@ -48,7 +48,7 @@
   "settings.automation_grace_seconds.description": "Climate Advisor 恢复 HVAC 后（所有门窗已关闭），此暂停期可防止门短暂打开时立即再次暂停。",
   "settings.automation_grace_seconds.label": "自动化暂停期（分钟）",
   "settings.badge_changed": "已更改",
-  "settings.briefing_notifications_enabled.description": "在多区域安装中，只应由一个区域发送定时的每日简报推送/邮件，否则每个区域都会发一份。请只为一个区域开启。在调试选项卡中手动点击“发送简报”时，即使此项关闭也始终会发送。",
+  "settings.briefing_notifications_enabled.description": "在多区域安装中，只应由一个区域发送定时的每日简报推送/邮件，否则每个区域都会发一份。请只为一个区域开启。在仪表板的“操作”中手动点击“发送简报”时，即使此项关闭也始终会发送。",
   "settings.briefing_notifications_enabled.label": "发送每日简报通知（此区域）",
   "settings.briefing_time.description": "生成并发送每日气候简报的时间。应早于 wake_time，这样起床时就能看到。",
   "settings.briefing_time.label": "简报时间",

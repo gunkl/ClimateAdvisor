@@ -475,11 +475,15 @@
   function A(key, params) { return CAI18N.t('ai.' + key, params); }
   var AI_REQ = { output: 8192, context: 16384, combined: 24576 }; // const.AI_REQUIRED_* (docs/ai-integration.md)
   var lastLimits = null;
-  function limitsIntegration(l) { return (l && l.integration) || (l && l.provider === 'builtin_claude' ? 'climate_advisor' : '\u2014'); }
+  // Issue #1660: built-in Claude's limit is Climate Advisor's own "Maximum Response Length" (AI settings), named as the
+  // options flow shows it, never as the raw option key and domain ("max_tokens in climate_advisor").
+  function builtinLimits(l) { return !!l && l.provider === 'builtin_claude'; }
+  function limitsIntegration(l) { return builtinLimits(l) ? A('limits.builtin_place') : iso((l && l.integration) || '\u2014'); }
+  function limitsSetting(l, c) { return builtinLimits(l) ? A('limits.builtin_setting') : iso(String(c.setting || '')); }
   function failedChecks(l) { return (l && Array.isArray(l.checks) ? l.checks : []).filter(function (c) { return c && c.ok === false; }); }
   function checkLine(l, c) {
-    return A('limits.check', { kind: c.kind === 'output' || c.kind === 'context' ? c.kind : 'combined', setting: iso(String(c.setting || '')),
-      integration: iso(limitsIntegration(l)), value: Number(c.value) || 0, required: Number(c.required) || 0 });
+    return A('limits.check', { kind: c.kind === 'output' || c.kind === 'context' ? c.kind : 'combined', setting: limitsSetting(l, c),
+      integration: limitsIntegration(l), value: Number(c.value) || 0, required: Number(c.required) || 0 });
   }
   // status lines: the catalog message for `key` (with `params`), else the backend's `text`
   function aiStatusText(ev) {
@@ -492,7 +496,7 @@
     if (code === 'ai_context_limit') return A('notice.ai_context_limit', { context: AI_REQ.context, combined: AI_REQ.combined });
     if (code === 'ai_report_cut_short') {
       var c = failedChecks(lastLimits)[0];
-      return c ? A('notice.ai_report_cut_short', { has_setting: 'yes', setting: iso(String(c.setting || '')), integration: iso(limitsIntegration(lastLimits)), required: Number(c.required) || AI_REQ.output })
+      return c ? A('notice.ai_report_cut_short', { has_setting: 'yes', setting: limitsSetting(lastLimits, c), integration: limitsIntegration(lastLimits), required: Number(c.required) || AI_REQ.output })
         : A('notice.ai_report_cut_short', { has_setting: 'no', setting: '', integration: '', required: AI_REQ.output });
     }
     return CAI18N.has('ai.notice.' + code) ? A('notice.' + code) : null;

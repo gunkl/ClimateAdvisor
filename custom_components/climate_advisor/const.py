@@ -151,7 +151,7 @@ CONF_EMAIL_ENTITY_HEALTH = "email_entity_health"  # Issue #805
 # briefing push/email — otherwise the same person gets one copy per zone. Gates only the
 # automatic/scheduled briefing_time trigger (push_briefing/email_briefing above still control
 # whether that one notifying zone sends push vs. email vs. both); manual "Send Briefing" from
-# the debug tab always sends regardless of this flag (deliberate manual test action).
+# the dashboard's Actions always sends regardless of this flag (deliberate manual test action).
 CONF_BRIEFING_NOTIFICATIONS_ENABLED = "briefing_notifications_enabled"
 
 # Startup coalescing window: suppress override detection for this many seconds after restart
@@ -1456,7 +1456,7 @@ CONFIG_METADATA = {
         "description": (
             "On a multi-zone install, only one zone should send the scheduled daily briefing"
             " push/email — otherwise you get one copy per zone. Turn this ON for exactly one"
-            " zone. Manually clicking Send Briefing on the debug tab always sends, even when"
+            " zone. Using Send briefing under Actions on the dashboard always sends, even when"
             " this is off."
         ),
         "category": "notifications",

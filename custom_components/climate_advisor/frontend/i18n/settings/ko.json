@@ -48,7 +48,7 @@
   "settings.automation_grace_seconds.description": "Climate Advisor가 HVAC를 재개한 뒤(모든 문과 창문이 닫힌 상태), 문이 잠깐 열려도 곧바로 다시 일시 중지되지 않도록 하는 유예 시간입니다.",
   "settings.automation_grace_seconds.label": "자동화 일시 정지 시간(분)",
   "settings.badge_changed": "변경됨",
-  "settings.briefing_notifications_enabled.description": "멀티 존 환경에서는 예약된 일일 브리핑 푸시/이메일을 보내는 존이 하나여야 합니다. 그렇지 않으면 존마다 사본을 받게 됩니다. 정확히 한 존에서만 켜세요. 디버그 탭에서 브리핑 보내기를 직접 누르면 꺼져 있어도 항상 전송됩니다.",
+  "settings.briefing_notifications_enabled.description": "멀티 존 환경에서는 예약된 일일 브리핑 푸시/이메일을 보내는 존이 하나여야 합니다. 그렇지 않으면 존마다 사본을 받게 됩니다. 정확히 한 존에서만 켜세요. 대시보드의 '작업'에서 '브리핑 보내기'를 직접 누르면 이 설정이 꺼져 있어도 항상 전송됩니다.",
   "settings.briefing_notifications_enabled.label": "일일 브리핑 알림 보내기(이 존)",
   "settings.briefing_time.description": "일일 기후 브리핑을 생성해 보내는 시각입니다. 일어났을 때 볼 수 있도록 wake_time보다 이전으로 설정하세요.",
   "settings.briefing_time.label": "브리핑 시각",

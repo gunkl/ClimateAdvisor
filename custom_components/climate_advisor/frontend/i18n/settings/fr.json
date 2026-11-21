@@ -48,7 +48,7 @@
   "settings.automation_grace_seconds.description": "Après la reprise du CVC par Climate Advisor (portes et fenêtres fermées), ce délai évite une nouvelle mise en pause immédiate si une porte s’ouvre brièvement.",
   "settings.automation_grace_seconds.label": "Délai de grâce de l’automatisation (minutes)",
   "settings.badge_changed": "modifié",
-  "settings.briefing_notifications_enabled.description": "Sur une installation multizone, une seule zone doit envoyer le bilan quotidien planifié (push/e-mail), sinon vous recevez un exemplaire par zone. Activez ceci pour une seule zone. Le bouton Envoyer le bilan de l’onglet Débogage envoie toujours, même si ceci est désactivé.",
+  "settings.briefing_notifications_enabled.description": "Sur une installation multizone, une seule zone doit envoyer le bilan quotidien planifié (push/e-mail), sinon vous recevez un exemplaire par zone. Activez ceci pour une seule zone. « Envoyer le bilan » dans « Actions » du tableau de bord envoie toujours, même si ceci est désactivé.",
   "settings.briefing_notifications_enabled.label": "Envoyer le bilan quotidien (cette zone)",
   "settings.briefing_time.description": "Heure à laquelle le bilan climatique quotidien est généré et envoyé. À fixer avant l’heure de réveil pour le voir au lever.",
   "settings.briefing_time.label": "Heure du bilan",

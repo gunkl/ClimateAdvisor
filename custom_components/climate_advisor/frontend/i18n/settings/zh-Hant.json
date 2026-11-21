@@ -48,7 +48,7 @@
   "settings.automation_grace_seconds.description": "Climate Advisor 恢復空調系統運作後（所有門窗都已關閉），這段寬限期可避免門只是短暫打開就立刻再次暫停。",
   "settings.automation_grace_seconds.label": "自動化寬限期（分鐘）",
   "settings.badge_changed": "已變更",
-  "settings.briefing_notifications_enabled.description": "在多區域的安裝中，應只由一個區域傳送排程的每日簡報推播/電子郵件，否則每個區域都會寄一份給您。請只在其中一個區域開啟此選項。在「除錯」分頁手動點選「傳送簡報」時一律會傳送，即使此選項關閉也一樣。",
+  "settings.briefing_notifications_enabled.description": "在多區域的安裝中，應只由一個區域傳送排程的每日簡報推播/電子郵件，否則每個區域都會寄一份給您。請只在其中一個區域開啟此選項。在儀表板的「操作」中手動點選「傳送簡報」時一律會傳送，即使此選項關閉也一樣。",
   "settings.briefing_notifications_enabled.label": "傳送每日簡報通知（此區域）",
   "settings.briefing_time.description": "每日空調簡報產生並傳送的時間。應早於 wake_time，讓您起床時就能看到。",
   "settings.briefing_time.label": "簡報時間",

@@ -232,6 +232,25 @@ def fan_entity_owned_by_other_zone(hass: HomeAssistant, fan_entity: str | None, 
     return False
 
 
+def thermostat_owned_by_other_zone(hass: HomeAssistant, climate_entity: str | None, entry_id: str | None) -> bool:
+    """Whether another Climate Advisor zone already runs this thermostat (Issue #1646).
+
+    A zone's unique id is its thermostat, so two zones on one thermostat is a duplicate. Checks both the other
+    zones' unique ids and their stored ``climate_entity`` (an entry can lack a unique id). ``entry_id`` excludes
+    the zone being changed. Reads only this integration's own config entries (HA boundary).
+    """
+    if not climate_entity:
+        return False
+    wanted = str(climate_entity).strip().lower()
+    for other in hass.config_entries.async_entries(DOMAIN):
+        if entry_id is not None and other.entry_id == entry_id:
+            continue
+        for owned in (other.unique_id, (other.data or {}).get("climate_entity")):
+            if owned and str(owned).strip().lower() == wanted:
+                return True
+    return False
+
+
 ZONE_PARAM_HINT = "add ?zone=<entry_id> to the request (GET /api/climate_advisor/status lists each zone's entry_id)"
 
 

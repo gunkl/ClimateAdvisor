@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "Entry_id de zone Climate Advisor inconnu ou non chargé : « {entry_id} ». Vérifiez Paramètres > Appareils et services pour trouver la bonne zone."
+    },
+    "update_failed": {
+      "message": "Climate Advisor n’a pas pu mettre à jour cette zone : {error}"
     }
   }
 }

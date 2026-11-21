@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "Climate Advisor のゾーン entry_id「{entry_id}」が不明、または読み込まれていません。設定 > デバイスとサービスで正しいゾーンを確認してください。"
+    },
+    "update_failed": {
+      "message": "Climate Advisor はこのゾーンを更新できませんでした: {error}"
     }
   }
 }

@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "Bilinmeyen veya yüklenmemiş Climate Advisor bölgesi entry_id {entry_id}. Doğru bölge için Ayarlar > Cihazlar ve hizmetler bölümüne bakın."
+    },
+    "update_failed": {
+      "message": "Climate Advisor bu bölgeyi güncelleyemedi: {error}"
     }
   }
 }

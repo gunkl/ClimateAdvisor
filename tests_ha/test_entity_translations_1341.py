@@ -87,7 +87,9 @@ async def test_english_install_keeps_its_entity_ids_and_friendly_names(make_hous
     await house.advance(minutes=5)
 
     found = _zone_entities(house)
-    assert {k: v[:2] for k, v in found.items()} == ENGLISH_BEFORE
+    # Issue #1637: Trend is disabled by default on a new install, so it has no state (no friendly name) until the
+    # user enables it; its entity id is still the one recorded before.
+    assert {k: v[:2] for k, v in found.items()} == {**ENGLISH_BEFORE, "trend_direction": ("sensor.house_trend", None)}
     # 21 sensors + the switch, every one named by its translation key (no hard-coded name).
     assert len(found) == 22
     reg = er.async_get(house.hass)
@@ -111,7 +113,8 @@ async def test_german_install_reads_german_names_states_flow_words_and_errors(ma
     assert found["day_type"][1] == "House Tagestyp"
     assert found["automation_status"][1] == "House Zustand"
     assert found["automation_enabled"][1] == "House Automatik"
-    assert found["trend_direction"][1] == "House Trend"
+    # (Comfort Score, like Trend before #1637 disabled it by default, is not in the German fixture.)
+    assert found["compliance_score"][1] == ENGLISH_BEFORE["compliance_score"][1]
     # German is a native-entity-id language in HA, so a fresh German install's ids come from the German names.
     assert found["day_type"][0] == "sensor.house_tagestyp"
 

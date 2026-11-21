@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "قيمة entry_id غير معروفة أو غير محمّلة لمنطقة Climate Advisor {entry_id}. تحقق من الإعدادات > الأجهزة والخدمات لمعرفة المنطقة الصحيحة."
+    },
+    "update_failed": {
+      "message": "تعذّر على Climate Advisor تحديث هذه المنطقة: {error}"
     }
   }
 }

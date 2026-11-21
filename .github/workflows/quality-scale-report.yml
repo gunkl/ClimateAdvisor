@@ -1,0 +1,83 @@
+name: Quality scale monthly status
+
+# Issue #1637: once a month Claude re-assesses Climate Advisor against Home Assistant's integration quality scale and
+# posts ONE status comment on the public tracking issue #1637: where each tier stands, what moved since the last
+# comment, and the next suggested items. Read-only on the code; it never edits files, opens PRs or changes the
+# checklist itself (PRs that complete a rule tick it). Run by hand: Actions -> Quality scale monthly status -> Run.
+
+on:
+  schedule:
+    - cron: "0 15 1 * *" # 1st of each month, 15:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: quality-scale-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      id-token: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Re-assess and post the status
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Workload identity federation (see claude.yml): no stored Claude credential.
+          anthropic_federation_rule_id: fdrl_01P4ZqjLfXnfTiQVQihCUZAd
+          anthropic_organization_id: 57f44af8-9979-4335-97d0-0230a761ca09
+          anthropic_service_account_id: svac_01217po5WfFdad84kSxqXQbc
+          anthropic_workspace_id: wrkspc_01BEPQrHwk2aMtjxDxxm3f82
+          claude_args: >-
+            --max-turns 80
+            --allowedTools "Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue comment 1637:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(git log:*),Bash(grep:*),Bash(ls:*),Bash(wc:*),Read,Glob,Grep"
+          prompt: |
+            You are writing the monthly quality-scale status for Climate Advisor (a Home Assistant custom integration)
+            in ${{ github.repository }}. The target is Platinum, the top tier (every Bronze, Silver, Gold and
+            Platinum rule done or exempt). Read-only: do not edit files, branches, labels or issue bodies.
+
+            1. Read the tracking issue and its history: `gh issue view 1637 --comments`. Its body is the checklist of
+               all 54 rules (done / exempt / partial / to do) with the linked `quality-scale` issues; the last
+               "Monthly status" comment, if any, is your previous report.
+            2. Read the rules and how this project applies them: the "Home Assistant Quality Scale: direction of
+               travel (#1637)" section of claude.md, and the rule definitions at
+               https://contributors.home-assistant.io/core/quality-scale/rules/ only if a rule is unclear.
+            3. See what changed since the previous report (or since the tracking issue was opened):
+               `gh pr list --state merged --search "merged:>=<date>" --limit 100`, `git log --since=<date> --oneline`,
+               and `gh issue list --label quality-scale --state all`.
+            4. Re-check, against the code on main (custom_components/climate_advisor/, README.md, docs/, tests/,
+               tests_ha/), every rule that is not done or exempt, plus any done rule a merged PR touched. Use concrete
+               evidence (file:line, a grep count). Examples: count entities with translation_key, entity_category,
+               device_class and entity_registry_enabled_default=False; check for icons.json, async_step_reconfigure,
+               async_step_reauth, runtime_data, PARALLEL_UPDATES, a mypy config, the coverage badge figure.
+            5. Post ONE comment with `gh issue comment 1637 --body-file <file>`, in plain English, starting with
+               "## Monthly status — <YYYY-MM-DD>":
+               - a table of tiers with done / exempt / partial / to do counts, and the change since last month;
+               - the highest tier fully reached so far, and how many rules stand between it and Platinum;
+               - rules that moved this month, each with the PR that moved it;
+               - checklist items that look done but are not ticked (so the owner can tick them), and any regression
+                 (a done rule that is no longer met), with evidence;
+               - the next three to five suggested items, smallest first, linking their issues;
+               - what the person at home would notice from this month's changes, if anything.
+               Keep it under about 60 lines. If nothing changed, say so in a short comment instead.
+
+            Hard rules: NO AI attribution (no "Co-Authored-By", no "Generated with Claude Code"). Never print or read
+            secrets. Comment only on issue #1637, once.
+
+      # The action hides Claude's output on a public repo; say why a run failed (Issue #1625 pattern).
+      - name: Report why the status could not run
+        if: ${{ failure() }}
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: python3 .github/scripts/autodiag_failure.py > /dev/null

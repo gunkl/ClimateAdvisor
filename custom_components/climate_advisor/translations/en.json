@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "Unknown or unloaded Climate Advisor zone entry_id {entry_id}. Check Settings > Devices & Services for the correct zone."
+    },
+    "update_failed": {
+      "message": "Climate Advisor could not update this zone: {error}"
     }
   }
 }

@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "Climate Advisor ज़ोन का अज्ञात या लोड न हुआ entry_id {entry_id}। सही ज़ोन के लिए सेटिंग्स > डिवाइस और सेवाएँ देखें।"
+    },
+    "update_failed": {
+      "message": "Climate Advisor इस ज़ोन को अपडेट नहीं कर सका: {error}"
     }
   }
 }

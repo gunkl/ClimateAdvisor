@@ -241,6 +241,19 @@ in the Claude Console. No Claude secret is stored in the repository or its Actio
 `anthropic-wif-test.yml` exchanges a token on push and prints the response with the token redacted, as a quick
 check that the rule still works.
 
+### Quality scale monthly status (`quality-scale-report.yml`)
+
+On the 1st of each month (or by hand: **Actions → Quality scale monthly status → Run workflow**), Claude re-assesses
+the integration against Home Assistant's quality scale and posts one status comment on tracking issue #1637:
+- counts per tier and the change since last month;
+- the rules that moved, with their PRs;
+- items that look done but aren't ticked, and any regressions;
+- the next suggested items.
+
+It is read-only on the code: it never edits files, the checklist or labels. PRs that complete a rule tick it
+themselves (see claude.md, "Home Assistant Quality Scale: direction of travel"). It logs in the same way as the other
+Claude workflows. On failure, the job summary says why (`autodiag_failure.py`).
+
 ## Test badges
 
 The README's second badge row (Issue #1343) shows every test layer, in the same `flat-square` style as the version

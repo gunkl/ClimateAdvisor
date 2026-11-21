@@ -41,7 +41,7 @@ from homeassistant.helpers.event import (
     async_track_time_interval,
 )
 from homeassistant.helpers.start import async_at_started
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from . import cycle_model, i18n, log_capture, prediction_engines, v4_shadow, window_span
@@ -4861,15 +4861,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.consecutive_failure_count += 1
                 self.last_update_error = f"{type(err).__name__}: {err}"
                 self.last_update_error_time = dt_util.now().isoformat()
-                _LOGGER.error(
+                # Quality scale log-when-unavailable (#1637): the traceback is logged once, on the first failure
+                # of an outage; later failures of the same outage go to DEBUG (the count and the last error stay
+                # recorded and persisted). The recovery is logged once, below.
+                _LOGGER.log(
+                    logging.ERROR if self.consecutive_failure_count == 1 else logging.DEBUG,
                     "Coordinator update failed (consecutive_failure_count=%d): %s",
                     self.consecutive_failure_count,
                     self.last_update_error,
-                    exc_info=err,
+                    exc_info=err if self.consecutive_failure_count == 1 else None,
                 )
                 with contextlib.suppress(Exception):
                     await self._async_save_state()
-                raise
+                # UpdateFailed is HA's expected failure: its DataUpdateCoordinator marks the entities unavailable
+                # and logs one line, instead of an "Unexpected error" traceback on every cycle.
+                raise UpdateFailed(
+                    translation_domain=DOMAIN,
+                    translation_key="update_failed",
+                    translation_placeholders={"error": self.last_update_error},
+                ) from err
             else:
                 if self.consecutive_failure_count or self.last_update_error:
                     _LOGGER.info(

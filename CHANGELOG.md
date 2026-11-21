@@ -3,6 +3,17 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.55] — 2026-11-20
+
+### Changed
+- #1637 (Home Assistant quality scale, first batch): how Climate Advisor shows up in Home Assistant. Nothing changes in what it does in your house.
+  - Each zone's device is now listed as a **service** instead of a piece of hardware.
+  - **Last Action Time, Last Action Reason and AI Status are now diagnostic sensors**, like Heat and Cool Threshold. On the device page they are under Diagnostic, and auto-generated dashboards leave them out. They keep their names, IDs and history, and dashboards or automations that use them keep working.
+  - **Trend is disabled by default on new installs**, because the same value is an attribute of Day Type. Existing installs keep it as it is.
+  - **When an update fails, the log shows the error and its traceback once**, not on every 30-minute cycle until it recovers. The sensors still go unavailable until the next good update, and the recovery is logged once.
+  - The README has new sections on removing Climate Advisor, how data updates, and known limitations.
+- Self-assessment against Home Assistant's integration quality scale, and the road to Platinum, the top tier: tracked in #1637. The larger items have their own issues (#1638–#1650), and a monthly workflow (`quality-scale-report.yml`) posts a status comment on #1637.
+
 ## [0.9.54] — 2026-11-20
 
 ### Changed (CI only; nothing changes in your house)

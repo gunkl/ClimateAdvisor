@@ -102,6 +102,14 @@ Set a **Sleep Indoor Temp Sensor** to keep the bedroom, not the hallway, on targ
 
 HACS installs published releases (see the "released" badge above). The 0.9 line (new prediction engine, one plan behind every card, the new dashboard) is on `main` and published as pre-releases until it is marked the latest release; 0.8 fixes continue on the [`0.8.x`](https://github.com/gunkl/ClimateAdvisor/tree/0.8.x) branch.
 
+### Removing Climate Advisor
+
+1. Go to **Settings → Devices & Services → Climate Advisor** and delete each zone (**⋮ → Delete**). Deleting a zone also deletes its files in your `config` folder (state, learning, chart log, forecast and model archives, AI reports) and its Repairs cards. Your thermostat keeps whatever setpoint and mode it had last.
+2. Remove the integration in HACS (**HACS → Climate Advisor → ⋮ → Remove**), or delete `config/custom_components/climate_advisor` if you installed it by hand.
+3. Restart Home Assistant.
+
+Turn your thermostat's own schedule back on if you turned it off for Climate Advisor (see [Thermostat requirements](#thermostat-requirements)).
+
 ### Upgrading to 0.9.4
 
 - **The prediction engine becomes v4** on every zone (no migration step; you can switch back to v3 in Configure → Learning & Behavior). If a zone has no v4 model yet, its first fit starts from your recorded history within minutes of the restart, as soon as Climate Advisor's startup window (about 5 minutes) has ended. Until it lands the zone runs on the default plan described above, and v4 takes over at the next 30-minute cycle after the fit. A fit that finds too little usable history is retried, at most every 6 hours, and the nightly fit keeps going.
@@ -175,9 +183,28 @@ To add a zone, run **Add Integration → Climate Advisor** again for the next th
 
 See [multi-zone-spec](docs/multi-zone-spec.md).
 
+### How data updates
+
+- **Every 30 minutes**, each zone fetches the forecast, reclassifies the day and refreshes its plan and sensors.
+- **Right away**, when one of the entities you picked in setup changes: the thermostat, a door or window sensor, a room sensor, occupancy or the fan.
+- **At the briefing time** you set, the daily briefing is built and sent.
+
+If an update fails, the zone's sensors show as unavailable until the next good update. The error is logged once, and so is the recovery.
+
+### Known limitations
+
+- **One thermostat per zone.** A home with several thermostats sets up one zone each.
+- **The thermostat must follow commands.** Its own schedules and "smart" features have to be off (see [Thermostat requirements](#thermostat-requirements)).
+- **Heat-only and cool-only systems** work but are less tested than heat-and-cool systems.
+- **The AI Investigator needs an AI provider** set up in Home Assistant. A cloud provider sends your house data to that service; a local model such as Ollama keeps it at home. Everything else works without AI.
+- **Predictions need history.** A new zone plans with default values until it has learned how your house heats and cools.
+- **Home Assistant 2026.3 or later** is required.
+
 ## Entities
 
 Each zone creates **21 sensors** and **1 switch**, grouped under a device named after the zone. Entity IDs come from the zone name, for example `sensor.living_room_day_type`. Existing entities keep the IDs they were created with.
+
+**Diagnostic sensors** (Heat and Cool Threshold, Last Action Time and Reason, AI Status) appear under Diagnostic on the device page and are left out of auto-generated dashboards; they keep their history. **Trend** is disabled by default on new installs, because its value is also an attribute of Day Type: enable it on the device page if you want it as its own sensor. Existing installs keep it as it is.
 
 | Entity | What it shows |
 |---|---|

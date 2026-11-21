@@ -20,14 +20,16 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, VERSION
+from .const import DOMAIN
 from .coordinator import ClimateAdvisorCoordinator
+from .entity import ClimateAdvisorEntity
 
 _LOGGER = logging.getLogger(__name__)
+
+# Coordinator-driven; the one switch only flips a flag (quality scale, #1637).
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -44,7 +46,7 @@ async def async_setup_entry(
     )
 
 
-class ClimateAdvisorAutomationSwitch(CoordinatorEntity, SwitchEntity):
+class ClimateAdvisorAutomationSwitch(ClimateAdvisorEntity, SwitchEntity):
     """Switch to enable/disable Climate Advisor automation actions.
 
     When OFF, Climate Advisor enters observe-only mode: classification,
@@ -60,18 +62,8 @@ class ClimateAdvisorAutomationSwitch(CoordinatorEntity, SwitchEntity):
         entry: ConfigEntry,
     ) -> None:
         """Initialize the automation switch."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_automation_enabled"
-        # Issue #1341 (D6): the name is strings.json ``entity.switch.automation_enabled.name`` (HA's own method).
-        self._attr_has_entity_name = True
-        self._attr_translation_key = "automation_enabled"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name=entry.title,
-            manufacturer="Climate Advisor",
-            model="Zone Controller",
-            sw_version=VERSION,
-        )
+        # Unique id ``<entry_id>_automation_enabled``; name from strings.json ``entity.switch.automation_enabled``.
+        super().__init__(coordinator, entry, "automation_enabled")
 
     @property
     def is_on(self) -> bool:

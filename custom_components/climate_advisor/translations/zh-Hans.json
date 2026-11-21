@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "未知或未加载的 Climate Advisor 区域 entry_id“{entry_id}”。请在 设置 > 设备与服务 中查看正确的区域。"
+    },
+    "update_failed": {
+      "message": "Climate Advisor 无法更新此区域：{error}"
     }
   }
 }

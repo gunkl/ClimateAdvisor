@@ -209,6 +209,13 @@ class _MockServiceValidationError(_MockHomeAssistantError):
     """Minimal stand-in for homeassistant.exceptions.ServiceValidationError."""
 
 
+class _MockUpdateFailed(_MockHomeAssistantError):
+    """Minimal stand-in for homeassistant.helpers.update_coordinator.UpdateFailed (quality scale, #1637).
+
+    The coordinator raises it when an update fails, so it must be a real exception here, like the two above.
+    """
+
+
 class _MockRepairsFlow:
     """Minimal stand-in for homeassistant.components.repairs.RepairsFlow."""
 
@@ -703,6 +710,7 @@ def install_ha_stubs() -> None:
     duc = sys.modules["homeassistant.helpers.update_coordinator"]
     duc.DataUpdateCoordinator = _MockDataUpdateCoordinator
     duc.CoordinatorEntity = _MockCoordinatorEntity
+    duc.UpdateFailed = _MockUpdateFailed
 
     # Issue #519: `from homeassistant.helpers import entity_registry as er` resolves via
     # the PARENT mock's attribute, not sys.modules[...] directly, when the parent

@@ -564,6 +564,25 @@ Climate Advisor speaks 16 languages (`en fr es de nl ja pt it pl uk ko hi ar ru 
 
 ---
 
+## Home Assistant Quality Scale: direction of travel (#1637)
+
+Climate Advisor self-assesses against Home Assistant's [integration quality scale](https://contributors.home-assistant.io/core/quality-scale/rules/) and works toward **Platinum**, the top tier. The live checklist is tracking issue #1637; the larger items have their own `quality-scale` issues. Every PR leaves the code at least as close to Platinum as it found it. **When a PR touches the area, apply the rule; never regress one already done:**
+
+- **New or changed entities** use the shared base in `entity.py` (unique id `<entry_id>_<key>`, `has_entity_name`, translated name, the zone's service device) and get, from the start:
+  - a fitting `device_class`, with `ENUM` plus `options` for fixed value sets and `TIMESTAMP` with a `datetime` for times;
+  - an `entity_category` (`DIAGNOSTIC` when it describes Climate Advisor itself rather than the house);
+  - `entity_registry_enabled_default = False` when few users need it;
+  - its icon in `icons.json` once #1647 lands.
+- **Never change an existing entity's unique id** (it orphans the user's history, names and automations).
+- **Service handlers you touch** raise `ServiceValidationError` for bad input and `HomeAssistantError` for failures, both translated (`translation_domain` / `translation_key` in `strings.json` `exceptions`, all 16 languages). They never log-and-succeed on bad input.
+- **Every user-facing exception is translated** (`exception-translations` is done; keep it done).
+- **New options-flow fields** are documented for users (README or a user doc), not only in the UI's `data_description`.
+- **Modules you touch** keep or raise their test coverage (target over 95% per module; #1644 adds the ratchet) and get type hints (new code fully typed; strict mypy per module once #1645 lands).
+- **Availability and logging:** a failed update raises `UpdateFailed`; an outage is logged once and its recovery once, never every cycle.
+- **Reporting:** a PR that completes a rule ticks it on #1637 and says so in its description. A monthly re-assessment posts a status comment there.
+
+---
+
 ## Documentation Convergence
 
 Documentation must converge toward completeness each session, not diverge. These rules are enforced in every mob session and tracked via GitHub issue #131.

@@ -14,10 +14,8 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, Sen
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import i18n
 from .automation import active_thresholds_for
@@ -57,12 +55,15 @@ from .const import (
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     DOMAIN,
-    VERSION,
 )
 from .coordinator import ClimateAdvisorCoordinator
+from .entity import ClimateAdvisorEntity
 from .temperature import FAHRENHEIT, convert_delta, display_delta, display_temp
 
 _LOGGER = logging.getLogger(__name__)
+
+# Coordinator-driven: entities never poll on their own, so no limit on parallel updates (quality scale, #1637).
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -101,7 +102,7 @@ async def async_setup_entry(
     _LOGGER.debug("Registered %d Climate Advisor sensor entities", len(entities))
 
 
-class ClimateAdvisorBaseSensor(CoordinatorEntity, SensorEntity):
+class ClimateAdvisorBaseSensor(ClimateAdvisorEntity, SensorEntity):
     """Base class for Climate Advisor sensors."""
 
     _empty_data_warned: bool = False
@@ -114,22 +115,10 @@ class ClimateAdvisorBaseSensor(CoordinatorEntity, SensorEntity):
         key: str,
         icon: str,
     ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_{key}"
-        # Issue #1341 (D6): the name comes from strings.json ``entity.sensor.<key>.name`` (HA's own method),
-        # never from ``_attr_name``, which would override the translation. The key is the unique-id suffix.
-        self._attr_has_entity_name = True
-        self._attr_translation_key = key
+        """Initialize the sensor (unique id, translated name and zone device come from ClimateAdvisorEntity)."""
+        super().__init__(coordinator, entry, key)
         self._attr_icon = icon
         self._key = key
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name=entry.title,
-            manufacturer="Climate Advisor",
-            model="Zone Controller",
-            sw_version=VERSION,
-        )
 
     def _lang(self) -> str:
         """The language HA uses for entity names (D2): a shipped language, ``en`` when unreadable."""
@@ -233,7 +222,13 @@ class ClimateAdvisorDayTypeSensor(ClimateAdvisorBaseSensor):
 
 
 class ClimateAdvisorTrendSensor(ClimateAdvisorBaseSensor):
-    """Sensor showing the temperature trend."""
+    """Sensor showing the temperature trend.
+
+    Disabled by default on new installs (quality scale ``entity-disabled-by-default``, #1637): the same
+    direction and magnitude are attributes of the Day Type sensor. Existing installs keep it as it is.
+    """
+
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, ATTR_TREND, "mdi:trending-up")
@@ -399,14 +394,18 @@ class ClimateAdvisorOccupancySensor(ClimateAdvisorBaseSensor):
 
 
 class ClimateAdvisorLastActionTimeSensor(ClimateAdvisorBaseSensor):
-    """Sensor showing when the last HVAC action was taken."""
+    """Sensor showing when the last HVAC action was taken (diagnostic: about Climate Advisor itself, #1637)."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, ATTR_LAST_ACTION_TIME, "mdi:clock-check-outline")
 
 
 class ClimateAdvisorLastActionReasonSensor(ClimateAdvisorBaseSensor):
-    """Sensor showing the reason for the last HVAC action."""
+    """Sensor showing the reason for the last HVAC action (diagnostic: about Climate Advisor itself, #1637)."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, ATTR_LAST_ACTION_REASON, "mdi:text-box-outline")
@@ -489,7 +488,9 @@ class ClimateAdvisorContactStatusSensor(_ProseSensor):
 
 
 class ClimateAdvisorAIStatusSensor(ClimateAdvisorBaseSensor):
-    """Sensor showing the AI integration status."""
+    """Sensor showing the AI integration status (diagnostic: about Climate Advisor itself, #1637)."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
         """Initialize the AI status sensor."""

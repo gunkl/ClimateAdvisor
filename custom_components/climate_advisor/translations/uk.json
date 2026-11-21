@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "Невідомий або не завантажений entry_id зони Climate Advisor {entry_id}. Перевірте правильну зону в розділі Налаштування > Пристрої та служби."
+    },
+    "update_failed": {
+      "message": "Climate Advisor не вдалося оновити цю зону: {error}"
     }
   }
 }

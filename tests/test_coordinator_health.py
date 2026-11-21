@@ -48,6 +48,8 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+from homeassistant.helpers.update_coordinator import UpdateFailed  # noqa: E402
+
 from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator  # noqa: E402
 from custom_components.climate_advisor.learning import LearningState  # noqa: E402
 
@@ -133,10 +135,14 @@ class TestUpdateWrapperFailureCapture:
                 "custom_components.climate_advisor.coordinator.dt_util.now",
                 return_value=_FIXED_NOW,
             ),
-            pytest.raises(RuntimeError, match="weather entity gone"),
+            pytest.raises(UpdateFailed) as caught,
         ):
             asyncio.run(coord._async_update_data())
 
+        # Quality scale (#1637): HA's expected failure type, translated, with the real cause chained.
+        assert caught.value.translation_key == "update_failed"
+        assert caught.value.translation_placeholders == {"error": "RuntimeError: weather entity gone"}
+        assert isinstance(caught.value.__cause__, RuntimeError)
         assert coord.consecutive_failure_count == 1
         assert coord.last_update_error == "RuntimeError: weather entity gone"
         assert coord.last_update_error_time == _FIXED_NOW.isoformat()
@@ -151,11 +157,33 @@ class TestUpdateWrapperFailureCapture:
             return_value=_FIXED_NOW,
         ):
             for _ in range(3):
-                with pytest.raises(RuntimeError):
+                with pytest.raises(UpdateFailed):
                     asyncio.run(coord._async_update_data())
 
         assert coord.consecutive_failure_count == 3
         assert coord._async_save_state.call_count == 3
+
+    def test_outage_logs_the_traceback_once(self, caplog):
+        """Quality scale log-when-unavailable (#1637): one ERROR with the traceback for an outage, not one per cycle.
+
+        Occupant view: a thermostat that stays offline for a day no longer fills the log with 48 identical
+        tracebacks that bury the one line that matters.
+        """
+        coord = _make_coord_stub()
+        coord._async_update_data_impl = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
+            caplog.at_level("DEBUG", logger="custom_components.climate_advisor.coordinator"),
+        ):
+            for _ in range(3):
+                with pytest.raises(UpdateFailed):
+                    asyncio.run(coord._async_update_data())
+
+        failed = [r for r in caplog.records if "Coordinator update failed" in r.getMessage()]
+        assert [r.levelname for r in failed] == ["ERROR", "DEBUG", "DEBUG"]
+        assert failed[0].exc_info is not None
+        assert failed[1].exc_info is None and failed[2].exc_info is None
 
     def test_success_does_not_persist_error_fields(self):
         """No failure ever occurred — the wrapper must not spuriously save state

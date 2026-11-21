@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "Nieznana lub niewczytana strefa Climate Advisor o entry_id „{entry_id}”. Sprawdź właściwą strefę w Ustawienia > Urządzenia i usługi."
+    },
+    "update_failed": {
+      "message": "Climate Advisor nie mógł zaktualizować tej strefy: {error}"
     }
   }
 }

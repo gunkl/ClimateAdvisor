@@ -860,6 +860,9 @@
   "exceptions": {
     "unknown_zone": {
       "message": "알 수 없거나 로드되지 않은 Climate Advisor 구역 entry_id {entry_id}입니다. 설정 > 기기 및 서비스에서 올바른 구역을 확인하세요."
+    },
+    "update_failed": {
+      "message": "Climate Advisor가 이 구역을 업데이트하지 못했습니다: {error}"
     }
   }
 }

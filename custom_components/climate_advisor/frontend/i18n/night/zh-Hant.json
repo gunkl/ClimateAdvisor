@@ -15,7 +15,7 @@
   "night.option_fan_2h": "打開窗戶並開啟全屋換氣扇 {hours} 小時，然後關好門窗",
   "night.option_fan_then_ac": "開啟全屋換氣扇，直到臥室低於 {limit}，然後關好門窗，交給冷氣完成",
   "night.option_fan_until_target": "開啟全屋換氣扇，直到臥室達到 {reach}，然後關好門窗",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "就寢時打開臥室窗戶 {hours} 小時，然後關上",
   "night.option_windows_all": "臥室窗戶整晚開著",
   "night.sentence_fan_off": "{t}：請關閉{fan, select, hvac {空調風扇} other {全屋換氣扇}}；之後由 CA 接手維持臥室溫度。",

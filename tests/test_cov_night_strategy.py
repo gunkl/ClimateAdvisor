@@ -101,14 +101,11 @@ def test_rank_of_nothing_is_nothing() -> None:
     assert ns.rank([]) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason="latent bug: _label_msg passes key=key to i18n.Msg(key, **params), whose first argument is already 'key' "
-    "(TypeError). Every option in _SPECS has its own label today, so no night plan reaches it yet.",
-)
+# Issue #1670: this raised TypeError (Msg(key, **params) given key= twice) before the parameter was renamed.
 def test_an_unknown_option_key_has_a_generic_label() -> None:
-    assert ns._label_msg("teleport", cold_night()).key == "night.option_unknown"
+    msg = ns._label_msg("teleport", cold_night())
+    assert msg.key == "night.option_unknown"
+    assert msg.params == {"option": "teleport"}
     assert "teleport" in ns._label("teleport", cold_night(), None)
 
 

@@ -15,7 +15,7 @@
   "night.option_fan_2h": "Ventilador de toda la casa con las ventanas abiertas durante {hours} h y luego cerrar",
   "night.option_fan_then_ac": "Ventilador de toda la casa hasta que el dormitorio baje de {limit}; luego cerrar y dejar que el aire acondicionado termine",
   "night.option_fan_until_target": "Ventilador de toda la casa hasta que el dormitorio llegue a {reach}; luego cerrar",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "Abrir las ventanas del dormitorio {hours} h al acostarte y luego cerrarlas",
   "night.option_windows_all": "Dejar abiertas las ventanas del dormitorio toda la noche",
   "night.sentence_fan_off": "{t}: apaga el {fan, select, hvac {ventilador de la climatización} other {ventilador de toda la casa}}; CA se encarga de mantener el dormitorio.",

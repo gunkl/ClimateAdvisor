@@ -15,7 +15,7 @@
   "night.option_fan_2h": "Huisventilator met de ramen open gedurende {hours} uur, daarna sluiten",
   "night.option_fan_then_ac": "Huisventilator tot de slaapkamer onder {limit} komt, daarna sluiten en de airco laten afmaken",
   "night.option_fan_until_target": "Huisventilator tot de slaapkamer {reach} bereikt, daarna sluiten",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "Zet de slaapkamerramen bij bedtijd {hours} uur open en sluit ze dan",
   "night.option_windows_all": "Laat de slaapkamerramen de hele nacht open",
   "night.sentence_fan_off": "{t}: zet de {fan, select, hvac {ventilator van de verwarming/airco} other {huisventilator}} uit; CA neemt het regelen van de slaapkamer over.",

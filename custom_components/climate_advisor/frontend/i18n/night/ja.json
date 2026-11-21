@@ -15,7 +15,7 @@
   "night.option_fan_2h": "窓を開けて全館換気ファンを{hours}時間運転し、その後閉める",
   "night.option_fan_then_ac": "寝室が{limit}を下回るまで全館換気ファンを運転し、その後閉めて、残りはエアコンに任せる",
   "night.option_fan_until_target": "寝室が{reach}に達するまで全館換気ファンを運転し、その後閉める",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "就寝時に寝室の窓を{hours}時間開け、その後閉める",
   "night.option_windows_all": "寝室の窓を一晩中開けておく",
   "night.sentence_fan_off": "{t}：{fan, select, hvac {空調の送風ファン} other {全館換気ファン}}をオフにしてください。以降はCAが寝室の温度を保ちます。",

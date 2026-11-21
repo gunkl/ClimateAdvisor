@@ -15,7 +15,7 @@
   "night.option_fan_2h": "Ventoinha de toda a casa com as janelas abertas durante {hours} h e depois fechar",
   "night.option_fan_then_ac": "Ventoinha de toda a casa até o quarto ficar abaixo de {limit}; depois fechar e deixar o ar condicionado terminar",
   "night.option_fan_until_target": "Ventoinha de toda a casa até o quarto atingir {reach}; depois fechar",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "Abrir as janelas do quarto durante {hours} h à hora de deitar e depois fechá-las",
   "night.option_windows_all": "Deixar as janelas do quarto abertas toda a noite",
   "night.sentence_fan_off": "{t}: desligue a {fan, select, hvac {ventoinha do sistema AVAC} other {ventoinha de toda a casa}}; o CA assume o controlo do quarto.",

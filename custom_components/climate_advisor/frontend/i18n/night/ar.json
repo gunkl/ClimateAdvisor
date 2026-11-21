@@ -15,7 +15,7 @@
   "night.option_fan_2h": "مروحة المنزل بالكامل والنوافذ مفتوحة لمدة {hours} ساعة، ثم الإغلاق",
   "night.option_fan_then_ac": "مروحة المنزل بالكامل حتى تنخفض حرارة غرفة النوم عن {limit}، ثم الإغلاق وترك التكييف يكمل",
   "night.option_fan_until_target": "مروحة المنزل بالكامل حتى تصل حرارة غرفة النوم إلى {reach}، ثم الإغلاق",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "فتح نوافذ غرفة النوم لمدة {hours} ساعة عند وقت النوم، ثم إغلاقها",
   "night.option_windows_all": "ترك نوافذ غرفة النوم مفتوحة طوال الليل",
   "night.sentence_fan_off": "{t}: أطفئ {fan, select, hvac {مروحة التدفئة والتبريد} other {مروحة المنزل بالكامل}}؛ ويتولى CA الحفاظ على حرارة غرفة النوم.",

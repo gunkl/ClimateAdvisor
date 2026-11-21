@@ -15,7 +15,7 @@
   "night.option_fan_2h": "Hausventilator bei geöffneten Fenstern {hours} Std. laufen lassen, dann schließen",
   "night.option_fan_then_ac": "Hausventilator, bis das Schlafzimmer unter {limit} liegt, dann schließen und die Klimaanlage den Rest erledigen lassen",
   "night.option_fan_until_target": "Hausventilator, bis das Schlafzimmer {reach} erreicht, dann schließen",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "Schlafzimmerfenster zur Schlafenszeit {hours} Std. öffnen, dann schließen",
   "night.option_windows_all": "Schlafzimmerfenster die ganze Nacht offen lassen",
   "night.sentence_fan_off": "{t}: Schalte {fan, select, hvac {das Gebläse} other {den Hausventilator}} aus; CA übernimmt die Regelung des Schlafzimmers.",

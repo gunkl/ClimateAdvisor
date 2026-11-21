@@ -15,7 +15,7 @@
   "night.option_fan_2h": "Ventilateur de toute la maison, fenêtres ouvertes, pendant {hours} h, puis refermer",
   "night.option_fan_then_ac": "Ventilateur de toute la maison jusqu’à ce que la chambre passe sous {limit}, puis refermer et laisser la climatisation finir",
   "night.option_fan_until_target": "Ventilateur de toute la maison jusqu’à ce que la chambre atteigne {reach}, puis refermer",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "Ouvrir les fenêtres de la chambre pendant {hours} h au coucher, puis les fermer",
   "night.option_windows_all": "Laisser les fenêtres de la chambre ouvertes toute la nuit",
   "night.sentence_fan_off": "{t} : éteignez le {fan, select, hvac {ventilateur CVC} other {ventilateur de toute la maison}} ; CA prend le relais pour maintenir la chambre.",

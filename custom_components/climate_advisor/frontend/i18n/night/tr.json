@@ -15,7 +15,7 @@
   "night.option_fan_2h": "Pencereler açıkken tüm ev fanını {hours} saat çalıştırın, sonra kapatın",
   "night.option_fan_then_ac": "Yatak odası {limit} değerinin altına inene kadar tüm ev fanını çalıştırın, sonra kapatın ve gerisini kliması tamamlasın",
   "night.option_fan_until_target": "Yatak odası {reach} değerine ulaşana kadar tüm ev fanını çalıştırın, sonra kapatın",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "Yatma saatinde yatak odası pencerelerini {hours} saat açın, sonra kapatın",
   "night.option_windows_all": "Yatak odası pencerelerini bütün gece açık bırakın",
   "night.sentence_fan_off": "{t}: {fan, select, hvac {İklimlendirme fanını} other {Tüm ev fanını}} kapatın; yatak odasını tutma işini CA devralır.",

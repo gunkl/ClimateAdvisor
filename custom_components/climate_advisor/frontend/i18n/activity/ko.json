@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "온도 조절기 fan_mode {old} -> {sent} (이전 설정에서 CA가 켜 둔 상태였음)",
   "activity.fan_released_believed_running": "CA가 작동 중이라고 판단한 송풍기를 해제함{has_since, select, yes { ({since}부터)} other {}}",
   "activity.fan_running_external": "송풍기 작동 중 (외부) -- {source}",
+  "activity.fan_source_blower_during_cycle": "{mode} 주기 중 온도 조절기 송풍기",
+  "activity.fan_source_schedule": "온도 조절기 팬 일정/순환",
   "activity.fan_speed_observed": "송풍기 속도 확인됨 (쾌적성 전용)",
   "activity.fan_stopped_external": "송풍기 정지 (외부)",
   "activity.fan_whf_off": "WHF: 켜짐->꺼짐",

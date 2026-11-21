@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "थर्मोस्टैट fan_mode {old} -> {sent} (पिछले कॉन्फ़िगरेशन में CA ने इसे चालू छोड़ा था)",
   "activity.fan_released_believed_running": "CA ने वह पंखा मुक्त किया जिसे वह चलता मान रहा था{has_since, select, yes { ({since} से)} other {}}",
   "activity.fan_running_external": "पंखा चल रहा है (बाहरी) -- {source}",
+  "activity.fan_source_blower_during_cycle": "{mode} चक्र के दौरान थर्मोस्टैट ब्लोअर",
+  "activity.fan_source_schedule": "थर्मोस्टैट पंखे का शेड्यूल/सर्कुलेशन",
   "activity.fan_speed_observed": "पंखे की गति देखी गई (केवल आराम के लिए)",
   "activity.fan_stopped_external": "पंखा रुका (बाहरी)",
   "activity.fan_whf_off": "पूरे घर का पंखा: चालू->बंद",

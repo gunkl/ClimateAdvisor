@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "fan_mode do termóstato {old} -> {sent} (o CA tinha-o deixado ligado na configuração anterior)",
   "activity.fan_released_believed_running": "O CA libertou uma ventoinha que julgava estar a controlar{has_since, select, yes { (desde {since})} other {}}",
   "activity.fan_running_external": "Ventoinha a funcionar (externo) -- {source}",
+  "activity.fan_source_blower_during_cycle": "ventilador do termóstato durante um ciclo ({mode})",
+  "activity.fan_source_schedule": "programação/circulação da ventoinha do termóstato",
   "activity.fan_speed_observed": "Velocidade da ventoinha observada (apenas conforto)",
   "activity.fan_stopped_external": "Ventoinha parada (externo)",
   "activity.fan_whf_off": "WHF: on->off",

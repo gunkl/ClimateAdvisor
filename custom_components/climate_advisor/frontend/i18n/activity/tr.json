@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "termostat fan_mode {old} -> {sent} (CA önceki yapılandırmada fanı açık bırakmıştı)",
   "activity.fan_released_believed_running": "CA, çalıştırdığını düşündüğü bir fanı serbest bıraktı{has_since, select, yes { ({since} tarihinden beri)} other {}}",
   "activity.fan_running_external": "Fan çalışıyor (harici) -- {source}",
+  "activity.fan_source_blower_during_cycle": "{mode} döngüsü sırasında termostat fanı",
+  "activity.fan_source_schedule": "termostat fan programı/sirkülasyonu",
   "activity.fan_speed_observed": "Fan hızı gözlendi (yalnızca konfor)",
   "activity.fan_stopped_external": "Fan durdu (harici)",
   "activity.fan_whf_off": "Tüm ev fanı: açık->kapalı",

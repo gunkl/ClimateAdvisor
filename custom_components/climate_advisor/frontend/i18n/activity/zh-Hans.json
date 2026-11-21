@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "恒温器 fan_mode {old} -> {sent}（按之前的配置，CA 曾将其保持开启）",
   "activity.fan_released_believed_running": "CA 已解除其认为自己在运行的风扇{has_since, select, yes {（自 {since} 起）} other {}}",
   "activity.fan_running_external": "风扇运行中（外部）-- {source}",
+  "activity.fan_source_blower_during_cycle": "{mode}循环期间的恒温器鼓风机",
+  "activity.fan_source_schedule": "恒温器风扇计划/循环",
   "activity.fan_speed_observed": "已观察到风扇速度（仅用于舒适度）",
   "activity.fan_stopped_external": "风扇已停止（外部）",
   "activity.fan_whf_off": "WHF：开->关",

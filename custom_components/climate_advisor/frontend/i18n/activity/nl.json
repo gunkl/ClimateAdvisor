@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "fan_mode van de thermostaat {old} -> {sent} (CA had hem onder de vorige configuratie laten aanstaan)",
   "activity.fan_released_believed_running": "CA gaf een ventilator vrij waarvan het dacht dat het hem aanstuurde{has_since, select, yes { (sinds {since})} other {}}",
   "activity.fan_running_external": "Ventilator draait (extern) -- {source}",
+  "activity.fan_source_blower_during_cycle": "thermostaatventilator tijdens een cyclus ({mode})",
+  "activity.fan_source_schedule": "ventilatorschema/circulatie van de thermostaat",
   "activity.fan_speed_observed": "Ventilatorstand waargenomen (alleen comfort)",
   "activity.fan_stopped_external": "Ventilator gestopt (extern)",
   "activity.fan_whf_off": "WHF: on->off",

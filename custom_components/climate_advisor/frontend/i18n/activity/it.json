@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "fan_mode del termostato {old} -> {sent} (CA lo aveva lasciato acceso con la configurazione precedente)",
   "activity.fan_released_believed_running": "CA ha rilasciato un ventilatore che credeva di gestire{has_since, select, yes { (da {since})} other {}}",
   "activity.fan_running_external": "Ventilatore in funzione (esterno) -- {source}",
+  "activity.fan_source_blower_during_cycle": "ventola del termostato durante un ciclo ({mode})",
+  "activity.fan_source_schedule": "programma/ricircolo della ventola del termostato",
   "activity.fan_speed_observed": "Velocità del ventilatore osservata (solo comfort)",
   "activity.fan_stopped_external": "Ventilatore fermo (esterno)",
   "activity.fan_whf_off": "WHF: on->off",

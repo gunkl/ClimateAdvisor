@@ -5380,9 +5380,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _t_mode = _cs2.state if _cs2 else "unknown"
             _t_action = str(_cs2.attributes.get("hvac_action", "")) if _cs2 else ""
             _t_fan = str(_cs2.attributes.get("fan_mode", "")) if _cs2 else ""
+            # Issue #1664: ``source_code`` (``blower_during_cycle`` / ``fan_schedule``) is what the Activity Log renders
+            # in the viewer's language; ``source`` keeps the English record (older rows carry only that).
+            _source_code = "blower_during_cycle" if _t_mode in ("cool", "heat", "heat_cool") else "fan_schedule"
             _source = (
                 f"thermostat blower during {_t_mode} cycle"
-                if _t_mode in ("cool", "heat", "heat_cool")
+                if _source_code == "blower_during_cycle"
                 else "thermostat fan schedule/circulation"
             )
             _fan_mode_val = self.automation_engine.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -5402,6 +5405,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "fan_mode": _t_fan,
                     "thermostat_mode": _t_mode,
                     "source": _source,
+                    "source_code": _source_code,
                     "fan_device": _fan_device,
                 },
             )

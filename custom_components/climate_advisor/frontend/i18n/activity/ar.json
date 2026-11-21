@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "fan_mode للثرموستات {old} -> {sent} (كان CA قد تركها تعمل بالإعداد السابق)",
   "activity.fan_released_believed_running": "حرّر CA مروحة كان يعتقد أنه يشغّلها{has_since, select, yes { (منذ {since})} other {}}",
   "activity.fan_running_external": "المروحة تعمل (خارجيًا) -- {source}",
+  "activity.fan_source_blower_during_cycle": "منفاخ الثرموستات أثناء دورة ({mode})",
+  "activity.fan_source_schedule": "جدول/تدوير مروحة الثرموستات",
   "activity.fan_speed_observed": "رُصدت سرعة المروحة (للراحة فقط)",
   "activity.fan_stopped_external": "توقفت المروحة (خارجيًا)",
   "activity.fan_whf_off": "مروحة المنزل بالكامل: تشغيل->إيقاف",

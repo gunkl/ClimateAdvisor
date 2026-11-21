@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "溫控器 fan_mode {old} -> {sent}（CA 在先前的設定下讓它保持開啟）",
   "activity.fan_released_believed_running": "CA 釋放了它認為由自己運轉的風扇{has_since, select, yes {（自 {since} 起）} other {}}",
   "activity.fan_running_external": "風扇運轉中（外部）-- {source}",
+  "activity.fan_source_blower_during_cycle": "{mode}循環期間的溫控器鼓風機",
+  "activity.fan_source_schedule": "溫控器風扇排程/循環",
   "activity.fan_speed_observed": "偵測到風扇風速（僅供舒適參考）",
   "activity.fan_stopped_external": "風扇已停止（外部）",
   "activity.fan_whf_off": "全屋換氣扇：開啟->關閉",

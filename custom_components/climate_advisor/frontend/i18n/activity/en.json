@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "thermostat fan_mode {old} -> {sent} (CA had left it on under the previous configuration)",
   "activity.fan_released_believed_running": "CA released a fan it believed it was running{has_since, select, yes { (since {since})} other {}}",
   "activity.fan_running_external": "Fan running (external) -- {source}",
+  "activity.fan_source_blower_during_cycle": "thermostat blower during {mode} cycle",
+  "activity.fan_source_schedule": "thermostat fan schedule/circulation",
   "activity.fan_speed_observed": "Fan speed observed (comfort-only)",
   "activity.fan_stopped_external": "Fan stopped (external)",
   "activity.fan_whf_off": "WHF: on->off",

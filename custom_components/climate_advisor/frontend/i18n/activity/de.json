@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "fan_mode des Thermostats {old} -> {sent} (CA hatte ihn unter der vorherigen Konfiguration angelassen)",
   "activity.fan_released_believed_running": "CA hat einen Ventilator freigegeben, von dem es annahm, ihn zu betreiben{has_since, select, yes { (seit {since})} other {}}",
   "activity.fan_running_external": "Ventilator läuft (extern) -- {source}",
+  "activity.fan_source_blower_during_cycle": "Thermostat-Gebläse während eines Zyklus ({mode})",
+  "activity.fan_source_schedule": "Lüfterzeitplan/Umwälzung des Thermostats",
   "activity.fan_speed_observed": "Ventilatorstufe beobachtet (nur Komfort)",
   "activity.fan_stopped_external": "Ventilator gestoppt (extern)",
   "activity.fan_whf_off": "WHF: on->off",

@@ -85,6 +85,7 @@ def _payloads() -> list[dict]:
         "target_f": 72.0,
         "preconditioned": True,
         "candidate_family": FAMILY,
+        "source_code": "blower_during_cycle",
     }
     variants = [base]
     variants.append({**base, "mode": "", "has_mode": False})
@@ -93,6 +94,7 @@ def _payloads() -> list[dict]:
     variants.append({**base, "class": "contradiction", "incident_class": "contradiction"})
     variants.append({k: v for k, v in base.items() if k != "outcome"})
     variants.append({**base, "reason": "occupancy"})
+    variants.append({**base, "source_code": "fan_schedule"})
     return variants
 
 
@@ -123,9 +125,12 @@ def _has_word(cell) -> bool:
     return False
 
 
-# The ``source`` field means different things per event: a mode-set reason code for ``thermostat_mode_set``, stored
-# English prose for ``fan_running_untracked`` (coordinator; reported as a follow-up, so left empty here).
-_SOURCE_BY_EVENT = {"thermostat_mode_set": "ode_guard", "fan_running_untracked": ""}
+# The ``source`` field means different things per event: a mode-set reason code for ``thermostat_mode_set``; for
+# ``fan_running_untracked`` the English record next to the ``source_code`` the row is rendered from.
+_SOURCE_BY_EVENT = {
+    "thermostat_mode_set": "ode_guard",
+    "fan_running_untracked": "thermostat blower during heat_cool cycle",
+}
 
 
 def _rendered_rows():
@@ -187,6 +192,8 @@ EXPECTED = {
     "activity.switch_held_candidate",
     "activity.fact_mode_change",
     "activity.fact_trigger",
+    "activity.fan_source_blower_during_cycle",
+    "activity.fan_source_schedule",
 }
 
 
@@ -222,9 +229,8 @@ def test_english_is_byte_identical_to_the_code_text():
 
 
 def test_select_comfort_band_reason_words():
-    from tests.test_api import _make_classification
-
     from custom_components.climate_advisor.automation import select_comfort_band
+    from tests.test_api import _make_classification
 
     c = _make_classification(day_type="hot", hvac_mode="cool")
     band = select_comfort_band(
@@ -244,9 +250,8 @@ def test_select_comfort_band_reason_words():
 
 
 def test_settling_guard_reason_family_word():
-    from tests.test_comfort_settling_guard import _leaf
-
     from custom_components.climate_advisor.comfort_family_decision import decide_comfort_family
+    from tests.test_comfort_settling_guard import _leaf
 
     d = decide_comfort_family(_leaf(indoor=67.0, current="cooling", ran=30.0))
     msg = i18n.msg_of(d.reason)
@@ -333,3 +338,36 @@ def test_every_word_key_exists_in_every_language():
         if lang == "en":
             for k in keys:
                 assert cat[k] == k.rsplit(".", 1)[1]
+
+
+class TestFanRunningUntrackedSource:
+    """The external-fan row's source was stored English prose; it is now a code next to the English record."""
+
+    R = staticmethod(lambda p: ctx.EVENT_RENDERERS["fan_running_untracked"].msg(p, "fahrenheit")[0])
+
+    @pytest.mark.parametrize("mode", ["cool", "heat", "heat_cool"])
+    def test_blower_during_cycle(self, mode):
+        p = {"source": f"thermostat blower during {mode} cycle", "source_code": "blower_during_cycle"}
+        msg = self.R({**p, "thermostat_mode": mode, "hvac_action": "fan"})
+        assert i18n.render_en(msg) == f"Fan running (external) -- thermostat blower during {mode} cycle"
+        for lang in ("de", "zh-Hant", "ja", "fr"):
+            text = i18n.render(msg, lang)
+            assert "thermostat blower" not in text and not re.search(rf"(?<![a-z_]){mode}(?![a-z_])", text), text
+            assert i18n.render(i18n.Code(f"common.hvac_mode_word.{mode}"), lang) in text
+
+    def test_fan_schedule(self):
+        msg = self.R(
+            {"source": "thermostat fan schedule/circulation", "source_code": "fan_schedule", "thermostat_mode": "off"}
+        )
+        assert i18n.render_en(msg) == "Fan running (external) -- thermostat fan schedule/circulation"
+        assert "schedule" not in i18n.render(msg, "de")
+
+    def test_an_older_row_with_only_prose_shows_it_as_written(self):
+        msg = self.R({"source": "thermostat blower during cool cycle", "thermostat_mode": "cool"})
+        assert i18n.render(msg, "de").endswith("-- thermostat blower during cool cycle")
+
+    def test_the_coordinator_stores_the_code_with_the_english_record(self):
+        src = (_PKG / "coordinator.py").read_text(encoding="utf-8")
+        i = src.index('"fan_running_untracked",')
+        payload = src[i : i + 400]
+        assert '"source": _source,' in payload and '"source_code": _source_code,' in payload

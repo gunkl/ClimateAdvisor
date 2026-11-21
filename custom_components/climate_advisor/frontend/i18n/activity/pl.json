@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "fan_mode termostatu {old} -> {sent} (CA zostawił go włączony przy poprzedniej konfiguracji)",
   "activity.fan_released_believed_running": "CA zwolnił wentylator, który uważał za uruchomiony przez siebie{has_since, select, yes { (od {since})} other {}}",
   "activity.fan_running_external": "Wentylator pracuje (zewnętrznie) -- {source}",
+  "activity.fan_source_blower_during_cycle": "dmuchawa termostatu podczas cyklu ({mode})",
+  "activity.fan_source_schedule": "harmonogram/cyrkulacja wentylatora termostatu",
   "activity.fan_speed_observed": "Zaobserwowano bieg wentylatora (tylko komfort)",
   "activity.fan_stopped_external": "Wentylator zatrzymany (zewnętrznie)",
   "activity.fan_whf_off": "WHF: włączony->wyłączony",

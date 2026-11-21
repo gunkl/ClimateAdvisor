@@ -3049,7 +3049,16 @@ def _render_fan_speed_observed(p: dict, unit: str) -> tuple[Cell, Cell]:
 
 @_msg_renderer
 def _render_fan_running_untracked(p: dict, unit: str) -> tuple[Cell, Cell]:
-    source = str(p.get("source", "")).strip() or _m("source_thermostat_initiated")
+    # Issue #1664: a row with ``source_code`` names the source in the viewer's language; an older row carries only the
+    # English ``source`` text and shows it as written (never parsed; those rows age out).
+    code = p.get("source_code")
+    source: Cell
+    if code == "blower_during_cycle":
+        source = _m("fan_source_blower_during_cycle", mode=mode_w(str(p.get("thermostat_mode", ""))))
+    elif code == "fan_schedule":
+        source = _m("fan_source_schedule")
+    else:
+        source = str(p.get("source", "")).strip() or _m("source_thermostat_initiated")
     action = str(p.get("hvac_action", "")).strip()
     label = _m("fan_running_external", source=source)
     settings = _m("fact_fan_on_external_action", action=action_w(action)) if action else _m("fact_fan_on_external")

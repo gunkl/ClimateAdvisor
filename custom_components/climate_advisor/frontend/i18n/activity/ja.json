@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "サーモスタットの fan_mode {old} -> {sent}(以前の設定で CA がオンにしたままでした)",
   "activity.fan_released_believed_running": "CA は作動中と認識していたファンを解除{has_since, select, yes {({since} から)} other {}}",
   "activity.fan_running_external": "ファンが作動中(外部) -- {source}",
+  "activity.fan_source_blower_during_cycle": "{mode}運転中のサーモスタットの送風",
+  "activity.fan_source_schedule": "サーモスタットのファンスケジュール/循環",
   "activity.fan_speed_observed": "ファン速度を確認(快適性のみ)",
   "activity.fan_stopped_external": "ファンが停止(外部)",
   "activity.fan_whf_off": "WHF: オン->オフ",

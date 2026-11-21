@@ -164,6 +164,8 @@
   "activity.fan_released_after_config_detail": "fan_mode термостата {old} -> {sent} (CA залишив його увімкненим за попередньої конфігурації)",
   "activity.fan_released_believed_running": "CA звільнив вентилятор, який вважав запущеним собою{has_since, select, yes { (з {since})} other {}}",
   "activity.fan_running_external": "Вентилятор працює (ззовні) -- {source}",
+  "activity.fan_source_blower_during_cycle": "вентилятор термостата під час циклу ({mode})",
+  "activity.fan_source_schedule": "розклад/циркуляція вентилятора термостата",
   "activity.fan_speed_observed": "Помічено швидкість вентилятора (лише комфорт)",
   "activity.fan_stopped_external": "Вентилятор зупинено (ззовні)",
   "activity.fan_whf_off": "WHF: увімкнено->вимкнено",

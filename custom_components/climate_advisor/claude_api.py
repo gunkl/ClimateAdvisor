@@ -101,6 +101,8 @@ _MODEL_COSTS: dict[str, dict[str, float]] = {
 # Issue #1341 (D9): the occupant-facing sections of an AI report are written in the Home Assistant language. The
 # prompt itself and every context section stay English (render_en); only this instruction names the output language.
 # `## SECTION` headers stay English: parse_investigation_response() splits on them.
+# Issue #1657: any language HA supports, not only the shipped ones. The instruction always carries the language
+# code; these names are added for the shipped languages, as a plain-English hint for the model.
 OUTPUT_LANGUAGE_NAMES: dict[str, str] = {
     "fr": "French",
     "es": "Spanish",
@@ -121,16 +123,18 @@ OUTPUT_LANGUAGE_NAMES: dict[str, str] = {
 
 
 def output_language_instruction(language: str | None) -> str:
-    """The "answer in <language>" instruction for a shipped language code, or "" for English / unknown.
+    """The "answer in <language>" instruction for a language code, or "" for English (any region) / no code.
 
     English adds nothing, so the English prompt (and every English-asserting test) is byte-identical.
     """
-    name = OUTPUT_LANGUAGE_NAMES.get(language or "")
-    if not name:
+    code = (language or "").strip()
+    if not code or code.split("-")[0].lower() == "en":
         return ""
+    name = OUTPUT_LANGUAGE_NAMES.get(code)
+    target = f"{name} (language code {code})" if name else f"the language with code {code}"
     return (
         f"=== OUTPUT LANGUAGE ===\n"
-        f"  Write the occupant-facing text of every section of your report in {name}.\n"
+        f"  Write the occupant-facing text of every section of your report in {target}.\n"
         f"  Keep the section headers (## prefix) exactly as listed in English: they are parsed by exact match.\n"
         f"  Keep [source: ..., value: ...] citations, entity ids, field names, numbers and quoted log records"
         f" verbatim.\n"

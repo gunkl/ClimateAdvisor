@@ -59,7 +59,7 @@ def _parse_response(skill: AISkillDefinition, text: str, hass: HomeAssistant) ->
     if skill.parser_takes_language:
         from . import i18n  # noqa: PLC0415
 
-        return skill.response_parser(text, language=i18n.hass_language(hass))
+        return skill.response_parser(text, language=i18n.hass_language_tag(hass))
     return skill.response_parser(text)
 
 

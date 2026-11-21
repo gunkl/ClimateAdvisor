@@ -240,7 +240,7 @@ async def async_build_investigator_context(
     # Issue #1341 (D9): occupant-facing sections in the Home Assistant language; headers and context stay English.
     from .claude_api import output_language_instruction  # noqa: PLC0415
 
-    language_instruction = output_language_instruction(i18n.hass_language(hass))
+    language_instruction = output_language_instruction(i18n.hass_language_tag(hass))
     if language_instruction:
         sections += [language_instruction]
 

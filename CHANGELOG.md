@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.57] — 2026-11-21
+
+### Changed
+- #1657: the AI Investigator writes its report in your Home Assistant language even when Climate Advisor has no translation for it, for example Swedish, Danish, Czech, Hebrew or Traditional Chinese. Before, those got English. Regional variants are kept too: Brazilian Portuguese is no longer generic Portuguese. In those languages the dashboard labels around the report stay English. English reports are unchanged.
+
 ## [0.9.56] — 2026-11-21
 
 ### Fixed

@@ -129,3 +129,22 @@ def test_sdk_without_authentication_error_degrades_to_the_old_retry(sdk, monkeyp
     asyncio.run(client.async_request("System.", "User."))
     hook.assert_not_called()
     assert calls.call_count == _mod.AI_MAX_RETRIES
+
+
+def test_new_key_clears_a_breaker_opened_by_the_old_key(sdk, monkeypatch) -> None:
+    """After a reauth with a new key, AI resumes at once instead of waiting out the old key's cooldown."""
+    client, _hook, _calls = _client(_AuthError("401"))
+    client._circuit_breaker.state = _mod._CB_OPEN
+    client._circuit_breaker.consecutive_failures = _mod.AI_CIRCUIT_BREAKER_THRESHOLD
+    monkeypatch.setattr(_mod, "AsyncAnthropic", MagicMock(), raising=False)
+    monkeypatch.setattr(_mod, "ANTHROPIC_AVAILABLE", True)
+    client.update_config({**client._config, "ai_api_key": "new"})
+    assert client._circuit_breaker.state == _mod._CB_CLOSED
+    assert client._circuit_breaker.consecutive_failures == 0
+
+
+def test_same_key_keeps_the_breaker(sdk) -> None:
+    client, _hook, _calls = _client(_AuthError("401"))
+    client._circuit_breaker.state = _mod._CB_OPEN
+    client.update_config({**client._config, "ai_model": "other"})
+    assert client._circuit_breaker.state == _mod._CB_OPEN

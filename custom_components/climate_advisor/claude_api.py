@@ -1024,6 +1024,9 @@ class ClaudeAPIClient:
         if new_key != old_key or (self._client is None and new_key):
             if new_key and ANTHROPIC_AVAILABLE:
                 self._client = AsyncAnthropic(api_key=new_key)
+                # Issue #1643: failures counted against the old key say nothing about the new one, so a
+                # reauth must not leave AI paused for the circuit breaker's cooldown.
+                self._circuit_breaker = _CircuitBreaker()
                 _LOGGER.debug("API client re-initialized — key updated")
             else:
                 self._client = None

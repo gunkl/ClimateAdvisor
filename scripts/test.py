@@ -113,6 +113,9 @@ def _run_shards(tier: str, group: str, venv: str, total: int, pytest_args: list[
 
     Slice K gets ``--ca-shard K/N``, the same round-robin split as CI's ``CA_*_SHARD=K/N`` jobs
     (``tools/pytest_shard.py``), so a local slice runs exactly the tests of the matching CI job.
+
+    With ``COVERAGE_FILE`` set (a ``--cov`` run), slice K writes ``$COVERAGE_FILE.K`` instead, so the slices do not
+    overwrite one another, and the slices' data are combined into ``$COVERAGE_FILE`` at the end (Issue #1644).
     """
     if (local := _local_cmd(group, venv, ["--version"])) is None:
         return 2
@@ -124,8 +127,12 @@ def _run_shards(tier: str, group: str, venv: str, total: int, pytest_args: list[
     codes: dict[int, int] = {}
     walls: dict[int, float] = {}
 
+    cov_file = os.environ.get("COVERAGE_FILE", "").strip()
+
     def run(k: int) -> None:
         cmd, env = _local_cmd(group, venv, [*pytest_args, "--ca-shard", f"{k}/{total}"])
+        if cov_file:
+            env = {**env, "COVERAGE_FILE": f"{cov_file}.{k}"}
         start = time.monotonic()
         proc = subprocess.Popen(
             cmd, cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
@@ -146,6 +153,13 @@ def _run_shards(tier: str, group: str, venv: str, total: int, pytest_args: list[
     print(f"\n{tier} tier in {total} slices: {time.monotonic() - start:.0f}s wall")
     for k in range(1, total + 1):
         print(f"  [{k}/{total}] {'passed' if codes[k] == 0 else f'FAILED (exit {codes[k]})'} in {walls[k]:.0f}s")
+    if cov_file:
+        parts = [f"{cov_file}.{k}" for k in range(1, total + 1) if (REPO / f"{cov_file}.{k}").is_file()]
+        if parts:
+            combine = [*_uv_cmd(), "run", "--locked", "--only-group", group, "coverage", "combine"]
+            combine += [f"--data-file={cov_file}", *parts]
+            print(f"+ [{venv}] {shlex.join(combine)}", flush=True)
+            subprocess.run(combine, cwd=REPO, env=env, check=False)
     return next((c for c in codes.values() if c), 0)
 
 

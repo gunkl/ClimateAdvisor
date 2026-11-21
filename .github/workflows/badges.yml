@@ -120,6 +120,12 @@ jobs:
           uv run --locked --only-group test coverage combine --keep --data-file=reports/coverage.all reports/coverage.unit reports/coverage.ha
           uv run --locked --only-group test coverage json --data-file=reports/coverage.all -o reports/coverage.json
 
+      # Issue #1644: the per-module table (modules under the 95% target first) in this run's summary. Report only:
+      # the ratchet itself gates PRs in validate.yml (job `coverage`).
+      - name: Coverage per module (job summary)
+        continue-on-error: true
+        run: python3 tools/coverage_ratchet.py report reports/coverage.json --summary "$GITHUB_STEP_SUMMARY"
+
       - name: Build the badge files
         run: python3 tools/badges.py --out badges
 

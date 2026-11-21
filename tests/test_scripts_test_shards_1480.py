@@ -54,6 +54,7 @@ def runner(monkeypatch):
     for var in ("CA_HA_SHARD", "CA_HA_SHARDS", "CA_HA_WORKERS", "CA_UNIT_SHARD", "CA_UNIT_SHARDS", "CA_UNIT_WORKERS"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.delenv("CA_COMPONENT_ROOT", raising=False)
+    monkeypatch.delenv("COVERAGE_FILE", raising=False)  # CI's own --cov run sets it (Issue #1644)
     module.calls, module.syncs = calls, syncs
     return module
 
@@ -178,3 +179,44 @@ def test_unit_shards_still_runs_every_slice(runner, monkeypatch, capsys):
         assert "tests/" in args
     assert len(runner.syncs) == 1 and runner.syncs[0][-1] == "test"
     assert "unit tier in 4 slices:" in capsys.readouterr().out
+
+
+def test_shards_give_each_slice_its_own_coverage_file_and_combine_them(runner, monkeypatch, tmp_path):
+    """Issue #1644: with COVERAGE_FILE set, slices must not overwrite one another's data; their files are combined."""
+    base = tmp_path / "coverage.unit"
+    monkeypatch.setenv("CA_UNIT_SHARDS", "3")
+    monkeypatch.setenv("COVERAGE_FILE", str(base))
+    seen: list[str] = []
+
+    def fake_local_cmd(group, venv, pytest_args):
+        # The child writes the data file it was given, as pytest-cov would.
+        code = "import os, pathlib; f = os.environ.get('COVERAGE_FILE'); f and pathlib.Path(f).write_text('x')"
+        return [sys.executable, "-c", code], {"SYSTEMROOT": "", "PATH": ""}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen.append(" ".join(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(runner, "_local_cmd", fake_local_cmd)
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    assert runner.main(["unit"]) == 0
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["coverage.unit.1", "coverage.unit.2", "coverage.unit.3"]
+    combine = [c for c in seen if "coverage combine" in c]
+    assert len(combine) == 1
+    assert f"--data-file={base}" in combine[0]
+    assert all(f"{base}.{k}" in combine[0] for k in (1, 2, 3))
+
+
+def test_shards_without_coverage_file_do_not_combine(runner, monkeypatch):
+    monkeypatch.setenv("CA_UNIT_SHARDS", "2")
+    seen: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        seen.append(" ".join(map(str, cmd)))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    assert runner.main(["unit"]) == 0
+    assert seen and not any("combine" in c for c in seen)  # only the up-front sync ran

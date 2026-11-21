@@ -57,6 +57,8 @@ jobs:
   # 8 slices x 4 workers (each runner has 4 CPUs): twice the workers of the first 4 x 4 layout (3.5 min, one slice
   # ~1 min behind the rest), in smaller slices so a slow test holds up less of the run.
   # To change the slice count, change the matrix list, the "/8" in the job name and CA_UNIT_SHARD, and the step name.
+  # Each slice also collects line and branch coverage for the per-module coverage ratchet (job `coverage`, Issue
+  # #1644). Coverage on Python 3.14 uses sys.monitoring, so it adds little to a slice's time.
   unit:
     name: unit (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
@@ -76,10 +78,21 @@ jobs:
         uses: astral-sh/setup-uv@v10.3.3
 
       - name: Run unit tests (slice ${{ matrix.shard }} of 8)
-        run: python3 scripts/test.py unit
+        run: |
+          mkdir -p reports
+          python3 scripts/test.py unit --cov=custom_components/climate_advisor --cov-branch --cov-report=
         env:
           CA_UNIT_WORKERS: "4"
           CA_UNIT_SHARD: "${{ matrix.shard }}/8"
+          COVERAGE_FILE: "reports/coverage.unit.${{ matrix.shard }}"
+
+      - name: Upload this slice's coverage data
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: coverage-unit-${{ matrix.shard }}
+          path: reports/coverage.unit.${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 3
 
   # Issue #1186: each changed test file must also pass ALONE (order-dependence guard).
   # No-op when no tests/test_*.py changed (e.g. a push to main).
@@ -106,19 +119,80 @@ jobs:
         env:
           CA_UNIT_WORKERS: "4"
 
+  # Issue #1644 (Silver test-coverage): every unit and real-HA slice's coverage, combined, checked per module against
+  # tools/coverage_floors.json (a module may not fall below its floor; tools/coverage_ratchet.py). The per-module
+  # table goes to the job summary. Runs only when every slice passed: a failed slice's data would be incomplete.
+  coverage:
+    needs: [unit, ha-slice]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install test dependencies (coverage)
+        run: uv sync --locked --only-group test
+
+      - name: Download every slice's coverage data
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: coverage-*
+          path: reports
+          merge-multiple: true
+
+      - name: Combine both tiers
+        run: |
+          uv run --locked --only-group test coverage combine --data-file=reports/coverage.all reports/coverage.unit.* reports/coverage.ha.*
+          uv run --locked --only-group test coverage json --data-file=reports/coverage.all -o reports/coverage.json
+
+      - name: Per-module coverage ratchet
+        run: python3 tools/coverage_ratchet.py check reports/coverage.json --summary "$GITHUB_STEP_SUMMARY"
+
+  # Issue #1645 (Platinum strict-typing): strict mypy over the package, in the real-HA environment (mypy has to see the
+  # real Home Assistant). Modules listed in .strict-typing must stay clean, a module that becomes clean must be added,
+  # nothing may leave the list, and new modules must pass from day one (tools/typing_ratchet.py).
+  typing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # compares .strict-typing and the module list with the base branch
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Strict typing ratchet (mypy)
+        run: >
+          uv run --locked --only-group test-ha python tools/typing_ratchet.py
+          --base "origin/${{ github.base_ref || github.ref_name }}" --summary "$GITHUB_STEP_SUMMARY"
+
   validate-and-test:
     if: always()
-    needs: [lint, unit, isolated]
+    needs: [lint, unit, isolated, coverage, typing]
     runs-on: ubuntu-latest
     permissions: {}
 
     steps:
-      - name: Every lint, unit slice and isolation job passed
+      - name: Every lint, unit slice, isolation, coverage and typing job passed
         run: |
           echo 'lint=${{ needs.lint.result }} unit=${{ needs.unit.result }} isolated=${{ needs.isolated.result }}'
+          echo 'coverage=${{ needs.coverage.result }} typing=${{ needs.typing.result }}'
           test '${{ needs.lint.result }}' = success
           test '${{ needs.unit.result }}' = success
           test '${{ needs.isolated.result }}' = success
+          test '${{ needs.coverage.result }}' = success
+          test '${{ needs.typing.result }}' = success
 
   # Real Home Assistant tier (Issue #1102 follow-up S1). Its own job and its own
   # environment: tests/ stubs homeassistant for the whole process, and this plugin
@@ -128,6 +202,7 @@ jobs:
   # Round-robin slices like the unit tier (CA_HA_SHARD, tools/pytest_shard.py): one job took ~3 min, spread over
   # many ~10 s tests (mostly the golden replays). To change the slice count, change the matrix list, the "/4" in the
   # job name and CA_HA_SHARD, and the step name together.
+  # Each slice also collects coverage for the per-module coverage ratchet (job `coverage`, Issue #1644).
   ha-slice:
     name: ha-real (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
@@ -135,6 +210,7 @@ jobs:
     env:
       CA_HA_WORKERS: "4"
       CA_HA_SHARD: "${{ matrix.shard }}/4"
+      COVERAGE_FILE: "reports/coverage.ha.${{ matrix.shard }}"
     permissions:
       contents: read
     strategy:
@@ -150,7 +226,17 @@ jobs:
         uses: astral-sh/setup-uv@v10.3.3
 
       - name: Run real-HA lifecycle tests (slice ${{ matrix.shard }} of 4)
-        run: python3 scripts/test.py ha --durations=15  # uv run --locked --only-group test-ha (own venv)
+        run: |  # uv run --locked --only-group test-ha (own venv)
+          mkdir -p reports
+          python3 scripts/test.py ha --durations=15 --cov=custom_components/climate_advisor --cov-branch --cov-report=
+
+      - name: Upload this slice's coverage data
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: coverage-ha-${{ matrix.shard }}
+          path: reports/coverage.ha.${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 3
 
   # The required check: passes only when every real-HA slice passed (branch protection requires this name).
   ha-real:

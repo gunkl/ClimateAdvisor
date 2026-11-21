@@ -18,8 +18,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from custom_components.climate_advisor import i18n
-from custom_components.climate_advisor.const import DOMAIN
 from custom_components.climate_advisor.learning import SUGGESTION_KEYS, LearningEngine
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 REMOVED = ("frequent_door_pauses", "comfort_violations")
 
@@ -140,7 +140,7 @@ def test_old_stored_records_naming_removed_keys_load_and_are_ignored(tmp_path):
 
 def _request(body: dict, coordinator):
     hass = MagicMock()
-    hass.data = {DOMAIN: {"entry1": coordinator}}
+    set_loaded_zones(hass, {"entry1": coordinator})
     hass.async_add_executor_job = AsyncMock()
     hass.config.language = "en"
     req = MagicMock()

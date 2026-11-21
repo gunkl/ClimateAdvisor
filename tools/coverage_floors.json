@@ -16,6 +16,7 @@
     "classification_fsm.py": 100.0,
     "classifier.py": 99.4,
     "claude_api.py": 89.1,
+    "code_words.py": 100.0,
     "comfort_family_decision.py": 100.0,
     "comfort_family_fsm.py": 93.9,
     "comfort_stall_decision.py": 100.0,

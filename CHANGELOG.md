@@ -3,6 +3,25 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.60] — 2026-11-21
+
+> **Template warning:** **Last Action Time** and **Next Automation Time** are now timestamp sensors (#1648). Cards show them as "5 minutes ago" or "in 2 hours" in your language, and automations can trigger on them. Their state text changes: Last Action Time is now in UTC (`2026-11-20T14:00:00+00:00`), and Next Automation Time was a clock label like `6:30 AM` and is now a timestamp, or `unknown` when nothing is scheduled. A template that prints or compares the old text needs updating, for example `{{ as_timestamp(states('sensor.climate_advisor_next_automation_time')) | timestamp_custom('%-I:%M %p') }}`.
+
+### Added
+- #1643: **re-authentication.** When Anthropic refuses the Claude key, or GitHub refuses the token, Home Assistant shows a card asking for a new one; AI and report submission resume as soon as you enter it. A refused key is no longer retried three times.
+- #1646: **reconfigure a zone** (the zone's ⋮ menu → Reconfigure) to move it to a new thermostat, weather service or notify service while keeping its learning, history and settings. Choosing a thermostat another zone already runs is refused, here and in Core Settings.
+- #1649: the README has a **Troubleshooting** section (what each Repairs card and status means, how to report a problem) and **example automations**.
+
+### Changed
+- #1642: Indoor Temperature, Outdoor Temperature and Forecast High/Low show **unavailable** while their source (thermostat, sensor or weather service) is down, instead of an old value, and come back with the next good reading. The Automation switch stays available so observe-only can always be turned on. Plan and status sensors keep their values.
+- #1648: Last Action Time and Next Automation Time are timestamps (see the warning above); AI Status lists its possible states for the automation editor.
+- #1639: each zone's running objects live on its config entry (Home Assistant's `runtime_data`). After a zone is reloaded or deleted, the dashboard, REST views and services answer only for zones that are running.
+
+### Developer
+- #1641: the config flow and every options section are tested in real Home Assistant, including error-then-fix paths.
+- #1644: CI combines both test tiers' coverage and fails if a module drops below its recorded floor.
+- #1645: strict mypy with a ratchet: 62 modules are listed in `.strict-typing`, and the list only grows. The package ships `py.typed`.
+
 ## [0.9.58] — 2026-11-21
 
 ### Added

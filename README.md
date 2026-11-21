@@ -213,6 +213,10 @@ Each zone creates **21 sensors** and **1 switch**, grouped under a device named 
 
 **Diagnostic sensors** (Heat and Cool Threshold, Last Action Time and Reason, AI Status) appear under Diagnostic on the device page and are left out of auto-generated dashboards; they keep their history. **Trend** is disabled by default on new installs, because its value is also an attribute of Day Type: enable it on the device page if you want it as its own sensor. Existing installs keep it as it is.
 
+**When a source drops out**, Indoor Temperature shows unavailable while neither your indoor sensor nor the thermostat reports, and Outdoor Temperature, Forecast High and Forecast Low show unavailable while the weather service is down (Outdoor Temperature stays when your own outdoor sensor still reports). They come back as soon as the source does. Climate Advisor keeps running on its fallbacks meanwhile, so the plan and status sensors keep their values and Status names the outage. If a whole update fails, every sensor shows unavailable until the next good one; the Automation switch always stays usable.
+
+**Last Action Time and Next Automation Time are timestamps**, so cards show them as "5 minutes ago" or "in 2 hours". Their state is Home Assistant's timestamp format in UTC, such as `2026-11-20T14:00:00+00:00`; a template that compared the old text needs `as_datetime`.
+
 | Entity | What it shows |
 |---|---|
 | Day Type, Trend | Today's classification and the trend into tomorrow |

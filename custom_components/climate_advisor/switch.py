@@ -64,6 +64,16 @@ class ClimateAdvisorAutomationSwitch(ClimateAdvisorEntity, SwitchEntity):
         super().__init__(coordinator, entry, "automation_enabled")
 
     @property
+    def available(self) -> bool:
+        """Always available (quality scale entity-unavailable, Issue #1642).
+
+        The switch shows and sets a flag of Climate Advisor itself, not a reading of a device or service. A failed
+        coordinator update must not take away the occupant's way to stop Climate Advisor from commanding the
+        thermostat (observe-only) while something is wrong.
+        """
+        return True
+
+    @property
     def is_on(self) -> bool:
         """Return True if automation actions are enabled."""
         return self.coordinator.automation_enabled

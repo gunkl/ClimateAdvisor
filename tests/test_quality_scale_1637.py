@@ -140,7 +140,7 @@ def test_update_failed_message_in_every_language():
 
 # ── Batch 2 (#1637): icons.json, ENUM device classes, services in async_setup, service errors ──
 
-_ENUM_SENSORS = {"day_type", "trend_direction", "occupancy_mode"}
+_ENUM_SENSORS = {"day_type", "trend_direction", "occupancy_mode", "ai_status"}  # ai_status: Issue #1648
 
 
 def _strings() -> dict:

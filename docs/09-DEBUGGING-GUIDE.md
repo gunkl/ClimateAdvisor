@@ -48,7 +48,7 @@ Climate Advisor exposes several sensor entities in Home Assistant. These persist
 | Status | `sensor.climate_advisor_status` | active / paused / grace period / disabled | — | Current automation state |
 | Day Type | `sensor.climate_advisor_day_type` | hot / warm / mild / cool / cold | — | Current classification |
 | Last Action Reason | `sensor.climate_advisor_last_action_reason` | Truncated reason (250 chars) | `full_reason` | Why last HVAC action was taken |
-| Last Action Time | `sensor.climate_advisor_last_action_time` | ISO timestamp | — | When last action occurred |
+| Last Action Time | `sensor.climate_advisor_last_action_time` | Timestamp (`device_class: timestamp`, UTC, Issue #1648) | — | When last action occurred |
 | Contact Sensors | `sensor.climate_advisor_contact_status` | "all closed" / sensor names | `sensors`, `paused_by_door`, `open_count` | Door/window state and pause status |
 | Fan Status | `sensor.climate_advisor_fan_status` | active / inactive / override — on / override — off / disabled | `fan_runtime_minutes`, `fan_override_since`, `fan_running` | Fan automation state |
 | Daily Briefing | `sensor.climate_advisor_daily_briefing` | TLDR summary, truncated (250 chars) only if it exceeds HA's 255-char limit (Issue #555) | `full_briefing`, `tldr` (untruncated) | Today's plan |

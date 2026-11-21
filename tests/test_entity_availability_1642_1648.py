@@ -31,7 +31,6 @@ from homeassistant.components.sensor import SensorDeviceClass  # noqa: E402
 from custom_components.climate_advisor import i18n  # noqa: E402
 from custom_components.climate_advisor import sensor as sensor_platform  # noqa: E402
 from custom_components.climate_advisor import switch as switch_platform  # noqa: E402
-from custom_components.climate_advisor.const import DOMAIN  # noqa: E402
 from custom_components.climate_advisor.status_text import CodedText  # noqa: E402
 
 _READINGS = {"indoor_temp", "outdoor_temp", "forecast_high", "forecast_low"}
@@ -46,9 +45,9 @@ def _entities(platform, *, config=None, data=None):
     coord._weather_attrs_and_down.return_value = ({}, False)
     coord._live_dedicated_outdoor_temp.return_value = None
     hass = MagicMock()
-    hass.data = {DOMAIN: {"zone1": coord}}
     entry = MagicMock()
     entry.entry_id = "zone1"
+    entry.runtime_data = coord  # #1639: the platforms read the zone coordinator from entry.runtime_data
     entry.title = "Living Room"
     added: list = []
     asyncio.run(platform.async_setup_entry(hass, entry, added.extend))

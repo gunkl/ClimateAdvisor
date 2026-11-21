@@ -18,7 +18,7 @@ Home Assistant is covered in [SSH Setup](SSH-SETUP.md).
 | How do I run the real-Home-Assistant tier, build the house fixture, prove a test fails without the fix, or update snapshots? | `python scripts/test.py ha` (WSL on Windows). Use the `make_house` fixture in `tests_ha/house/`. `scripts/revert_proof.py` proves an escaped-bug test fails on the pre-fix commit. | [Real-HA tier](DEVELOPMENT.md#real-ha-tier-the-house-markers-revert-proof-snapshots-step-2-issue-1127) |
 | How do I run the simulator and its goldens? | `python tools/simulate.py` drives the real `AutomationEngine` (single-engine harness, #236). Goldens are locked by `MANIFEST.json`, and only `--sign` after human review changes them. | [§Simulator](DEVELOPMENT.md#simulator) |
 | What does the nightly run, and how do I hear about a failure? | It runs fresh-seed generated days (P1-P7, then P8) and the full real-HA tier. Each seed prints its timing and `peak_rss`. When any job fails, `report-failure` files an issue for that failure (label `nightly-failure`; a repeat of the same failure comments on it), and `nightly-autofix.yml` has Claude diagnose it and, when it can show a fix, open a draft PR for review. | [§Nightly](DEVELOPMENT.md#nightly) |
-| Where do the README's test badges come from? | `badges.yml` runs both tiers with coverage and JUnit XML on every push to `main`, daily and by hand; `tools/badges.py` turns the reports and the real-HA ledger into shields.io endpoint JSON on the `badges` branch. The nightly badge is GitHub's workflow status. Issue #1343. | [§Test badges](DEVELOPMENT.md#test-badges) |
+| Where do the README's test badges come from? | `badges.yml` runs both tiers with coverage and JUnit XML once a day (07:37 UTC) and by hand; `tools/badges.py` turns the reports and the real-HA ledger into shields.io endpoint JSON on the `badges` branch. The nightly badge is GitHub's workflow status. Issue #1343. | [§Test badges](DEVELOPMENT.md#test-badges) |
 | What must a PR carry besides code? | A version bump in `const.py` and `manifest.json`, a `CHANGELOG.md` entry and a `fix_history.jsonl` entry added with `tools/add_fix_entry.py`. `tests/test_version_sync.py` checks that the two versions match. | [§Before Submitting Changes](DEVELOPMENT.md#before-submitting-changes) |
 | What is the correct sequence for adding a new module? | Create the module in `custom_components/climate_advisor/` and a matching `tests/test_<module>.py`. Add any new HA submodule to `_HA_MODULES` in `tools/sim_harness/ha_stubs.py`, then run the full unit tier. | [§Adding a New Module](DEVELOPMENT.md#adding-a-new-module) |
 
@@ -244,7 +244,7 @@ check that the rule still works.
 ## Test badges
 
 The README's second badge row (Issue #1343) shows every test layer, in the same `flat-square` style as the version
-badges. `badges.yml` builds them on every push to `main`, daily at 07:37 UTC (after the nightly) and by hand. It is
+badges. `badges.yml` builds them once a day at 07:37 UTC (after the nightly) and by hand, not on every push to `main`: it re-runs both tiers with coverage (about 13 min), and the badges change little between merges. It is
 not a required check and never runs on PRs, so coverage does not slow the PR jobs or their time caps.
 
 | Badge | Source | Example |

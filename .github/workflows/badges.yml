@@ -5,13 +5,13 @@ name: Test badges
 # turns the reports and the real-HA ledger into shields.io endpoint JSON, pushed to the `badges` branch (one
 # commit, force-pushed each time). The nightly badge is GitHub's own workflow status, so it is not built here.
 # A failing test still publishes: the badge turns red instead of keeping yesterday's green.
+# Once a day, not on every push to main (owner decision 2026-11-20): this run repeats both tiers with coverage
+# (about 13 min), and the badges are a README summary that changes little between merges. The required PR checks
+# still block a failing change before it merges. Run it by hand (workflow_dispatch) for a fresh set.
 
 on:
-  push:
-    branches:
-      - main
   schedule:
-    - cron: "37 7 * * *"  # after nightly.yml (06:17), so a day with no push still refreshes
+    - cron: "37 7 * * *"  # after nightly.yml (06:17)
   workflow_dispatch:
 
 concurrency:

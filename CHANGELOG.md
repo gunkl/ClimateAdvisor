@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.52] — 2026-11-20
+
+### Changed
+- #1624: switching automation back on after making changes with it off is now judged by whether the house settles in a good state, not by which of your changes wins. If you had the whole-house fan running and set the heat or AC while automation was off, Climate Advisor turning the heat or AC Off when you switch automation back on (the fan and the heat/AC never run together) is no longer reported as "Climate Advisor changed your thermostat setting". Nothing Climate Advisor does in the house changes. Any other undoing of your change is still reported.
+
 ## [0.9.51] — 2026-11-20
 
 ### Added

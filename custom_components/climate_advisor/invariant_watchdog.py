@@ -82,7 +82,7 @@ from .const import (
     FAN_MODE_WHOLE_HOUSE,
 )
 from .hvac_action import is_hvac_compressor_active
-from .promise_journal import NAT_VENT_END_KINDS, Command, Episode, Mark, PromiseInput, Reading, RunKey
+from .promise_journal import JOURNAL_MAX_AGE, NAT_VENT_END_KINDS, Command, Episode, Mark, PromiseInput, Reading, RunKey
 from .thermostat_profile import fan_command_starts_blower
 
 _LOGGER = logging.getLogger(__name__)
@@ -196,6 +196,12 @@ class PromiseNumbers:
     # Issue #1144 rule 2 (newest occupant action wins): the HVAC-off Climate Advisor sends when the occupant turns the
     # fan on after their own thermostat change follows the fan-on within production's 30 s bound; 60 s is looser.
     P4_RULE2_SUPPRESS_S: float = 60.0
+    # Issue #1624 (owner rule 2026-11-20): switching automation back on only has to settle the house in a good state.
+    # The rule-2 HVAC-off it sends while the occupant's whole-house fan runs follows the re-enable within production's
+    # immediate ``automation_enabled`` check; 60 s is looser.
+    P4_REENABLE_SETTLE_S: float = 60.0
+    # A command older than this has been through at least one promise check (the 5-minute heartbeat, with slack).
+    P4_REJUDGE_AFTER_MIN: float = 15.0
     P5_BLIND_CONTINUE_MIN: float = 35.0  # production auto-stops at 30 min
     # Issue #1144: owner rule 1 -- the whole-house fan is off within 30 s of running on a sealed house. Production's
     # worst case is a 10 s settle + the 15 s tick + the 5 s on/off dance of a one-way transmitter; the promise counts
@@ -791,6 +797,64 @@ def _p4_rule2_suppression_ends(ep: Episode, inp: PromiseInput) -> bool:
     )
 
 
+def _p4_reenable_settle(cmd: Command, ep: Episode, inp: PromiseInput) -> bool:
+    """The rule-2 HVAC-off that settles the house when automation is switched back on (Issue #1624).
+
+    Owner rule (2026-11-20): switching automation off, making changes, then switching it back on only has to settle
+    the house in a good state; which of the occupant's changes wins does not matter. With the occupant's whole-house
+    fan running and their thermostat override set while automation was off, the HVAC-off Climate Advisor sends at
+    the re-enable is that settling (rule 2: fan and AC never run together), not undoing the change. The fan side
+    already accepts the mirror (``whf_safety_stop`` ends a fan override).
+
+    Accepted only when all hold: (1) the override began while automation was off; (2) the command is a Climate
+    Advisor HVAC-off sent with automation on, within ``P4_REENABLE_SETTLE_S`` after the re-enable (the first
+    automation-on reading after an automation-off one);
+    (3) the whole-house fan is physically on in every reading from a reading with automation off up to the
+    command, so it is the occupant's fan (Climate Advisor sends nothing with automation off, P3).
+
+    Rule-8 justification (could this let a real failure pass silently?): an HVAC-off at re-enable with no fan the
+    occupant had running, a fan Climate Advisor started after the re-enable, a setpoint reversal, or any reversal at
+    another time is still a miss. A bad settled state is still caught by P2 (``ac_whf_mutex``), which has its own
+    observe-only re-enable handling (#1288). Once the readings before the override age out, an HVAC-off with the fan
+    on that an earlier check already judged on full evidence is not judged again, so nothing real is lost; one whose
+    evidence was never complete (an override older than the window) is not excused.
+    """
+    if ep.target != "thermostat" or cmd.target != "thermostat" or cmd.origin != "ca":
+        return False
+    if cmd.service not in _HVAC_MODE_SERVICES or cmd.mode != "off" or not cmd.automation_enabled:
+        return False
+    rs = inp.readings
+    fan_at_cmd = [r.fan_on for r in rs if r.ts <= cmd.ts and r.fan_on is not None]
+    if not fan_at_cmd or fan_at_cmd[-1] is not True:
+        return False
+    if rs[0].ts > ep.start_ts:
+        # The readings before the override are no longer in the window. When the override began less than a window
+        # before the command and the command is older than one heartbeat, an earlier check judged it with the full
+        # evidence (and reported a real miss then); judging it again on partial evidence could only add a false
+        # alarm (the journal's "never a false alarm" rule). Otherwise the evidence was never there: not excused.
+        judged_before = _mins(cmd.ts, inp.now) >= NUMBERS.P4_REJUDGE_AFTER_MIN
+        return judged_before and ep.start_ts >= cmd.ts - JOURNAL_MAX_AGE
+    before_start = [r for r in rs if r.ts <= ep.start_ts]
+    if before_start[-1].automation_enabled:
+        return False
+    # The re-enable instant: the first automation-on reading after an automation-off one. Readings can be minutes
+    # apart, so the window starts there, not at the last automation-off reading.
+    window = timedelta(seconds=NUMBERS.P4_REENABLE_SETTLE_S)
+    if not any(
+        not rs[i - 1].automation_enabled and rs[i].automation_enabled and timedelta(0) <= cmd.ts - rs[i].ts <= window
+        for i in range(1, len(rs))
+    ):
+        return False
+    # The fan was physically on while automation was off and stayed on through the command. Climate Advisor sends
+    # nothing with automation off (P3), so that fan is the occupant's; a fan-on reading survives the window better
+    # than the off->on transition ``occupant_actions`` needs.
+    fan_rs = [r for r in rs if r.ts <= cmd.ts and r.fan_on is not None]
+    run_start = len(fan_rs)
+    while run_start > 0 and fan_rs[run_start - 1].fan_on is True:
+        run_start -= 1
+    return run_start < len(fan_rs) and any(not r.automation_enabled for r in fan_rs[run_start:])
+
+
 def _p4_end_is_listed(ep: Episode, inp: PromiseInput) -> bool:
     r = ep.end_reason or ""
     if r.startswith("user_cancel"):
@@ -870,6 +934,8 @@ def check_p4_override_respected(inp: PromiseInput, cfg: PromiseConfig) -> list[H
             if listed and ep.end_ts is not None and cmd.ts >= ep.end_ts - end_slack:
                 continue
             if not _p4_reverses(cmd, ep):
+                continue
+            if _p4_reenable_settle(cmd, ep, inp):
                 continue
             if cmd.ts in reported_ts:
                 continue

@@ -203,6 +203,7 @@ If an update fails, the zone's sensors show as unavailable until the next good u
 - **One thermostat per zone.** A home with several thermostats sets up one zone each.
 - **The thermostat must follow commands.** Its own schedules and "smart" features have to be off (see [Thermostat requirements](#thermostat-requirements)).
 - **Heat-only and cool-only systems** work but are less tested than heat-and-cool systems.
+- **Only Ecobee thermostats have been tested** (see [Supported devices](#supported-devices)).
 - **The AI Investigator needs an AI provider** set up in Home Assistant. A cloud provider sends your house data to that service; a local model such as Ollama keeps it at home. Everything else works without AI.
 - **Predictions need history.** A new zone plans with default values until it has learned how your house heats and cools.
 - **Home Assistant 2026.3 or later** is required.
@@ -247,6 +248,75 @@ Every service takes a **Zone** (`entry_id`), which you pick from the dropdown in
 | `climate_advisor.dump_diagnostics` | Write a diagnostic snapshot to the HA log |
 | `climate_advisor.reset_learning_data` | Reset learned data (`scope`: `all`, `thermal_model`, `weather_bias` or `suggestions`). This can't be undone |
 
+## Examples
+
+Climate Advisor runs the house by itself; you don't need any automations. These examples use its sensors and services in your own automations. They assume a zone named "Living Room". Your entity IDs follow your zone's name, so check them on the zone's device page. To find a zone's `entry_id`, pick the zone in the service-call UI, then switch to YAML mode.
+
+**Send Your Next Action to your phone** (for example "Open the windows") when it changes:
+
+```yaml
+automation:
+  - alias: "Climate Advisor: tell me what to do"
+    triggers:
+      - trigger: state
+        entity_id: sensor.living_room_your_next_action
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.to_state.state not in ['unknown', 'unavailable', ''] }}"
+    actions:
+      - action: notify.mobile_app_my_phone
+        data:
+          title: "Climate Advisor"
+          message: "{{ trigger.to_state.state }}"
+```
+
+**Close the blinds on a hot day,** using the Day Type sensor (`hot`, `warm`, `mild`, `cool` or `cold`):
+
+```yaml
+automation:
+  - alias: "Close the blinds on hot days"
+    triggers:
+      - trigger: time
+        at: "10:00:00"
+    conditions:
+      - condition: state
+        entity_id: sensor.living_room_day_type
+        state: "hot"
+    actions:
+      - action: cover.close_cover
+        target:
+          entity_id: cover.living_room_blinds
+```
+
+**Switch to observe-only while the HVAC is being serviced.** With the Automation switch off, Climate Advisor keeps planning and reporting but sends no commands:
+
+```yaml
+automation:
+  - alias: "Climate Advisor off during HVAC service"
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.hvac_service
+    actions:
+      - action: "switch.turn_{{ 'off' if trigger.to_state.state == 'on' else 'on' }}"
+        target:
+          entity_id: switch.living_room_automation
+```
+
+**Fetch the forecast again when the weather service comes back** after an outage, instead of waiting for the next 30-minute update:
+
+```yaml
+automation:
+  - alias: "Climate Advisor: reclassify after a weather outage"
+    triggers:
+      - trigger: state
+        entity_id: weather.home
+        from: "unavailable"
+    actions:
+      - action: climate_advisor.force_reclassify
+        data:
+          entry_id: "01JABCDEFGHJKMNPQRSTVWXYZ"
+```
+
 ## Dashboard
 
 The **Climate Advisor** sidebar panel opens the **new dashboard** by default. **Back to classic** is one click away and is remembered in this browser; the classic dashboard stays fully working and offers **Try the new dashboard** in its header. `?classic=1` (or a bookmark of the classic page) opens classic for that visit, and links such as `#analysis` or `#settings/...` still land on the right tab.
@@ -264,6 +334,45 @@ The classic dashboard keeps its Status, Analysis (Activity Record, optional AI I
 
 The panel is backed by a REST API; see [rest-api](docs/rest-api.md).
 
+## Troubleshooting
+
+Start with the zone's **Status** and **Last Action Reason** sensors (or the Status tab of the dashboard). Most surprises have a plain reason there: a grace period after your own change, an open window, observe-only mode or an away mode.
+
+**The thermostat ignores Climate Advisor, or goes back to its own setpoint.**
+1. Check the thermostat's own settings: built-in schedules and "smart" home/away features off, and holds set to last until you change them (see [Thermostat requirements](#thermostat-requirements)). A thermostat schedule that resumes overwrites Climate Advisor's setpoint.
+2. Check Status. **grace period (manual)** means you, or something outside Climate Advisor, changed the thermostat; Climate Advisor waits out the grace period (30 min by default) before it resumes. **paused — door/window open** means a door or window has been open past its delay.
+3. Check the **Automation** switch (below).
+4. If Climate Advisor did send the command but the thermostat never ran, the Activity Log in the dashboard says so, and you get an alert when the house stays off target for hours with the equipment idle.
+
+**Status says "disabled", or nothing is being changed.** The zone's **Automation** switch is off. That is observe-only mode: Climate Advisor keeps planning, briefing and reporting but sends no commands. Turn the switch on to give it control again.
+
+**A "Weather entity not found" card in Settings → System → Repairs.** The weather entity you picked in setup is gone, for example after the weather integration was removed or renamed. If you have exactly one weather entity, Climate Advisor switches to it by itself. Otherwise, click **Fix** on the card and pick the weather entity; the zone reloads with it. Until then the zone can't classify the day, and Status shows **starting — waiting for weather data**.
+
+**A "Reload to apply config changes required" card.** You saved options that need a reload. Click **Fix**, or reload the zone (**Settings → Devices & Services → Climate Advisor → ⋮ → Reload**).
+
+**The zone's sensors show "unavailable".** The zone's last update failed. It tries again every 30 minutes and recovers by itself once the cause is gone.
+1. Check that the thermostat and weather entities are available (**Settings → Developer tools → States**).
+2. Look for Climate Advisor errors in **Settings → System → Logs**.
+3. Reload the zone (**⋮ → Reload**).
+
+After a restart the zone starts even if a cloud thermostat is still loading, and catches up when the thermostat appears.
+
+**An AI report is cut short or fails.**
+- Raise the limits in your AI provider's AI Task options: max tokens at least 8192, reasoning at medium, and for Ollama a context window of 32768 (see [AI Investigator](#ai-investigator)). Climate Advisor warns before a run when it can see a limit that is too small.
+- **AI Status: Paused after repeated errors** means 5 requests in a row failed. AI pauses for 5 minutes, then tries again. Check the AI provider's own integration for an expired key or an outage.
+- **AI Status: Monthly budget reached** applies to built-in Claude only. Raise the budget in AI settings, or move to an AI Task provider.
+- A **Built-in Claude is deprecated** card in Repairs is a reminder to move; see [moving from built-in Claude](docs/builtin-claude-deprecated.md).
+
+**An "Ambiguous zone selection" card** (two or more zones). A script, command-line tool or old browser tab asked Climate Advisor for data without saying which zone. The card says what the request was and how to add the zone to it.
+
+### Reporting a problem
+
+1. **Download diagnostics** for the zone: **Settings → Devices & Services → Climate Advisor → ⋮ on the zone → Download diagnostics**, or **Download diagnostics** in the dashboard's Debug tab. API keys, the GitHub token, the notification service and the thermostat's serial number, MAC address and location are removed from the file.
+2. For a problem that builds up over hours, also use **Download logs** in the Debug tab. To get more detail, turn on **Enable debug logging** on the Climate Advisor integration page, reproduce the problem, then turn it off again.
+3. [Open an issue](https://github.com/gunkl/ClimateAdvisor/issues) with what you expected, what happened and when, and attach the files. Read them first if you want to check what they hold.
+
+The [debugging guide](docs/09-DEBUGGING-GUIDE.md) goes deeper, for developers and advanced users: SSH, container logs and the repository's tools.
+
 ## Documentation
 
 | Topic | Doc |
@@ -272,7 +381,8 @@ The panel is backed by a REST API; see [rest-api](docs/rest-api.md).
 | Strategy and design | [01-STRATEGY-AND-DESIGN](docs/01-STRATEGY-AND-DESIGN.md) |
 | Architecture | [02-ARCHITECTURE-REFERENCE](docs/02-ARCHITECTURE-REFERENCE.md) |
 | How decisions are computed | [08-COMPUTATION-REFERENCE](docs/08-COMPUTATION-REFERENCE.md) |
-| Troubleshooting | [09-DEBUGGING-GUIDE](docs/09-DEBUGGING-GUIDE.md) |
+| Troubleshooting for users | [Troubleshooting](#troubleshooting) |
+| Debugging guide (developers, advanced users) | [09-DEBUGGING-GUIDE](docs/09-DEBUGGING-GUIDE.md) |
 | Prediction engines (choice, fallback, what they control) | [prediction-engines-spec](docs/prediction-engines-spec.md) |
 | Prediction engine v4 | [predictor-v4-spec](docs/predictor-v4-spec.md) |
 | Thermal model v3 | [thermal-model-v3-spec](docs/thermal-model-v3-spec.md) |

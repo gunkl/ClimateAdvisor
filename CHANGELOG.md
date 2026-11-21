@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.53] — 2026-11-20
+
+### Fixed
+- Fix #1340: the AI Investigator no longer tells you to run `python tools/thermal_replay.py --chart-log --write` when it finds no chart-log observations. That script is a developer tool in the repository; a HACS install does not have it. Climate Advisor learns these observations on its own (once over the last 30 days at first start-up, then after each night-time period with the house closed and the heat, AC and fan off), so the Investigator now says that, and that there is nothing to run.
+
 ## [0.9.52] — 2026-11-20
 
 ### Changed

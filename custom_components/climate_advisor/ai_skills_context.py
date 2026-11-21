@@ -1161,9 +1161,14 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
     lines.append(f"  chart_log endpoint observations: {endpoint_count}")
     lines.append(f"  block-OLS observations: {block_ols_count}")
     if endpoint_count == 0 and block_ols_count == 0:
+        # Issue #1340: this used to recommend a developer-only repo script (tools/thermal_replay.py) that a HACS install
+        # does not have. The fit is automatic, so the note says what to expect and that there is nothing to run.
         lines.append(
-            "  NOTE: 0 chart_log observations — consider running"
-            " python tools/thermal_replay.py --chart-log --write to backfill"
+            "  NOTE: 0 chart_log observations. Climate Advisor fits these on its own from its chart log: once over"
+            " the last 30 days at first start-up, then each time a night-time period with the house closed and the"
+            " heat, AC and fan off ends (daytime periods are skipped because of the sun). 0 is expected on a new"
+            " install, or while the HVAC runs constantly or windows stay open, until such periods are recorded."
+            " There is no manual step for the user: do not recommend running a script or a backfill."
         )
 
     # --- Engine status ---

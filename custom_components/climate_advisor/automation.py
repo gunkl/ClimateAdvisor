@@ -24,6 +24,7 @@ from homeassistant.util import dt as dt_util
 
 from . import i18n
 from .classifier import DayClassification
+from .code_words import band_w, day_w, edge_w, family_w, mode_w, occupancy_w, trend_w
 from .const import (
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
     CLIMATE_FEATURE_TARGET_TEMP_RANGE,
@@ -1016,11 +1017,11 @@ def select_comfort_band(
     _unit = config.get("temp_unit", "fahrenheit")
     reason = _R(
         "reason_band_select",
-        ctx=ctx,
+        ctx=band_w(ctx),
         floor=_band_num(floor, _unit),
         ceiling=_band_num(ceiling, _unit),
-        day_type=str(classification.day_type),
-        active=active,
+        day_type=day_w(str(classification.day_type)),
+        active=edge_w(active),
         aggressive=_yn_flag(aggressive_savings),
         has_tou=_yn_flag(tou_expansion_f),
         tou=f"{display_delta(tou_expansion_f, _unit, 1):.1f}" if tou_expansion_f else "",
@@ -4726,7 +4727,7 @@ class AutomationEngine:
         while physically running) is actually turned off instead of reported ALREADY_IN_STATE.
         """
         result = await self._deactivate_fan(
-            reason=_R("reason_manual_override_ending_free_cooling", mode=str(mode)),
+            reason=_R("reason_manual_override_ending_free_cooling", mode=mode_w(str(mode))),
             restore_hvac=False,
             release_suppression=True,
             emit_event=False,
@@ -5625,8 +5626,8 @@ class AutomationEngine:
             # Arm the comfort band — the thermostat holds the house; no mode-specific dispatch needed.
             cls_reason = _R(
                 "reason_daily_classification",
-                day_type=str(classification.day_type),
-                trend=str(classification.trend_direction),
+                day_type=day_w(str(classification.day_type)),
+                trend=trend_w(str(classification.trend_direction)),
                 magnitude=self._tdp(classification.trend_magnitude, 0),
             )
             _band = select_comfort_band(
@@ -5921,7 +5922,7 @@ class AutomationEngine:
             else _R(
                 "reason_band_edge_used",
                 band=_nest(band.reason),
-                edge=str(_effective_active),
+                edge=edge_w(str(_effective_active)),
                 shape=str(_cmd_shape),
                 target=self._tp(_target, 0),
             )
@@ -6720,7 +6721,7 @@ class AutomationEngine:
             # Read back later (Off direction included): did the thermostat actually take it?
             self._schedule_mode_alignment_recheck(_mode_seq, before_mode=_mode_before)
             _LOGGER.info("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
-            self._record_action(_R("action_set_hvac", mode=str(mode)), reason)
+            self._record_action(_R("action_set_hvac", mode=mode_w(str(mode))), reason)
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
             # blowdown state. Skip if nat-vent is active — clobbering fan_mode=on
             # while nat-vent is running silently stops cooling (Issue #134).
@@ -6852,7 +6853,7 @@ class AutomationEngine:
             self._last_mode_switch_result = HvacCommandResult.EXECUTED
         self._update_write_record(result=self._last_mode_switch_result)
         self._mode_switch_marker = (mode, dt_util.now())
-        self._record_action(_R("action_set_hvac", mode=str(mode)), _R("reason_mode_switch_before_setpoint"))
+        self._record_action(_R("action_set_hvac", mode=mode_w(str(mode))), _R("reason_mode_switch_before_setpoint"))
         if self._write_seq != my_seq:
             _LOGGER.info("Setpoint write superseded by a newer command during the mode switch — aborting")
             return False
@@ -7319,7 +7320,7 @@ class AutomationEngine:
         self._remote_exit_at = None  # any writer's setpoint ends the exit's wait for "the next band" (Issue #1194 c)
         if _call.ok:
             self._remote_write_failed_at = None  # a write went through: the outer loop's failed-write back-off is over
-        self._record_action(_R("action_set_temp", temp=i18n.Temp(temperature, unit), mode=str(mode)), reason)
+        self._record_action(_R("action_set_temp", temp=i18n.Temp(temperature, unit), mode=mode_w(str(mode))), reason)
         return HvacCommandResult.EXECUTED if _call.ok else HvacCommandResult.UNCONFIRMED
 
     # ------------------------------------------------------------------
@@ -8415,7 +8416,7 @@ class AutomationEngine:
             self._pre_pause_mode = mode
             with self._mode_change_context("pause"):
                 _off_result = await self._set_hvac_mode(
-                    "off", reason=_R("reason_pause_was_mode", reason=_nest(reason), mode=str(mode))
+                    "off", reason=_R("reason_pause_was_mode", reason=_nest(reason), mode=mode_w(str(mode)))
                 )
             if _off_result is HvacCommandResult.DRY_RUN:
                 # Issue #1293: observe-only sent nothing, so the HVAC keeps running and there is no pause to record.
@@ -8973,7 +8974,7 @@ class AutomationEngine:
             if restore_mode:
                 mode_result = await self._set_hvac_mode(
                     restore_mode,
-                    reason=_R("reason_door_closed_restoring_mode", mode=restore_mode),
+                    reason=_R("reason_door_closed_restoring_mode", mode=mode_w(restore_mode)),
                 )
             write_result = None
             if self._current_classification:
@@ -14694,7 +14695,7 @@ class AutomationEngine:
         _LOGGER.info("Nat-vent exit (%s): window still open -- thermostat %s -> off", reason, mode)
         with self._mode_change_context("pause"):
             _off_result = await self._set_hvac_mode(
-                "off", reason=_R("reason_nv_exit_window_open_was", reason=_nest(reason), mode=str(mode))
+                "off", reason=_R("reason_nv_exit_window_open_was", reason=_nest(reason), mode=mode_w(str(mode)))
             )
         if _off_result is HvacCommandResult.DRY_RUN:
             return None  # Issue #1295: observe-only -- nothing sent, the thermostat keeps running
@@ -14833,7 +14834,7 @@ class AutomationEngine:
                 with self._mode_change_context("nat_vent" if session == "blower" else "pause"):
                     _result = await self._set_hvac_mode(
                         "off",
-                        reason=_R("reason_resend", reason=_nest(reason), live=str(live), attempt=attempt + 1),
+                        reason=_R("reason_resend", reason=_nest(reason), live=mode_w(str(live)), attempt=attempt + 1),
                     )
                 self._arm_open_window_off_retry(_result, reason=reason, attempt=attempt + 1, session=session)
         except Exception:
@@ -14986,7 +14987,9 @@ class AutomationEngine:
                             "reason": pending.reason,
                         },
                     )
-                _why = _R("reason_resend_restore", reason=_nest(pending.reason), live=str(live), attempt=attempt + 1)
+                _why = _R(
+                    "reason_resend_restore", reason=_nest(pending.reason), live=mode_w(str(live)), attempt=attempt + 1
+                )
                 _result: HvacCommandResult | None = None
                 with self._mode_change_context("restore"):
                     if self._current_classification is not None:
@@ -17911,7 +17914,9 @@ class AutomationEngine:
         # record below states what the thermostat was actually sent).
         _bank_write = await self._bank_takes_occupancy_write(mode)
         if _bank_write is None:
-            await self._apply_comfort_band(_band, reason=_R("reason_occupancy_setback_band", mode=str(mode)))
+            await self._apply_comfort_band(
+                _band, reason=_R("reason_occupancy_setback_band", mode=occupancy_w(str(mode)))
+            )
         # Issue #1267: the row is emitted AFTER the write and states what the thermostat was sent (``outcome``, plus
         # ``held_reason`` when nothing was written: WHF session, blower hold, open window, no capable mode). The event
         # type stays ``occupancy_setback`` either way -- the occupant did leave (P7 away timeline, promise journal).
@@ -18072,7 +18077,9 @@ class AutomationEngine:
             _bank_write = await self._bank_takes_occupancy_write("home")
             if _bank_write is None:
                 with self._mode_change_context("restore"):
-                    await self._set_temperature_for_mode(c, reason=_R("reason_occupancy_home_restore", family=family))
+                    await self._set_temperature_for_mode(
+                        c, reason=_R("reason_occupancy_home_restore", family=family_w(family))
+                    )
             # The comfort-edge selector may have written the OTHER family than the band's active edge (a mild day
             # next to its floor arms heat); report the family it actually armed.
             # Issue #1245: report what ``_set_temperature_for_mode()`` actually did -- the resolved band edge for the
@@ -18673,11 +18680,13 @@ class AutomationEngine:
                 mode,
             )
             with self._mode_change_context("nat_vent"):
-                _off_result = await self._set_hvac_mode("off", reason=_R("reason_blower_window_open", mode=str(mode)))
+                _off_result = await self._set_hvac_mode(
+                    "off", reason=_R("reason_blower_window_open", mode=mode_w(str(mode)))
+                )
             # Issue #1307 (mirror of #1302): a FAILED / UNCONFIRMED Off is re-sent while this blower session is still
             # ventilating with a window open and the thermostat still reads an active mode.
             self._arm_open_window_off_retry(
-                _off_result, reason=_R("reason_blower_window_open", mode=str(mode)), session="blower"
+                _off_result, reason=_R("reason_blower_window_open", mode=mode_w(str(mode))), session="blower"
             )
             _hold = ComfortModeWrite(result=_off_result, family="off")
         await self._advise_close_windows_if_too_warm()
@@ -20616,7 +20625,7 @@ class AutomationEngine:
                     with self._mode_change_context("nat_vent"):
                         _stranded_restore_result = await self._set_hvac_mode(
                             _restore_mode,
-                            reason=_R("reason_whf_already_stopped_restoring", mode=str(_restore_mode)),
+                            reason=_R("reason_whf_already_stopped_restoring", mode=mode_w(str(_restore_mode))),
                         )
                     if _stranded_restore_result is HvacCommandResult.DRY_RUN:
                         # Issue #1305: observe-only records only what was sent. Nothing reached the thermostat
@@ -20651,7 +20660,7 @@ class AutomationEngine:
                     if _stranded_restore_result is not HvacCommandResult.DRY_RUN:
                         self._record_action(
                             _R("action_stranded_hvac_restored"),
-                            _R("reason_stranded_hvac_restored", reason=_nest(reason), mode=str(_restore_mode)),
+                            _R("reason_stranded_hvac_restored", reason=_nest(reason), mode=mode_w(str(_restore_mode))),
                         )
                         if self._emit_event_callback:
                             self._emit_event_callback(
@@ -20825,7 +20834,7 @@ class AutomationEngine:
                         with self._mode_change_context("nat_vent"):
                             _whf_restore_result = await self._set_hvac_mode(
                                 _restore_mode,
-                                reason=_R("reason_whf_stopped_restoring", mode=str(_restore_mode)),
+                                reason=_R("reason_whf_stopped_restoring", mode=mode_w(str(_restore_mode))),
                             )
                         # Issue #1308: a release restore that did not land stays pending and is re-sent once the fan
                         # session is over (a caller's follow-up comfort write that lands ends it).

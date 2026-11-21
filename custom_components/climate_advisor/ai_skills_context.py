@@ -32,6 +32,17 @@ if TYPE_CHECKING:
 
 from . import i18n, log_capture, zone_registry
 from .ai_settings_sync import provider_of
+from .code_words import (
+    action_w,
+    day_w,
+    family_w,
+    mode_w,
+    occupancy_w,
+    outcome_w,
+    requested_by_w,
+    source_w,
+    trend_w,
+)
 from .const import (
     AI_PROVIDER_BUILTIN_CLAUDE,
     AI_SETTINGS_BACKUP_KEY,
@@ -2015,7 +2026,11 @@ def _mode_write_fact(d: Any, before: Any = None) -> Cell:
     mode = d.get("mode")
     if not mode:
         return ""
-    fact = _m("fact_mode_change", old=str(before), new=str(mode)) if before else _m("fact_mode_off_to", mode=str(mode))
+    fact = (
+        _m("fact_mode_change", old=mode_w(str(before)), new=mode_w(str(mode)))
+        if before
+        else _m("fact_mode_off_to", mode=mode_w(str(mode)))
+    )
     not_sent = _write_not_sent_suffix(d)
     return _m("fact_mode_not_sent", fact=fact, why=not_sent) if not_sent else fact
 
@@ -2037,12 +2052,12 @@ def _render_comfort_band_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     not_sent = _write_not_sent_suffix(p)
     if not_sent:
         label = (
-            _m("comfort_band_not_applied_mode", mode=mode, why=not_sent)
+            _m("comfort_band_not_applied_mode", mode=mode_w(mode), why=not_sent)
             if mode
             else _m("comfort_band_not_applied", why=not_sent)
         )
     else:
-        label = _m("comfort_band_applied_mode", mode=mode) if mode else _m("comfort_band_applied")
+        label = _m("comfort_band_applied_mode", mode=mode_w(mode)) if mode else _m("comfort_band_applied")
     if reason:
         label = _m("label_reason", label=label, reason=reason)
     settings = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
@@ -2052,7 +2067,7 @@ def _render_comfort_band_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
 @_msg_renderer
 def _render_bedtime_setback(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
-    label = _m("bedtime_setback_mode", mode=mode) if mode else _m("bedtime_setback")
+    label = _m("bedtime_setback_mode", mode=mode_w(mode)) if mode else _m("bedtime_setback")
     settings = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
     return _band_write_not_sent(label, p), settings
 
@@ -2090,7 +2105,9 @@ def _render_tou_schedule_window_active(p: dict, unit: str) -> tuple[Cell, Cell]:
         pairs = [(str(i.get("reason")), i.get("entity")) for i in skipped if isinstance(i, dict)]
         return _m("tou_window_skipped"), _m("tou_window_skip_reasons", reasons=schedule_skip_list(pairs))
     label = _m("tou_window_active")
-    settings = _m("tou_window_coincided", mode=str(hvac_mode)) if preconditioned else _m("tou_window_none_needed")
+    settings = (
+        _m("tou_window_coincided", mode=mode_w(str(hvac_mode))) if preconditioned else _m("tou_window_none_needed")
+    )
     return label, settings
 
 
@@ -2103,7 +2120,7 @@ def _render_tou_av_precondition_applied(p: dict, unit: str) -> tuple[Cell, Cell]
     label = _m(
         "tou_av_precondition",
         action=_precondition_action(p),
-        occupancy=p.get("occupancy", ""),
+        occupancy=occupancy_w(p.get("occupancy", "")),
         has_schedule=_yn(schedule_id),
         schedule_id=schedule_id,
     )
@@ -2127,7 +2144,7 @@ def _render_tou_precondition_cycle_summary(p: dict, unit: str) -> tuple[Cell, Ce
 @_msg_renderer
 def _render_morning_wakeup(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
-    label = _m("morning_wakeup_mode", mode=mode) if mode else _m("morning_wakeup")
+    label = _m("morning_wakeup_mode", mode=mode_w(mode)) if mode else _m("morning_wakeup")
     settings = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
     return _band_write_not_sent(label, p), settings
 
@@ -2135,14 +2152,14 @@ def _render_morning_wakeup(p: dict, unit: str) -> tuple[Cell, Cell]:
 @_msg_renderer
 def _render_occupancy_setback(p: dict, unit: str) -> tuple[Cell, Cell]:
     occ = p.get("occupancy") or p.get("mode", "")
-    label = _m("occupancy_setback_occ", occupancy=occ) if occ else _m("occupancy_setback")
+    label = _m("occupancy_setback_occ", occupancy=occupancy_w(occ)) if occ else _m("occupancy_setback")
     settings: Cell = _band_setpoint_msg(p.get("floor"), p.get("ceiling"), None, unit)
     if p.get("tou_bank") and p.get("target_f") is not None:
         # Issue #1409: the change wrote the time-of-use bank, not the band: say what the thermostat was told.
         with contextlib.suppress(TypeError, ValueError):
             settings = _m(
                 "occupancy_setback_tou_bank",
-                hvac_mode=str(p.get("hvac_mode", "")),
+                hvac_mode=mode_w(str(p.get("hvac_mode", ""))),
                 target=_tp(float(p["target_f"]), unit),
                 band=settings,
             )
@@ -2153,10 +2170,10 @@ def _render_occupancy_setback(p: dict, unit: str) -> tuple[Cell, Cell]:
 def _render_occupancy_comfort_restored(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
     target = p.get("target_f")
-    label: Cell = _m("occupancy_restored_mode", mode=mode) if mode else _m("occupancy_restored")
+    label: Cell = _m("occupancy_restored_mode", mode=mode_w(mode)) if mode else _m("occupancy_restored")
     not_sent = _write_not_sent_suffix(p)  # Issue #1245: a failed / dry-run / superseded restore write
     if not_sent:
-        label = _m("occupancy_restore_not_sent", mode=mode, has_mode=_yn(mode), why=not_sent)
+        label = _m("occupancy_restore_not_sent", mode=mode_w(mode), has_mode=_yn(mode), why=not_sent)
     settings: Cell = ""
     if target is not None:
         with contextlib.suppress(TypeError, ValueError):
@@ -2186,7 +2203,7 @@ def _render_occupancy_comfort_restore_held(p: dict, unit: str) -> tuple[Cell, Ce
     # Issue #1245: arriving home, the restore wrote nothing because a ventilation session owns the thermostat.
     why = _held_why(p.get("reason"))
     mode = p.get("mode", "")
-    settings = _m("thermostat_unchanged_mode", mode=mode) if mode else _m("thermostat_unchanged")
+    settings = _m("thermostat_unchanged_mode", mode=mode_w(mode)) if mode else _m("thermostat_unchanged")
     return _m("occupancy_restore_held", why=why), settings
 
 
@@ -2209,7 +2226,7 @@ def _render_pre_cool_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
 
 
 def _mode_change_fact(old_m: Any, new_m: Any) -> i18n.Msg:
-    return _m("fact_mode_change", old=str(old_m), new=str(new_m))
+    return _m("fact_mode_change", old=mode_w(str(old_m)), new=mode_w(str(new_m)))
 
 
 def _setpoint_change_fact(old_t: Any, new_t: Any, unit: str) -> i18n.Msg:
@@ -2223,7 +2240,7 @@ def _render_override_detected(p: dict, unit: str) -> tuple[Cell, Cell]:
     old_m = p.get("old_mode") or p.get("old_hvac_mode")
     new_m = p.get("new_mode") or p.get("new_hvac_mode")
     source = p.get("source", "")
-    label = _m("override_detected_source", source=source) if source else _m("override_detected")
+    label = _m("override_detected_source", source=source_w(source)) if source else _m("override_detected")
     parts: list[Cell] = []
     if old_m and new_m and old_m != new_m:
         parts.append(_mode_change_fact(old_m, new_m))
@@ -2260,9 +2277,11 @@ def _render_classification_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     trend = p.get("trend", "")
     hvac = p.get("hvac_mode", "")
     old_m = p.get("old_hvac_mode")
-    label: Cell = _m("classification_applied_day", day_type=day_type) if day_type else _m("classification_applied")
+    label: Cell = (
+        _m("classification_applied_day", day_type=day_w(day_type)) if day_type else _m("classification_applied")
+    )
     if trend:
-        label = _m("label_trend", label=label, trend=trend)
+        label = _m("label_trend", label=label, trend=trend_w(trend))
     settings_parts: list[Cell] = []
     if old_m and hvac and old_m != hvac:
         settings_parts.append(_mode_change_fact(old_m, hvac))
@@ -2275,7 +2294,7 @@ def _render_classification_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
                 _m(
                     "classification_high_vs_threshold",
                     high=_tp(today_high, unit),
-                    day_type=day_type,
+                    day_type=day_w(day_type),
                     threshold=_tp(threshold, unit),
                     sign="+" if margin >= 0 else "-",
                     margin=_tdp(abs(margin), unit, 1),
@@ -2295,19 +2314,19 @@ def _render_hvac_mode_not_applied(p: dict, unit: str) -> tuple[Cell, Cell]:
     actual = p.get("actual_mode")
     kind = p.get("kind")
     if kind == "rejected":
-        label = _m("hvac_mode_rejected", requested=requested)
+        label = _m("hvac_mode_rejected", requested=mode_w(requested))
     elif kind == "open_window_retry":
         # Issue #1302: the Off for an open window failed or went unconfirmed; Climate Advisor is re-sending it.
-        label = _m("hvac_mode_open_window_retry", actual=actual or "?", requested=requested)
+        label = _m("hvac_mode_open_window_retry", actual=mode_w(actual or "?"), requested=mode_w(requested))
     elif kind == "restore_retry":
         # Issue #1308: the restore after the window closed (or a whole-house fan release) did not land; re-sending it.
-        label = _m("hvac_mode_restore_retry", actual=actual or "?", requested=requested)
+        label = _m("hvac_mode_restore_retry", actual=mode_w(actual or "?"), requested=mode_w(requested))
     else:
-        label = _m("hvac_mode_not_switched", requested=requested)
+        label = _m("hvac_mode_not_switched", requested=mode_w(requested))
     settings = (
-        _m("hvac_mode_requested_reports", requested=requested, actual=str(actual))
+        _m("hvac_mode_requested_reports", requested=mode_w(requested), actual=mode_w(str(actual)))
         if actual
-        else _m("hvac_mode_requested", requested=requested)
+        else _m("hvac_mode_requested", requested=mode_w(requested))
     )
     return label, settings
 
@@ -2318,7 +2337,7 @@ def _render_hvac_mode_applied_recovered(p: dict, unit: str) -> tuple[Cell, Cell]
     requested = p.get("requested_mode") or "?"
     minutes = p.get("minutes_down")
     return (
-        _m("hvac_mode_now", requested=requested),
+        _m("hvac_mode_now", requested=mode_w(requested)),
         (_m("fact_not_following_min", minutes=_num(minutes)) if minutes is not None else ""),
     )
 
@@ -2344,7 +2363,7 @@ def _render_occupancy_restore_deferred(p: dict, unit: str) -> tuple[Cell, Cell]:
     key = _RESTORE_DEFERRED_KEYS.get(p.get("reason", ""))
     why: Cell = _m(key) if key else (p.get("reason") or _m("held_default"))
     mode = p.get("mode", "")
-    settings = _m("resumes_once_clears_mode", mode=mode) if mode else _m("resumes_once_clears")
+    settings = _m("resumes_once_clears_mode", mode=mode_w(mode)) if mode else _m("resumes_once_clears")
     return _m("occupancy_restore_deferred", why=why), settings
 
 
@@ -2366,9 +2385,9 @@ def _render_hvac_output_stall(p: dict, unit: str) -> tuple[Cell, Cell]:
         if p.get("edge_f") is not None:
             parts.append(_m("fact_band_edge", edge=_tp(float(p["edge_f"]), unit)))
     if p.get("thermostat_mode"):
-        parts.append(_m("fact_thermostat_mode", mode=str(p["thermostat_mode"])))
+        parts.append(_m("fact_thermostat_mode", mode=mode_w(str(p["thermostat_mode"]))))
     if p.get("thermostat_action"):
-        parts.append(_m("fact_action", action=str(p["thermostat_action"])))
+        parts.append(_m("fact_action", action=action_w(str(p["thermostat_action"]))))
     return label, _join(parts)
 
 
@@ -2421,7 +2440,7 @@ def _render_setpoint_nudge(p: dict, unit: str) -> tuple[Cell, Cell]:
             settings = _m(
                 "setpoint_nudge_detail",
                 nudge=_tp(float(nudge_value), unit),
-                mode=mode,
+                mode=mode_w(mode),
                 target=_tp(float(real_target), unit),
             )
     if streak is not None:
@@ -2434,7 +2453,7 @@ def _render_override_cleared(p: dict, unit: str) -> tuple[Cell, Cell]:
     was_mode = p.get("was_mode", "")
     old_t = p.get("old_setpoint_f")
     reason = _field(p, "reason")
-    label = _m("override_cleared_was", mode=was_mode) if was_mode else _m("override_cleared")
+    label = _m("override_cleared_was", mode=mode_w(was_mode)) if was_mode else _m("override_cleared")
     settings: Cell = ""
     if old_t is not None:
         with contextlib.suppress(TypeError, ValueError):
@@ -2449,10 +2468,10 @@ def _render_override_confirmed(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
     cls_mode = p.get("cls_mode", "")
     source = p.get("source", "")
-    label: Cell = _m("override_confirmed_mode", mode=mode) if mode else _m("override_confirmed")
+    label: Cell = _m("override_confirmed_mode", mode=mode_w(mode)) if mode else _m("override_confirmed")
     if cls_mode and mode and cls_mode != mode:
-        label = _m("override_confirmed_cls", label=label, cls_mode=cls_mode)
-    return label, _m("fact_trigger", trigger=str(source)) if source else ""
+        label = _m("override_confirmed_cls", label=label, cls_mode=mode_w(cls_mode))
+    return label, _m("fact_trigger", trigger=source_w(str(source))) if source else ""
 
 
 @_msg_renderer
@@ -2460,7 +2479,7 @@ def _render_override_self_resolved(p: dict, unit: str) -> tuple[Cell, Cell]:
     detected = p.get("detected_mode", "")
     current = p.get("current_mode", "")
     if detected and current:
-        return _m("override_self_resolved_modes", detected=detected, current=current), ""
+        return _m("override_self_resolved_modes", detected=mode_w(detected), current=mode_w(current)), ""
     return _m("override_self_resolved"), ""
 
 
@@ -2469,9 +2488,9 @@ def _render_override_adopted(p: dict, unit: str) -> tuple[Cell, Cell]:
     mode = p.get("mode", "")
     src = p.get("source", "")
     pre_expiry = p.get("pre_expiry", False)
-    label: Cell = _m("override_adopted_mode", mode=mode) if mode else _m("override_adopted")
+    label: Cell = _m("override_adopted_mode", mode=mode_w(mode)) if mode else _m("override_adopted")
     label = _m("override_adopted_agrees", label=label, early=_yn(pre_expiry))
-    settings: Cell = _m("fact_trigger", trigger=str(src)) if src else ""
+    settings: Cell = _m("fact_trigger", trigger=source_w(str(src))) if src else ""
     return label, settings
 
 
@@ -2491,7 +2510,7 @@ def _render_grace_started(p: dict, unit: str) -> tuple[Cell, Cell]:
     duration = p.get("duration_seconds")
     label: Cell = _m("grace_started_min", minutes=duration // 60) if isinstance(duration, int) else _m("grace_started")
     if source:
-        label = _m("label_source", label=label, source=str(source))
+        label = _m("label_source", label=label, source=source_w(str(source)))
     # Settings cell: human-readable trigger label for known triggers; empty otherwise.
     key = _GRACE_TRIGGER_KEYS.get(trigger)
     return label, _m(key) if key else ""
@@ -2818,7 +2837,7 @@ def _render_fan_blind_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
 def _render_grace_expired(p: dict, unit: str) -> tuple[Cell, Cell]:
     source = p.get("source", "")
     re_paused = p.get("re_paused", False)
-    label: Cell = _m("grace_expired_source", source=str(source)) if source else _m("grace_expired")
+    label: Cell = _m("grace_expired_source", source=source_w(str(source))) if source else _m("grace_expired")
     if re_paused:
         label = _m("grace_expired_repaused", label=label)
     return label, ""
@@ -2923,7 +2942,7 @@ def _render_hvac_write_blocked_whf_active(p: dict, unit: str) -> tuple[Cell, Cel
     attempted_mode = str(p.get("attempted_mode", "")).strip()
     reason = _field(p, "reason", strip=True)
     label = _m("ac_heat_blocked_whf_reason", reason=reason) if reason else _m("ac_heat_blocked")
-    settings = _m("fact_hvac_blocked", mode=attempted_mode) if attempted_mode else ""
+    settings = _m("fact_hvac_blocked", mode=mode_w(attempted_mode)) if attempted_mode else ""
     return label, settings
 
 
@@ -2935,7 +2954,7 @@ def _render_whf_hvac_suppressed(p: dict, unit: str) -> tuple[Cell, Cell]:
     prior_mode = str(p.get("prior_mode", "")).strip()
     reason = _field(p, "reason", strip=True)
     label = _m("ac_heat_paused_whf_reason", reason=reason) if reason else _m("ac_heat_paused_whf")
-    settings = _m("fact_hvac_to_off", mode=prior_mode) if prior_mode else _m("fact_hvac_to_off_unknown")
+    settings = _m("fact_hvac_to_off", mode=mode_w(prior_mode)) if prior_mode else _m("fact_hvac_to_off_unknown")
     return label, settings
 
 
@@ -2957,7 +2976,7 @@ def _render_whf_rule2_backstop(p: dict, unit: str) -> tuple[Cell, Cell]:
         return _m("whf_rule2_fan_stopped"), ""
     return (
         _m("whf_rule2_hvac_off"),
-        _m("fact_hvac_to_off", mode=mode) if mode else _m("fact_hvac_to_off_unknown"),
+        _m("fact_hvac_to_off", mode=mode_w(mode)) if mode else _m("fact_hvac_to_off_unknown"),
     )
 
 
@@ -2989,7 +3008,7 @@ def _render_stranded_hvac_suppression_restored(p: dict, unit: str) -> tuple[Cell
     reason = _field(p, "reason", strip=True)
     restore_mode = str(p.get("restore_mode", "")).strip()
     label = _m("ac_heat_restored_reason", reason=reason) if reason else _m("ac_heat_restored")
-    settings = _m("fact_hvac_to_mode", mode=restore_mode) if restore_mode else _m("fact_hvac_restored")
+    settings = _m("fact_hvac_to_mode", mode=mode_w(restore_mode)) if restore_mode else _m("fact_hvac_restored")
     return label, settings
 
 
@@ -3033,7 +3052,7 @@ def _render_fan_running_untracked(p: dict, unit: str) -> tuple[Cell, Cell]:
     source = str(p.get("source", "")).strip() or _m("source_thermostat_initiated")
     action = str(p.get("hvac_action", "")).strip()
     label = _m("fan_running_external", source=source)
-    settings = _m("fact_fan_on_external_action", action=action) if action else _m("fact_fan_on_external")
+    settings = _m("fact_fan_on_external_action", action=action_w(action)) if action else _m("fact_fan_on_external")
     return label, settings
 
 
@@ -3054,7 +3073,7 @@ def _render_fan_observed_started(p: dict, unit: str) -> tuple[Cell, Cell]:
         "thermostat_blower_on_observed",
         origin=origin,
         mode=mode or "n/a",
-        action=action or "n/a",
+        action=action_w(action or "n/a"),
         cfg=cfg or "n/a",
     )
     return _m("thermostat_fan_running_observed"), settings
@@ -3187,7 +3206,7 @@ def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[Cell, Cell]
     # Rows from versions before #1268 carry the day label only (not necessarily what was written); kept as they were.
     hvac_restored = p.get("hvac_mode_restored", "")
     settings = (
-        _m("fact_mode_off_to", mode=str(hvac_restored))
+        _m("fact_mode_off_to", mode=mode_w(str(hvac_restored)))
         if hvac_restored and hvac_restored not in ("unknown", "")
         else ""
     )
@@ -3200,10 +3219,12 @@ def _render_nat_vent_manual_override_exit(p: dict, unit: str) -> tuple[Cell, Cel
     mode = p.get("override_mode", "")
     label = _m("nat_vent_exit_manual_conflict")
     if mode:
-        label = _m("nat_vent_exit_manual_override_mode", mode=mode)
+        label = _m("nat_vent_exit_manual_override_mode", mode=mode_w(mode))
         if indoor is not None:
             with contextlib.suppress(TypeError, ValueError):
-                label = _m("nat_vent_exit_manual_override_mode_indoor", mode=mode, indoor=_tp(float(indoor), unit))
+                label = _m(
+                    "nat_vent_exit_manual_override_mode_indoor", mode=mode_w(mode), indoor=_tp(float(indoor), unit)
+                )
     return _exit_label_with_fan(label, p), ""
 
 
@@ -3433,7 +3454,7 @@ def _render_bedtime_setback_skipped(p: dict, unit: str) -> tuple[Cell, Cell]:
     reason = _field(p, "reason")
     occ = p.get("occupancy", "")
     if reason == "occupancy" and occ:
-        return _m("bedtime_setback_skipped_occ", occupancy=str(occ)), ""
+        return _m("bedtime_setback_skipped_occ", occupancy=occupancy_w(str(occ))), ""
     if reason:
         return _m("bedtime_setback_skipped_reason", reason=reason), ""
     return _m("bedtime_setback_skipped"), ""
@@ -3444,7 +3465,7 @@ def _render_morning_wakeup_skipped(p: dict, unit: str) -> tuple[Cell, Cell]:
     reason = _field(p, "reason")
     occ = p.get("occupancy", "")
     if reason == "occupancy" and occ:
-        return _m("morning_wakeup_skipped_occ", occupancy=str(occ)), ""
+        return _m("morning_wakeup_skipped_occ", occupancy=occupancy_w(str(occ))), ""
     return (_m("morning_wakeup_skipped_reason", reason=reason) if reason else _m("morning_wakeup_skipped")), ""
 
 
@@ -3532,7 +3553,7 @@ def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
     grace_end = p.get("grace_end_time", "")
     stale_mode = p.get("stale_mode", "")
     stale_since = p.get("stale_since", "")
-    settings: Cell = _m("fact_was_since", mode=str(stale_mode), since=str(stale_since)) if stale_mode else ""
+    settings: Cell = _m("fact_was_since", mode=mode_w(str(stale_mode)), since=str(stale_since)) if stale_mode else ""
     if p.get("reason") == "grace_without_override":
         # Issue #508's watchdog mirror: grace_end_time is typically still in the future here
         # (the timer would have fired correctly on its own) — "expired" would be misleading.
@@ -3549,7 +3570,9 @@ def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
 
 @_msg_renderer
 def _render_state_contradiction_warning(p: dict, unit: str) -> tuple[Cell, Cell]:
-    return _m("mode_action_mismatch", mode=str(p.get("hvac_mode", "")), action=str(p.get("hvac_action", ""))), ""
+    return _m(
+        "mode_action_mismatch", mode=mode_w(str(p.get("hvac_mode", ""))), action=action_w(str(p.get("hvac_action", "")))
+    ), ""
 
 
 @_msg_renderer
@@ -3620,13 +3643,18 @@ def _render_incident_detected(p: dict, unit: str) -> tuple[Cell, Cell]:
             )
     occupancy = p.get("occupancy_mode")
     if occupancy:
-        settings_parts.append(_m("fact_occupancy", occupancy=str(occupancy)))
+        settings_parts.append(_m("fact_occupancy", occupancy=occupancy_w(str(occupancy))))
     # Issue #1049 (change 8): what the thermostat was doing and what CA last tried.
     t_mode = p.get("thermostat_mode")
     if t_mode:
         t_action = p.get("thermostat_action")
         settings_parts.append(
-            _m("fact_thermostat", mode=str(t_mode), has_action=_yn(t_action), action=str(t_action or ""))
+            _m(
+                "fact_thermostat",
+                mode=mode_w(str(t_mode)),
+                has_action=_yn(t_action),
+                action=action_w(str(t_action or "")),
+            )
         )
     last_mode = p.get("last_commanded_mode")
     if last_mode:
@@ -3639,7 +3667,7 @@ def _render_incident_detected(p: dict, unit: str) -> tuple[Cell, Cell]:
         settings_parts.append(
             _m(
                 "fact_ca_last_tried",
-                mode=str(last_mode),
+                mode=mode_w(str(last_mode)),
                 has_setpoint=_yn(sp_temp != ""),
                 setpoint=sp_temp,
                 has_result=_yn(result),
@@ -3711,8 +3739,8 @@ def _render_classification_suppressed_paused(p: dict, unit: str) -> tuple[Cell, 
     label = _m(
         "classification_suppressed_paused",
         has_detail=_yn(day_type or hvac_mode),
-        day_type=str(day_type),
-        mode=str(hvac_mode),
+        day_type=day_w(str(day_type)),
+        mode=mode_w(str(hvac_mode)),
     )
     return label, _render_paused_entity_settings(p)
 
@@ -3720,7 +3748,9 @@ def _render_classification_suppressed_paused(p: dict, unit: str) -> tuple[Cell, 
 @_msg_renderer
 def _render_occupancy_setback_suppressed_paused(p: dict, unit: str) -> tuple[Cell, Cell]:
     occupancy = p.get("occupancy", "away")
-    return _m("occupancy_setback_suppressed_paused", occupancy=str(occupancy)), _render_paused_entity_settings(p)
+    return _m(
+        "occupancy_setback_suppressed_paused", occupancy=occupancy_w(str(occupancy))
+    ), _render_paused_entity_settings(p)
 
 
 @_msg_renderer
@@ -3729,7 +3759,7 @@ def _render_comfort_family_switch_locked_out(p: dict, unit: str) -> tuple[Cell, 
     # blocked a candidate heating/cooling family switch — surfaced so a persistently
     # blocked breach is observable, not silent (per that issue's own design note).
     candidate = p.get("candidate_family", "")
-    label = _m("switch_delayed_candidate", candidate=str(candidate)) if candidate else _m("switch_delayed")
+    label = _m("switch_delayed_candidate", candidate=family_w(str(candidate))) if candidate else _m("switch_delayed")
     return label, _field(p, "reason")
 
 
@@ -3740,7 +3770,9 @@ def _render_comfort_family_switch(p: dict, unit: str) -> tuple[Cell, Cell]:
     # without raw logs. "breach" means indoor was already outside the range (switched immediately).
     # Events persisted by v0.7.96 and earlier carry the retired deadband/recency keys; they still render.
     resolved_family = p.get("resolved_family", "")
-    label: Cell = _m("switched_to_family", family=str(resolved_family)) if resolved_family else _m("family_switched")
+    label: Cell = (
+        _m("switched_to_family", family=family_w(str(resolved_family))) if resolved_family else _m("family_switched")
+    )
     # Issue #1073: also emitted when the thermostat's previous mode could not be read ("unknown").
     if p.get("from_family") == "unknown":
         label = _m("label_previous_unknown", label=label)
@@ -3772,13 +3804,13 @@ def _render_thermostat_mode_set(p: dict, unit: str) -> tuple[Cell, Cell]:
     # answers "who asked and why" so a heat/cool flip can be traced without raw logs.
     to_mode = p.get("to_mode") or ""
     from_mode = p.get("from_mode")
-    label: Cell = _m("thermostat_set_to", mode=str(to_mode)) if to_mode else _m("thermostat_mode_set")
+    label: Cell = _m("thermostat_set_to", mode=mode_w(str(to_mode))) if to_mode else _m("thermostat_mode_set")
     if from_mode and from_mode != to_mode:
-        label = _m("label_was", label=label, was=str(from_mode))
+        label = _m("label_was", label=label, was=mode_w(str(from_mode)))
     detail_parts: list[Cell] = [_field(p, "reason")]
     source = p.get("source")
     # The row is written when the change is REQUESTED; confirmation/failure are separate rows (#1049).
-    detail_parts.append(_m("fact_requested_by", source=str(source)) if source else _m("fact_requested"))
+    detail_parts.append(_m("fact_requested_by", source=requested_by_w(str(source))) if source else _m("fact_requested"))
     indoor, floor, ceiling = p.get("indoor_f"), p.get("floor_f"), p.get("ceiling_f")
     if isinstance(indoor, (int, float)):
         if isinstance(floor, (int, float)) and isinstance(ceiling, (int, float)):
@@ -3794,7 +3826,7 @@ def _render_thermostat_mode_set(p: dict, unit: str) -> tuple[Cell, Cell]:
             detail_parts.append(_m("fact_indoor", indoor=_tp(indoor, unit)))
     outcome = p.get("outcome")
     if outcome and outcome not in ("sent", "requested"):
-        detail_parts.append(_m("fact_not_applied_outcome", outcome=str(outcome)))
+        detail_parts.append(_m("fact_not_applied_outcome", outcome=outcome_w(str(outcome))))
     return label, _join([part for part in detail_parts if part], sep="dash")
 
 
@@ -3806,7 +3838,7 @@ def _render_comfort_switch_held(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #1073: the settling guard deliberately did not flip the mode (shallow breach shortly after the
     # opposite side ran or the user acted). Surfaced so a "why isn't it heating yet?" question is answerable.
     candidate = p.get("candidate_family") or ""
-    label = _m("switch_held_candidate", candidate=str(candidate)) if candidate else _m("switch_held")
+    label = _m("switch_held_candidate", candidate=family_w(str(candidate))) if candidate else _m("switch_held")
     detail_parts: list[Cell] = []
     indoor = p.get("indoor_f")
     if isinstance(indoor, (int, float)):

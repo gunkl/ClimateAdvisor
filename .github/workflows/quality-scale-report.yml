@@ -68,6 +68,9 @@ jobs:
                - rules that moved this month, each with the PR that moved it;
                - checklist items that look done but are not ticked (so the owner can tick them), and any regression
                  (a done rule that is no longer met), with evidence;
+               - any rule whose status in custom_components/climate_advisor/quality_scale.yaml (the file behind the
+                 README's quality badge, #1668) differs from the checklist or from your re-check, so the owner can
+                 fix whichever is wrong;
                - the next three to five suggested items, smallest first, linking their issues;
                - what the person at home would notice from this month's changes, if anything.
                Keep it under about 60 lines. If nothing changed, say so in a short comment instead.

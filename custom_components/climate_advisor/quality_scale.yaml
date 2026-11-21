@@ -1,0 +1,142 @@
+# Home Assistant integration quality scale: Climate Advisor's self-assessment (#1637, #1668).
+# Home Assistant does not grade custom integrations; this file is our own reading of the 54 rules at
+# https://contributors.home-assistant.io/core/quality-scale/rules/ in Home Assistant's own format.
+# Status: done, exempt (comment says why) or todo (a partial rule is todo, comment says what is left).
+# A PR that completes a rule changes it here and ticks it on #1637. tools/badges.py reads this file for the
+# README's nightly quality-scale badge; tests/test_quality_scale_1668.py checks it covers every rule.
+rules:
+  # Bronze
+  action-setup:
+    status: done
+    comment: Services registered once in async_setup (services.py, #1655).
+  appropriate-polling:
+    status: done
+    comment: 30-minute cycle; everything else is event-driven.
+  brands:
+    status: done
+    comment: >-
+      Local brand/ folder with all eight images (Home Assistant 2026.3+ reads custom integrations' own brand
+      images; HACS requires 2026.3.0), #1668.
+  common-modules:
+    status: done
+    comment: Shared base entity in entity.py (#1651).
+  config-flow: done
+  config-flow-test-coverage:
+    status: done
+    comment: Real-HA tests of every step and options section, with error-then-fix paths (#1641).
+  dependency-transparency: done
+  docs-actions: done
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions:
+    status: done
+    comment: README "Removing Climate Advisor" (#1651).
+  entity-event-setup:
+    status: exempt
+    comment: Entities subscribe to nothing themselves; the coordinator owns the listeners.
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data:
+    status: done
+    comment: Each zone's coordinator on entry.runtime_data with a typed alias (#1639).
+  test-before-configure:
+    status: exempt
+    comment: Setup picks local entities only; the Claude key is tested live where it is entered.
+  test-before-setup:
+    status: done
+    comment: The first refresh raises not-ready if the update fails; a zone does not wait for its thermostat (#1640).
+  unique-config-entry: done
+  docs-conditions:
+    status: exempt
+    comment: No conditions provided.
+  docs-triggers:
+    status: exempt
+    comment: No triggers provided.
+
+  # Silver
+  action-exceptions:
+    status: done
+    comment: Translated ServiceValidationError for bad input, HomeAssistantError for failures (#1655).
+  config-entry-unloading: done
+  docs-configuration-parameters:
+    status: todo
+    comment: Partial. About 20 options are documented only in the UI (incremental).
+  docs-installation-parameters: done
+  entity-unavailable:
+    status: done
+    comment: Reading sensors go unavailable while their source is lost, and recover (#1642).
+  integration-owner: done
+  log-when-unavailable:
+    status: done
+    comment: UpdateFailed; traceback once per outage, recovery once (#1651).
+  parallel-updates:
+    status: done
+    comment: PARALLEL_UPDATES = 0 on both platforms (#1651).
+  reauthentication-flow:
+    status: done
+    comment: Claude key and GitHub token (#1643).
+  test-coverage:
+    status: todo
+    comment: Partial. Per-module ratchet in CI (#1644); 31 modules still under 95 % (incremental).
+
+  # Gold
+  devices:
+    status: done
+    comment: One service device per zone, entry_type=SERVICE (#1651).
+  diagnostics: done
+  discovery:
+    status: exempt
+    comment: Nothing on the network to discover.
+  discovery-update-info:
+    status: exempt
+    comment: No discovery.
+  docs-data-update:
+    status: done
+    comment: README "How data updates" (#1651).
+  docs-examples: done
+  docs-known-limitations:
+    status: done
+    comment: README "Known limitations" (#1651).
+  docs-supported-devices:
+    status: done
+    comment: README "Supported devices" (#1655).
+  docs-supported-functions: done
+  docs-troubleshooting:
+    status: done
+    comment: README Troubleshooting (#1649).
+  docs-use-cases: done
+  dynamic-devices:
+    status: exempt
+    comment: One device per zone, created at setup.
+  entity-category:
+    status: done
+    comment: Diagnostic sensors categorized; the rest are primary (#1651).
+  entity-device-class:
+    status: done
+    comment: ENUM for fixed value sets, TIMESTAMP for times (#1648).
+  entity-disabled-by-default:
+    status: done
+    comment: Trend disabled on new installs (#1651).
+  entity-translations: done
+  exception-translations: done
+  icon-translations:
+    status: done
+    comment: icons.json for every entity, state and service (#1655).
+  reconfiguration-flow:
+    status: done
+    comment: Thermostat, weather and notify service, data kept (#1646).
+  repair-issues: done
+  stale-devices:
+    status: exempt
+    comment: One device per entry, removed with it.
+
+  # Platinum
+  async-dependency:
+    status: done
+    comment: Becomes exempt when built-in Claude is removed (#1650).
+  inject-websession:
+    status: todo
+    comment: The Claude client does not use Home Assistant's shared web session (#1650).
+  strict-typing:
+    status: todo
+    comment: Partial. mypy ratchet in CI, .strict-typing lists the strict modules (#1645, incremental).

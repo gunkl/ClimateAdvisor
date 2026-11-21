@@ -108,6 +108,6 @@ def test_main_writes_one_endpoint_file_per_badge(tmp_path):
     out = tmp_path / "badges"
     badges.main(["--out", str(out), "--coverage", str(cov), "--unit-junit", str(tmp_path / "none.xml")])
     names = sorted(p.stem for p in out.glob("*.json"))
-    assert names == ["coverage", "goldens", "real-ha", "real-ha-goldens", "unit"]
+    assert names == ["coverage", "goldens", "quality-scale", "real-ha", "real-ha-goldens", "strict-typing", "unit"]
     assert json.loads((out / "coverage.json").read_text(encoding="utf-8"))["message"] == "83%"
     assert json.loads((out / "unit.json").read_text(encoding="utf-8"))["message"] == "unknown"

@@ -579,7 +579,7 @@ Climate Advisor self-assesses against Home Assistant's [integration quality scal
 - **New options-flow fields** are documented for users (README or a user doc), not only in the UI's `data_description`.
 - **Modules you touch** keep or raise their test coverage (target over 95% per module; #1644 adds the ratchet) and get type hints (new code fully typed; strict mypy per module once #1645 lands).
 - **Availability and logging:** a failed update raises `UpdateFailed`; an outage is logged once and its recovery once, never every cycle.
-- **Reporting:** a PR that completes a rule ticks it on #1637 and says so in its description. A monthly re-assessment posts a status comment there.
+- **Reporting:** a PR that completes a rule ticks it on #1637, sets it `done` (or `exempt` with a reason) in `custom_components/climate_advisor/quality_scale.yaml`, and says so in its description. That file drives the README's nightly quality-scale badge (#1668); `tests/test_quality_scale_1668.py` checks it lists all 54 rules. A monthly re-assessment posts a status comment on #1637 and flags any rule where the file and the checklist disagree.
 
 ---
 

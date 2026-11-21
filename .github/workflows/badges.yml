@@ -4,6 +4,8 @@ name: Test badges
 # required PR jobs in validate.yml (their time budgets are untouched: coverage slows a run down). tools/badges.py
 # turns the reports and the real-HA ledger into shields.io endpoint JSON, pushed to the `badges` branch (one
 # commit, force-pushed each time). The nightly badge is GitHub's own workflow status, so it is not built here.
+# Issue #1668: the quality-scale (quality_scale.yaml) and strict-typing (.strict-typing) badges are read from the
+# checkout, with no test run.
 # A failing test still publishes: the badge turns red instead of keeping yesterday's green.
 # Once a day, not on every push to main (owner decision 2026-11-20): this run repeats both tiers with coverage
 # (about 13 min), and the badges are a README summary that changes little between merges. The required PR checks

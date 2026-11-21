@@ -11,6 +11,8 @@ A Home Assistant integration that runs your thermostat from the weather forecast
 [![Real Home Assistant tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Freal-ha.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)
 [![Golden scenarios](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Fgoldens.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)
 [![Golden scenarios on real Home Assistant](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Freal-ha-goldens.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/badges.yml)
+[![Quality scale (self-assessed)](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Fquality-scale.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/issues/1637)
+[![Strict typing](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fgunkl%2FClimateAdvisor%2Fbadges%2Fstrict-typing.json&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/main/.strict-typing)
 [![Nightly generated days](https://img.shields.io/github/actions/workflow/status/gunkl/ClimateAdvisor/nightly.yml?branch=main&label=nightly&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/actions/workflows/nightly.yml)
 
 **Requires Home Assistant 2026.3 or newer.** Available in the [HACS](https://hacs.xyz) default store.

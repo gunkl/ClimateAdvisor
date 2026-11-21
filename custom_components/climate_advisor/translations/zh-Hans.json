@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "Climate Advisor 无法更新此区域：{error}"
+    },
+    "unknown_suggestion": {
+      "message": "未知的建议键 {suggestion_key}。有效的键：{valid}。"
+    },
+    "service_failed": {
+      "message": "Climate Advisor 无法完成 {service}：{error}"
     }
   }
 }

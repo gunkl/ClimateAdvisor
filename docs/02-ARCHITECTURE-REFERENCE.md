@@ -59,6 +59,8 @@ custom_components/climate_advisor/
 ├── automation.py        # HVAC service calls, door/window pause, occupancy
 ├── learning.py          # Pattern tracking, suggestion generation, persistence
 ├── entity.py            # Shared base entity and zone device (service device) for sensor.py and switch.py (#1637)
+├── services.py          # The five zone-scoped services, registered once from async_setup; translated errors (#1637)
+├── icons.json           # Entity, state and service icons (HA icon translations, #1647)
 ├── sensor.py            # HA sensor entities for dashboards
 ├── switch.py            # Automation enable/disable switch (observe-only mode)
 ├── claude_api.py        # Centralized AI client (one per install, Issue #1336): AI Task transport (ai_task.async_generate_data) or the deprecated built-in Claude transport (Anthropic API, auth, retry, budget); circuit breaker and rate limiting for both. Provides async_request() for all AI features.

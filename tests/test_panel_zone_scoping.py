@@ -198,7 +198,8 @@ class TestPanelTeardownScoping:
         )
         assert ok, reason
 
-        # Unload the last remaining zone — panel/services must now be gone.
+        # Unload the last remaining zone: the panel must now be gone. The services stay (Issue #1637: registered
+        # once in async_setup for the life of HA; a call for an unloaded zone fails with a clear error).
         ok, reason = run_coro(
             check_multi_zone_assertion(
                 zones,
@@ -206,7 +207,7 @@ class TestPanelTeardownScoping:
                 {
                     "type": "teardown_cleanup",
                     "unload_entry": "zone_1",
-                    "expect_services_present": False,
+                    "expect_services_present": True,
                     "expect_panel_present": False,
                 },
             )

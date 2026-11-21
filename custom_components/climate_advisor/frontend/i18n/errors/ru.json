@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "Пауза сброшена. Автоматизация отключена (только наблюдение): команда термостату не отправлялась.",
   "errors.resume_pending": "Пауза сброшена. Термостат ещё не принял {mode, select, none {восстановление} heat {режим обогрева} cool {режим охлаждения} off {режим выключения} auto {режим авто} heat_cool {режим обогрева/охлаждения} fan_only {режим «только вентилятор»} other {режим {mode}}}; Climate Advisor отправляет команду повторно. Период паузы начнётся, когда команда будет принята.",
   "errors.suggestion_key_required": "Требуется: suggestion_key",
+  "errors.suggestion_key_unknown": "Неизвестный suggestion_key: {suggestion_key}",
   "errors.timeline_not_ready": "Временная шкала операций ещё не готова.",
   "errors.zone_selection_required": "Настроено несколько зон Climate Advisor — добавьте {hint} (одно из значений entry_id в 'zones'), чтобы запрос указывал ровно одну зону."
 }

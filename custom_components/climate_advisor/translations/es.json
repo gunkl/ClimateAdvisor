@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "Climate Advisor no pudo actualizar esta zona: {error}"
+    },
+    "unknown_suggestion": {
+      "message": "Clave de sugerencia desconocida {suggestion_key}. Claves válidas: {valid}."
+    },
+    "service_failed": {
+      "message": "Climate Advisor no pudo completar {service}: {error}"
     }
   }
 }

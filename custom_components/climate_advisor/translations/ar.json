@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "تعذّر على Climate Advisor تحديث هذه المنطقة: {error}"
+    },
+    "unknown_suggestion": {
+      "message": "مفتاح اقتراح غير معروف {suggestion_key}. المفاتيح الصالحة: {valid}."
+    },
+    "service_failed": {
+      "message": "تعذّر على Climate Advisor إكمال {service}: {error}"
     }
   }
 }

@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "已清除暂停。自动控制已关闭（仅观察）：未向恒温器发送任何指令。",
   "errors.resume_pending": "已清除暂停。恒温器尚未切换到{mode, select, none {恢复状态} heat {制热} cool {制冷} off {关闭} auto {自动} heat_cool {制热/制冷} fan_only {仅送风} other {{mode}}}；Climate Advisor 正在重新发送指令。生效后暂停期才会开始。",
   "errors.suggestion_key_required": "必填：suggestion_key",
+  "errors.suggestion_key_unknown": "未知的 suggestion_key：{suggestion_key}",
   "errors.timeline_not_ready": "操作时间线尚未准备好。",
   "errors.zone_selection_required": "已配置多个 Climate Advisor 区域 — 请添加 {hint}（'zones' 中的某个 entry_id 值），让请求只指定一个区域。"
 }

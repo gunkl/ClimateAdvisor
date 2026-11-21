@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "Pauza wyczyszczona. Automatyzacja jest wyłączona (tylko obserwacja): nie wysłano polecenia do termostatu.",
   "errors.resume_pending": "Pauza wyczyszczona. Termostat nie przyjął jeszcze {mode, select, none {przywrócenia} heat {trybu grzania} cool {trybu chłodzenia} off {trybu wyłączenia} auto {trybu auto} heat_cool {trybu grzanie/chłodzenie} fan_only {trybu tylko wentylator} other {trybu {mode}}}; Climate Advisor wysyła polecenie ponownie. Okres wstrzymania rozpocznie się po przyjęciu polecenia.",
   "errors.suggestion_key_required": "Wymagane: suggestion_key",
+  "errors.suggestion_key_unknown": "Nieznany suggestion_key: {suggestion_key}",
   "errors.timeline_not_ready": "Oś czasu operacji nie jest jeszcze gotowa.",
   "errors.zone_selection_required": "Skonfigurowano wiele stref Climate Advisor — dodaj {hint} (jedną z wartości entry_id w 'zones'), aby żądanie wskazywało dokładnie jedną strefę."
 }

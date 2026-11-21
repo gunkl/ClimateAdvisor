@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "Pausa removida. A automatização está desativada (só observação): nenhum comando foi enviado ao termóstato.",
   "errors.resume_pending": "Pausa removida. O termóstato ainda não aceitou {mode, select, none {a reposição} heat {o modo aquecer} cool {o modo arrefecer} off {o modo desligado} auto {o modo auto} heat_cool {o modo aquecer/arrefecer} fan_only {o modo ventilação} other {{mode}}}; o Climate Advisor está a reenviar o comando. O período de pausa começa quando o comando for aceite.",
   "errors.suggestion_key_required": "Obrigatório: suggestion_key",
+  "errors.suggestion_key_unknown": "suggestion_key desconhecida: {suggestion_key}",
   "errors.timeline_not_ready": "A cronologia de operações ainda não está pronta.",
   "errors.zone_selection_required": "Estão configuradas várias zonas do Climate Advisor — adicione {hint} (um dos valores entry_id em «zones») para que o pedido indique exatamente uma zona."
 }

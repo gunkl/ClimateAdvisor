@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "일시 정지를 해제했습니다. 자동 제어가 꺼져 있어(관찰 전용) 온도 조절기에 명령을 보내지 않았습니다.",
   "errors.resume_pending": "일시 정지를 해제했습니다. 온도 조절기가 아직 {mode, select, none {복원} heat {난방} cool {냉방} off {꺼짐} auto {자동} heat_cool {냉난방} fan_only {송풍} other {{mode}}}(으)로 바뀌지 않아 Climate Advisor가 다시 보내고 있습니다. 적용되면 일시 정지 시간이 시작됩니다.",
   "errors.suggestion_key_required": "필수: suggestion_key",
+  "errors.suggestion_key_unknown": "알 수 없는 suggestion_key: {suggestion_key}",
   "errors.timeline_not_ready": "동작 타임라인이 아직 준비되지 않았습니다.",
   "errors.zone_selection_required": "Climate Advisor 구역이 여러 개 설정되어 있습니다 — 요청이 구역 하나만 가리키도록 {hint}('zones'에 있는 entry_id 값 중 하나)를 추가하세요."
 }

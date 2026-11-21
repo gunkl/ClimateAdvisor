@@ -86,6 +86,21 @@ from .thermal_confidence import fit_agrees_with_prior as _fit_agrees_with_prior
 
 _LOGGER = logging.getLogger(__name__)
 
+# Every suggestion key generate_suggestions() can produce and accept_suggestion() recognizes. The
+# respond_to_suggestion service rejects any other key (quality scale action-exceptions, #1637).
+SUGGESTION_KEYS = frozenset(
+    {
+        "low_window_compliance",
+        "frequent_overrides",
+        "short_departures",
+        "comfort_violations",
+        "frequent_door_pauses",
+        "thermal_model_ready",
+        "forecast_bias_significant",
+        "high_runtime_mild_days",
+    }
+)
+
 # Issue #1110: which shutdown path persisted the restart-cause diagnostics.
 SHUTDOWN_KIND_UNLOAD = "unload"  # config-entry unload (zone reload / repair / removal)
 SHUTDOWN_KIND_HA_STOP = "ha_stop"  # EVENT_HOMEASSISTANT_STOP (real HA restart/stop)

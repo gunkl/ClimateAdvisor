@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "Pausa rimossa. L’automazione è disattivata (solo osservazione): nessun comando inviato al termostato.",
   "errors.resume_pending": "Pausa rimossa. Il termostato non ha ancora accettato {mode, select, none {il ripristino} heat {la modalità riscaldamento} cool {la modalità freddo} off {la modalità spento} auto {la modalità auto} heat_cool {la modalità caldo/freddo} fan_only {la modalità solo ventilazione} other {{mode}}}; Climate Advisor sta inviando di nuovo il comando. Il periodo di pausa inizia quando il comando viene accettato.",
   "errors.suggestion_key_required": "Obbligatorio: suggestion_key",
+  "errors.suggestion_key_unknown": "suggestion_key sconosciuta: {suggestion_key}",
   "errors.timeline_not_ready": "La cronologia delle operazioni non è ancora pronta.",
   "errors.zone_selection_required": "Sono configurate più zone di Climate Advisor — aggiungere {hint} (uno dei valori entry_id in «zones») in modo che la richiesta indichi esattamente una zona."
 }

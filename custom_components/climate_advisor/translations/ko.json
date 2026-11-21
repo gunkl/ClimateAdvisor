@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "Climate Advisor가 이 구역을 업데이트하지 못했습니다: {error}"
+    },
+    "unknown_suggestion": {
+      "message": "알 수 없는 제안 키 {suggestion_key}입니다. 유효한 키: {valid}."
+    },
+    "service_failed": {
+      "message": "Climate Advisor가 {service}을(를) 완료하지 못했습니다: {error}"
     }
   }
 }

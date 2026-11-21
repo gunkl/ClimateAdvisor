@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "Climate Advisor kon deze zone niet bijwerken: {error}"
+    },
+    "unknown_suggestion": {
+      "message": "Onbekende suggestiesleutel {suggestion_key}. Geldige sleutels: {valid}."
+    },
+    "service_failed": {
+      "message": "Climate Advisor kon {service} niet voltooien: {error}"
     }
   }
 }

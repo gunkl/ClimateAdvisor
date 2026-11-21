@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "विराम हटाया गया। ऑटोमेशन बंद है (केवल निगरानी): थर्मोस्टैट को कोई कमांड नहीं भेजा गया।",
   "errors.resume_pending": "विराम हटाया गया। थर्मोस्टैट ने अभी {mode, select, none {पिछली स्थिति बहाल} heat {हीट} cool {कूल} off {बंद} auto {ऑटो} heat_cool {हीट/कूल} fan_only {केवल पंखा} other {{mode}}} स्वीकार नहीं किया; Climate Advisor इसे फिर भेज रहा है। यह लागू होते ही विराम अवधि शुरू होगी।",
   "errors.suggestion_key_required": "आवश्यक: suggestion_key",
+  "errors.suggestion_key_unknown": "अज्ञात suggestion_key: {suggestion_key}",
   "errors.timeline_not_ready": "कार्रवाई की टाइमलाइन अभी तैयार नहीं है।",
   "errors.zone_selection_required": "कई Climate Advisor ज़ोन कॉन्फ़िगर हैं — {hint} जोड़ें ('zones' में दिए गए entry_id मानों में से एक), ताकि अनुरोध में ठीक एक ज़ोन का नाम हो।"
 }

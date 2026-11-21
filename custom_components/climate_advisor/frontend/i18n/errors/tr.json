@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "Duraklatma temizlendi. Otomasyon kapalı (yalnızca gözlem): termostata komut gönderilmedi.",
   "errors.resume_pending": "Duraklatma temizlendi. Termostat {mode, select, none {geri yüklemeyi} heat {ısıtma modunu} cool {soğutma modunu} off {kapalı modunu} auto {otomatik modu} heat_cool {ısıtma/soğutma modunu} fan_only {sadece fan modunu} other {{mode} modunu}} henüz kabul etmedi; Climate Advisor komutu yeniden gönderiyor. Duraklatma süresi komut kabul edilince başlayacak.",
   "errors.suggestion_key_required": "Gerekli: suggestion_key",
+  "errors.suggestion_key_unknown": "Bilinmeyen suggestion_key: {suggestion_key}",
   "errors.timeline_not_ready": "İşlem zaman çizelgesi henüz hazır değil.",
   "errors.zone_selection_required": "Birden fazla Climate Advisor bölgesi yapılandırılmış — isteğin tam olarak tek bir bölgeyi belirtmesi için {hint} ekleyin ('zones' içindeki entry_id değerlerinden biri)."
 }

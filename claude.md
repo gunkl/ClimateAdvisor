@@ -572,9 +572,9 @@ Climate Advisor self-assesses against Home Assistant's [integration quality scal
   - a fitting `device_class`, with `ENUM` plus `options` for fixed value sets and `TIMESTAMP` with a `datetime` for times;
   - an `entity_category` (`DIAGNOSTIC` when it describes Climate Advisor itself rather than the house);
   - `entity_registry_enabled_default = False` when few users need it;
-  - its icon in `icons.json` once #1647 lands.
+  - its icon in `icons.json` (default, plus `state` icons for fixed value sets), never `_attr_icon`. A code `icon` property only when the icon depends on something other than the state (Contact Sensors).
 - **Never change an existing entity's unique id** (it orphans the user's history, names and automations).
-- **Service handlers you touch** raise `ServiceValidationError` for bad input and `HomeAssistantError` for failures, both translated (`translation_domain` / `translation_key` in `strings.json` `exceptions`, all 16 languages). They never log-and-succeed on bad input.
+- **Services** live in `services.py`, registered once in `async_setup` (never per entry), each with a service icon in `icons.json`. Handlers raise `ServiceValidationError` for bad input and `HomeAssistantError` for failures, both translated (`translation_domain` / `translation_key` in `strings.json` `exceptions`, all 16 languages). They never log-and-succeed on bad input.
 - **Every user-facing exception is translated** (`exception-translations` is done; keep it done).
 - **New options-flow fields** are documented for users (README or a user doc), not only in the UI's `data_description`.
 - **Modules you touch** keep or raise their test coverage (target over 95% per module; #1644 adds the ratchet) and get type hints (new code fully typed; strict mypy per module once #1645 lands).

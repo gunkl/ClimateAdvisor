@@ -71,7 +71,6 @@ from .const import (
     CONFIG_METADATA,
     DEFAULT_AI_ENABLED,
     DEFAULT_AI_INVESTIGATOR_ENABLED,
-    DOMAIN,
     EVENT_LOG_CAP,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
@@ -81,6 +80,7 @@ from .const import (
     VERSION,
 )
 from .engine_inputs import decide, decide_sync
+from .learning import SUGGESTION_KEYS
 from .remote_offset import remote_offset_view_for
 from .status_text import code_of
 from .temperature import FAHRENHEIT, UNIT_SYMBOL, display_delta, display_temp
@@ -239,6 +239,7 @@ _ERROR_KEYS: dict[str, str] = {
     "invalid_json_body": "errors.invalid_json_body",
     "feedback_value": "errors.feedback_value",
     "suggestion_key_required": "errors.suggestion_key_required",
+    "suggestion_key_unknown": "errors.suggestion_key_unknown",
     "action_or_feedback_required": "errors.action_or_feedback_required",
     "action_value": "errors.action_value",
     "engine_status_unavailable": "errors.engine_status_unavailable",
@@ -901,6 +902,12 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
                     _error_body(hass, "action_value"),
                     status_code=400,
                 )
+            # Issue #1652: a key that doesn't exist used to come back "ok" and change nothing.
+            if suggestion_key not in SUGGESTION_KEYS:
+                return self.json(
+                    _error_body(hass, "suggestion_key_unknown", suggestion_key=str(suggestion_key)),
+                    status_code=400,
+                )
 
             # Handle feedback recording (independent of action)
             if feedback is not None:
@@ -912,19 +919,11 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
                 changes = coordinator.learning.accept_suggestion(suggestion_key)
                 await hass.async_add_executor_job(coordinator.learning.save_state)
                 coordinator.config.update(changes)
-                # Persist valid config keys to the config entry so changes survive reload
-                valid_keys = set(CONFIG_METADATA.keys())
-                entry_changes = {k: v for k, v in changes.items() if k in valid_keys}
-                if entry_changes:
-                    entries = hass.data.get(DOMAIN, {})
-                    entry_id = next((eid for eid, c in entries.items() if c is coordinator), None)
-                    if entry_id:
-                        config_entry = hass.config_entries.async_get_entry(entry_id)
-                        if config_entry:
-                            hass.config_entries.async_update_entry(
-                                config_entry,
-                                data={**config_entry.data, **entry_changes},
-                            )
+                # Persist valid config keys to the config entry so changes survive reload (shared with the
+                # respond_to_suggestion service since #1652, which used to skip this).
+                from .services import persist_accepted_changes
+
+                persist_accepted_changes(hass, coordinator, changes)
                 return self.json({"status": "ok", "changes": changes})
             elif action == "dismiss":
                 coordinator.learning.dismiss_suggestion(suggestion_key)

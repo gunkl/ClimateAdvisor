@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "تم مسح الإيقاف المؤقت. الأتمتة متوقفة (للمراقبة فقط): لم يُرسل أي أمر إلى الثرموستات.",
   "errors.resume_pending": "تم مسح الإيقاف المؤقت. لم يطبّق الثرموستات {mode, select, none {الاستعادة} heat {التدفئة} cool {التبريد} off {الإيقاف} auto {الوضع التلقائي} heat_cool {تدفئة/تبريد} fan_only {وضع المروحة فقط} other {{mode}}} بعد؛ يعيد Climate Advisor إرساله. ستبدأ فترة الإيقاف المؤقت بمجرد تطبيقه.",
   "errors.suggestion_key_required": "مطلوب: suggestion_key",
+  "errors.suggestion_key_unknown": "قيمة suggestion_key غير معروفة: {suggestion_key}",
   "errors.timeline_not_ready": "الجدول الزمني للعمليات ليس جاهزًا بعد.",
   "errors.zone_selection_required": "تم إعداد عدة مناطق في Climate Advisor — أضف {hint} (إحدى قيم entry_id في 'zones') ليحدد الطلب منطقة واحدة بالضبط."
 }

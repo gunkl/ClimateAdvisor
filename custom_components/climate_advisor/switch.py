@@ -54,8 +54,6 @@ class ClimateAdvisorAutomationSwitch(ClimateAdvisorEntity, SwitchEntity):
     and notifications are skipped.
     """
 
-    _attr_icon = "mdi:robot"
-
     def __init__(
         self,
         coordinator: ClimateAdvisorCoordinator,

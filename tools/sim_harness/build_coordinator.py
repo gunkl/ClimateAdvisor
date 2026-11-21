@@ -541,9 +541,15 @@ def setup_entry_like_ha(fake_hass: FakeHass, scheduler: FakeScheduler, entry: An
     the entry's on_unload list. Also used to set an entry up again after an unload
     (a reload), against the same FakeHass and config_dir.
     """
-    from custom_components.climate_advisor import async_setup_entry  # noqa: PLC0415
+    from custom_components.climate_advisor import async_setup, async_setup_entry  # noqa: PLC0415
     from custom_components.climate_advisor.const import DOMAIN  # noqa: PLC0415
     from tools.sim_harness.ha_stubs import _current_entry  # noqa: PLC0415
+
+    # Issue #1637: real HA runs the integration's async_setup() once, before its first entry sets up (it registers
+    # the five services, for the life of HA). Mirror that once per FakeHass, so a reload does not re-run it.
+    if not fake_hass.data.get("_ca_component_setup"):
+        run_coro(async_setup(fake_hass, {}))
+        fake_hass.data["_ca_component_setup"] = True
 
     token = _current_entry.set(entry)
     try:

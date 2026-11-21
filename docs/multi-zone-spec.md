@@ -880,7 +880,8 @@ because omitting the zone is no longer accepted at all.
   `ZONE_SCOPED_SERVICES` (`__init__.py`, a five-element tuple of the service
   names) is the single source of truth read by both this registration guard
   and the Gap 9 teardown loop below, so the two can't drift out of sync with
-  each other.
+  each other. *(Issue #1637 superseded the guard and the teardown loop: the services are registered once in
+  `async_setup()`, in `services.py`; see Gap 9 below.)*
 - **`handle_dump_diagnostics` nuance:** unlike the other four handlers, it
   needs a `ConfigEntry`, not just a `ClimateAdvisorCoordinator` — the shared
   `async_get_diagnostics_payload(hass, entry)` helper (`diagnostics.py`,
@@ -1125,6 +1126,13 @@ redirect to the surviving zone — it silently acts on the deleted zone's now-de
 call appears to "succeed." This compounds Gap 5 (the live-misdirection bug) with a
 teardown-time version of the same defect: destructive services have no reliable
 binding to a zone that still exists, in either direction.
+
+**(superseded, Issue #1637, quality scale `action-setup`):** the five services now live in `services.py` and are
+registered once in `async_setup()`, for the life of Home Assistant. They are never removed on unload, and the
+teardown loop described next is gone. Gap 9's guarantee still holds: unloading one zone never removes a service
+another zone needs. A call naming an unloaded zone, or made with no zone loaded, fails with the translated
+`unknown_zone` error instead of "service not found". `ZONE_SCOPED_SERVICES` moved to `services.py`. The text below
+is the PR4 history.
 
 **(as built, PR4 — Step 4):** fixed, in the same PR as Gap 5 — this is the
 unload-side half of that fix, not a separate change. `async_unload_entry()`

@@ -1,0 +1,18 @@
+{
+  "ai.limits.advice": "請在 Home Assistant 中該整合的設定裡調高此值。若仍要執行，報告可能不完整或失敗。",
+  "ai.limits.cancel": "取消",
+  "ai.limits.cancelled": "已取消調查。",
+  "ai.limits.check": "{kind, select, output {輸出上限} context {上下文視窗} other {合併上下文視窗（輸入與輸出）}}：{integration} 中的 {setting} 為 {value}，至少需要 {required}。",
+  "ai.limits.checking": "正在檢查 AI 服務提供者的限制……",
+  "ai.limits.run_anyway": "仍要執行",
+  "ai.limits.title": "此 AI 服務提供者的限制似乎太小，不足以進行調查",
+  "ai.limits.unreadable": "無法檢查此服務提供者的限制；調查需要 16k token 的上下文視窗與 8k token 的輸出上限。",
+  "ai.notice.ai_context_limit": "此報告的資料超出 AI 模型的上下文視窗。請使用上下文視窗至少 {context} token 的模型（若輸入與輸出共用同一個視窗，例如 Ollama 的 num_ctx，則需 {combined}），或選擇較短的時段。",
+  "ai.notice.ai_output_limit": "AI 服務提供者在報告完成前就達到輸出上限而停止。請在該整合的設定中，將最大 token 數調高至至少 {required}。",
+  "ai.notice.ai_provider_error": "AI 服務提供者傳回錯誤，因此無法撰寫報告。請檢查 Home Assistant 中的該整合，然後再試一次。",
+  "ai.notice.ai_report_cut_short": "傳回的報告不完整：缺少部分章節。{has_setting, select, yes {請將 {integration} 中的 {setting} 調高至至少 {required}，然後重新執行。} other {請在該整合的設定中，將 AI 服務提供者的輸出上限調高至至少 {required} token，然後重新執行。}}",
+  "ai.notice.ai_task_no_entity": "尚未選擇 AI 任務實體，且 Home Assistant 也沒有首選實體。請在 Climate Advisor 的 AI 設定中選擇 AI 任務實體，或在「設定 > 系統 > AI」中設定預設實體。",
+  "ai.status_gathering": "正在收集系統資料……",
+  "ai.status_provider": "正在等待 AI 服務提供者撰寫報告……",
+  "ai.status_sending": "正在將資料傳送給 AI 服務提供者……"
+}

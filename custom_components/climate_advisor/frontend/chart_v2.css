@@ -258,7 +258,9 @@
   .plan-list { list-style: none; margin: 0; padding: 0; }
   .plan-row { display: grid; grid-template-columns: 6.2em 4.4em minmax(0, 1fr); gap: 2px 10px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--border); font-size: 0.86rem; line-height: 1.35; }
   .plan-row:first-child { border-top: 0; }
-  .plan-time { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; white-space: nowrap; }
+  /* #1656: a weekday plus a 12-hour time (週六 上午12:38, Sat 12:38 AM) can be wider than the column: the weekday wraps above the time, the time itself never breaks */
+  .plan-time { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; white-space: normal; }
+  .plan-clock { white-space: nowrap; }
   .plan-day { font-weight: 400; color: var(--text-secondary); font-size: 0.74rem; }
   .plan-actor { display: inline-flex; align-items: center; gap: 5px; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
   .plan-you .plan-actor { color: var(--text); font-weight: 600; }

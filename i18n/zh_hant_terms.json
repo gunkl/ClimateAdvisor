@@ -1,0 +1,298 @@
+{
+ "_about": "Issue #1656: the zh-Hant wording guard (tools/i18n_checks.py check_zh_hant). simplified_chars: Simplified-only characters, none of which occurs in Home Assistant 2026.10.4's own zh-Hant translations. mainland_only: mainland words with their Taiwan usage; each has zero uses in HA's zh-Hant, except the rare community-integration leaks noted in the research (Taiwan word at least 20x more common). Context-dependent words (設置, 信息, 打開, ...) are deliberately not listed.",
+ "simplified_chars": "设说这们时发关开对国点么为网络认选择项应计机门风热湿气传视频软务显级无际实现东车长问题间处让达过还进远连边适递华单双号帮页领类换节调档试种态状区户断个从当会来将经结给统习学钟闭启资读语误错败请输历复报简释优储检总压缩记录转卧归规则脑备讯详细见览观环业线链码写编辑删证账订阅两尽万亿与专严丢产亲体价众伤伦伪仪侧侦俭债倾偿儿兴养兰册军农决况冻净凉减凤击刘刚创别剂剧劝办励劳势勋匀医协卖卫厌厅县参叙叹吓吗吴呕员响哑唤团园围图圆圣场坏块坚坛坝坠垄垒垦执扩扫扬扰抚抛护担拟拥拦挂挡挣挤挥损捡掳揽携摄摆摇撑敌旧晓晕术杀杂权条杨极构枪柜标栏树样桥楼欢汇汉沟没沪泪泽洁浅济浏浓涛润涨渐湾满滤滥灭灯灵灾炉炼烂烟焕爱牍牵犹狭独猎献琐畅疗疯痒盏盐监盖盘础确碍礼祷离积称稳穷竞笔笼签粮紧纠红约纪纯纲纳纵纷纸练组织终绕绘绝继绩续维综绿缓缘罗罚职联聪肃脚脱舰舱艺芦苏获营虑虽补装觉触讨训议讲许论访评识诉词译诗话询诸课谁谈谢贝负贡财责货质购贯费贴赛赶趋跃践轮轻载较辅辆迁违迟遗邮邻郑酱针钢钱铁银销锁键镜闪闲闷队阳阴阵阶陆陈险随隐难雾静韩顶顺须顾顿额飞饭馆马驱验骤鱼鸟鸡麦黄齐龄龙",
+ "mainland_only": [
+  {
+   "term": "互聯網",
+   "taiwan": "網際網路"
+  },
+  {
+   "term": "傳感",
+   "taiwan": "感測"
+  },
+  {
+   "term": "傳感器",
+   "taiwan": "感測器"
+  },
+  {
+   "term": "優化",
+   "taiwan": "最佳化"
+  },
+  {
+   "term": "光標",
+   "taiwan": "游標"
+  },
+  {
+   "term": "內存",
+   "taiwan": "記憶體"
+  },
+  {
+   "term": "兼容",
+   "taiwan": "相容"
+  },
+  {
+   "term": "分辨率",
+   "taiwan": "解析度"
+  },
+  {
+   "term": "創建",
+   "taiwan": "建立"
+  },
+  {
+   "term": "加載",
+   "taiwan": "載入"
+  },
+  {
+   "term": "博客",
+   "taiwan": "部落格"
+  },
+  {
+   "term": "周期",
+   "taiwan": "週期"
+  },
+  {
+   "term": "固件",
+   "taiwan": "韌體"
+  },
+  {
+   "term": "圖標",
+   "taiwan": "圖示"
+  },
+  {
+   "term": "字段",
+   "taiwan": "欄位"
+  },
+  {
+   "term": "實時",
+   "taiwan": "即時"
+  },
+  {
+   "term": "寬帶",
+   "taiwan": "寬頻"
+  },
+  {
+   "term": "導出",
+   "taiwan": "匯出"
+  },
+  {
+   "term": "局域網",
+   "taiwan": "區域網路"
+  },
+  {
+   "term": "屏幕",
+   "taiwan": "螢幕"
+  },
+  {
+   "term": "峰谷",
+   "taiwan": "尖離峰"
+  },
+  {
+   "term": "帖子",
+   "taiwan": "貼文"
+  },
+  {
+   "term": "彈窗",
+   "taiwan": "彈出視窗"
+  },
+  {
+   "term": "復制",
+   "taiwan": "複製"
+  },
+  {
+   "term": "應用程序",
+   "taiwan": "應用程式"
+  },
+  {
+   "term": "打印",
+   "taiwan": "列印"
+  },
+  {
+   "term": "抽濕",
+   "taiwan": "除濕"
+  },
+  {
+   "term": "接口",
+   "taiwan": "介面"
+  },
+  {
+   "term": "攝像頭",
+   "taiwan": "攝影機"
+  },
+  {
+   "term": "數據庫",
+   "taiwan": "資料庫"
+  },
+  {
+   "term": "數碼",
+   "taiwan": "數位"
+  },
+  {
+   "term": "文檔",
+   "taiwan": "文件"
+  },
+  {
+   "term": "智能家居",
+   "taiwan": "智慧家庭"
+  },
+  {
+   "term": "暖通",
+   "taiwan": "空調"
+  },
+  {
+   "term": "服務器",
+   "taiwan": "伺服器"
+  },
+  {
+   "term": "模塊",
+   "taiwan": "模組"
+  },
+  {
+   "term": "溫度傳感器",
+   "taiwan": "溫度感測器"
+  },
+  {
+   "term": "激活",
+   "taiwan": "啟用"
+  },
+  {
+   "term": "用戶名",
+   "taiwan": "使用者名稱"
+  },
+  {
+   "term": "用戶界面",
+   "taiwan": "使用者介面"
+  },
+  {
+   "term": "界面",
+   "taiwan": "介面"
+  },
+  {
+   "term": "登錄",
+   "taiwan": "登入"
+  },
+  {
+   "term": "短信",
+   "taiwan": "簡訊"
+  },
+  {
+   "term": "硬件",
+   "taiwan": "硬體"
+  },
+  {
+   "term": "硬盤",
+   "taiwan": "硬碟"
+  },
+  {
+   "term": "磁盤",
+   "taiwan": "磁碟"
+  },
+  {
+   "term": "移動設備",
+   "taiwan": "行動裝置"
+  },
+  {
+   "term": "空氣質量",
+   "taiwan": "空氣品質"
+  },
+  {
+   "term": "粘貼",
+   "taiwan": "貼上"
+  },
+  {
+   "term": "網絡",
+   "taiwan": "網路"
+  },
+  {
+   "term": "緩存",
+   "taiwan": "快取"
+  },
+  {
+   "term": "自定義",
+   "taiwan": "自訂"
+  },
+  {
+   "term": "芯片",
+   "taiwan": "晶片"
+  },
+  {
+   "term": "視頻",
+   "taiwan": "影片"
+  },
+  {
+   "term": "視頻流",
+   "taiwan": "串流"
+  },
+  {
+   "term": "計劃表",
+   "taiwan": "排程"
+  },
+  {
+   "term": "註銷",
+   "taiwan": "登出"
+  },
+  {
+   "term": "調用",
+   "taiwan": "呼叫"
+  },
+  {
+   "term": "調試",
+   "taiwan": "除錯"
+  },
+  {
+   "term": "變量",
+   "taiwan": "變數"
+  },
+  {
+   "term": "賬戶",
+   "taiwan": "帳戶"
+  },
+  {
+   "term": "賬號",
+   "taiwan": "帳號"
+  },
+  {
+   "term": "超鏈接",
+   "taiwan": "超連結"
+  },
+  {
+   "term": "軟件",
+   "taiwan": "軟體"
+  },
+  {
+   "term": "通知欄",
+   "taiwan": "通知列"
+  },
+  {
+   "term": "遠程",
+   "taiwan": "遠端"
+  },
+  {
+   "term": "鏈接",
+   "taiwan": "連結"
+  },
+  {
+   "term": "集成",
+   "taiwan": "整合"
+  },
+  {
+   "term": "音頻",
+   "taiwan": "音訊"
+  },
+  {
+   "term": "默認",
+   "taiwan": "預設"
+  },
+  {
+   "term": "默認值",
+   "taiwan": "預設值"
+  },
+  {
+   "term": "默認設置",
+   "taiwan": "預設設定"
+  },
+  {
+   "term": "鼠標",
+   "taiwan": "滑鼠"
+  }
+ ]
+}

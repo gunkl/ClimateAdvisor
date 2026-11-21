@@ -118,6 +118,7 @@ OUTPUT_LANGUAGE_NAMES: dict[str, str] = {
     "ar": "Arabic",
     "ru": "Russian",
     "zh-Hans": "Simplified Chinese",
+    "zh-Hant": "Traditional Chinese (Taiwan)",
     "tr": "Turkish",
 }
 

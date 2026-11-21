@@ -1,0 +1,14 @@
+{
+  "learning.override_detail": "大多是調{direction, select, up {高} other {低}}約 {delta}",
+  "learning.override_detail_peak": "大多是調{direction, select, up {高} other {低}}約 {delta}，常在 {hour}:00 前後",
+  "learning.suggestion.comfort_violations": "最近 14 天中有 {days} 天，室內溫度超出您的舒適溫度範圍達 30 分鐘以上。要減少節能溫度的調降幅度，還是提早開始早晨預熱？",
+  "learning.suggestion.forecast_bias_significant": "我注意到，您的天氣服務預報的最高溫，一直比您所在地的實際溫度{direction, select, higher {高} other {低}}約 {delta}。我現在會自動校正，以提升預報準確度，讓預熱與預冷的判斷更符合您當地的實際情況。",
+  "learning.suggestion.frequent_door_pauses": "過去兩週，空調系統因門窗開啟而暫停了 {count, plural, other {# 次}}。如果主要是某一扇門造成的，要延長該門的暫停延遲，還是將它排除在監測之外？",
+  "learning.suggestion.frequent_door_pauses_sensor": "過去兩週，空調系統因門窗開啟而暫停了 {count, plural, other {# 次}}。最常觸發的是 {sensor}（{top_count, plural, other {# 次}}）。要延長該感測器的暫停延遲，還是將它排除在監測之外？",
+  "learning.suggestion.frequent_overrides": "過去兩週，您手動調整了溫控器 {count, plural, other {# 次}}（{detail}）。要讓 Climate Advisor 調整舒適設定溫度，還是在排程中加入定時調溫？",
+  "learning.suggestion.frequent_overrides_no_detail": "過去兩週，您手動調整了溫控器 {count, plural, other {# 次}}。這可能表示舒適設定溫度不符合您的喜好。要讓 Climate Advisor 分析這些手動變更的規律，並建議新的設定溫度嗎？",
+  "learning.suggestion.high_runtime_mild_days": "在溫和與溫暖的日子，空調系統平均運轉了 {minutes, plural, other {# 分鐘}}，比預期還長。這可能是門窗沒關，或設定溫度太嚴格。要加裝更多門窗感測器，還是調整溫和日子的設定溫度？",
+  "learning.suggestion.low_window_compliance": "過去建議開窗的 {days, plural, other {# 天}}中，實際開窗的時間只有 {compliance, number, ::percent}。要讓 Climate Advisor 不再建議開關窗，改用最佳化排程的空調系統嗎？這會稍微多耗一點電，但不需要您動手。",
+  "learning.suggestion.short_departures": "您經常外出 30–45 分鐘，節能溫度幾乎還來不及生效，您就回來了。對於這類短暫外出，要把節能溫度的延遲從 15 分鐘縮短為 5 分鐘，還是外出不到 1 小時就不啟用節能溫度？",
+  "learning.suggestion.thermal_model_ready": "我已收集到足夠的升降溫觀測資料，可以估算您住家的隔熱性能與空調系統的效能。預熱時機與就寢節能調溫會依住家的實際表現自動調整，您不需要做任何事。"
+}

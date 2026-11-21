@@ -150,7 +150,7 @@ Source: [claude.md, Release Process](claude.md#release-process-critical--must-fo
 - [ ] Any `outcomes.py` change carries its semantic justification.
 - [ ] Mirror path checked; any finding filed or fixed and named on its own.
 - [ ] Version bumped in `const.py` and `manifest.json`; `CHANGELOG.md` entry; `fix_history.jsonl` entry via `tools/add_fix_entry.py`.
-- [ ] Translations: every new occupant-facing string is in all 16 languages (`python tools/i18n.py lock` then `check`), no hard-coded English at a sink (see `docs/i18n-spec.md`).
+- [ ] Translations: every new occupant-facing string is in all 17 languages (`python tools/i18n.py lock` then `check`), no hard-coded English at a sink (see `docs/i18n-spec.md`).
 - [ ] Docs touched have current Anchors tables; the README is updated for user-facing changes.
 - [ ] No boundary violation (or an approved exception is logged).
 - [ ] After merge: a plain-English comment on the issue with the fix, the PR link and before vs after.

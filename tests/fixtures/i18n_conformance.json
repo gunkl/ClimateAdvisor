@@ -6,7 +6,7 @@
   "cldr": "46.0",
   "unicode": "16.0",
   "intl_messageformat": "10.7.16",
-  "rows": 1989
+  "rows": 2093
  },
  "rows": [
   {
@@ -3003,6 +3003,206 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 1000000
+   },
+   "expected": "other:1,000,000"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 0
+   },
+   "expected": "other:0"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 1
+   },
+   "expected": "other:1"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 2
+   },
+   "expected": "other:2"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 3
+   },
+   "expected": "other:3"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 4
+   },
+   "expected": "other:4"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 5
+   },
+   "expected": "other:5"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 6
+   },
+   "expected": "other:6"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 10
+   },
+   "expected": "other:10"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 11
+   },
+   "expected": "other:11"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 12
+   },
+   "expected": "other:12"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 13
+   },
+   "expected": "other:13"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 14
+   },
+   "expected": "other:14"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 21
+   },
+   "expected": "other:21"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 22
+   },
+   "expected": "other:22"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 25
+   },
+   "expected": "other:25"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 100
+   },
+   "expected": "other:100"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 101
+   },
+   "expected": "other:101"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 102
+   },
+   "expected": "other:102"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 103
+   },
+   "expected": "other:103"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 111
+   },
+   "expected": "other:111"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 112
+   },
+   "expected": "other:112"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 1.5
+   },
+   "expected": "other:1.5"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 2.5
+   },
+   "expected": "other:2.5"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
+   "params": {
+    "n": 0.5
+   },
+   "expected": "other:0.5"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{n, plural, zero {zero:#} one {one:#} two {two:#} few {few:#} many {many:#} other {other:#}}",
    "params": {
     "n": 1000000
@@ -6090,6 +6290,134 @@
    "expected": "-1,234.50"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1234567.891
+   },
+   "expected": "1,234,567.891"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1234
+   },
+   "expected": "1,234"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number}",
+   "params": {
+    "n": 12345
+   },
+   "expected": "12,345"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number}",
+   "params": {
+    "n": 12345678.5
+   },
+   "expected": "12,345,678.5"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number}",
+   "params": {
+    "n": -1234.5
+   },
+   "expected": "-1,234.5"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number}",
+   "params": {
+    "n": 0.0005
+   },
+   "expected": "0.001"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": 0.256
+   },
+   "expected": "26%"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": -0.5
+   },
+   "expected": "-50%"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": 12.345
+   },
+   "expected": "1,235%"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::precision-integer}",
+   "params": {
+    "n": 3.6
+   },
+   "expected": "4"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::precision-integer}",
+   "params": {
+    "n": 12345.4
+   },
+   "expected": "12,345"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": 3.26
+   },
+   "expected": "3.3"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": 1234.5
+   },
+   "expected": "1,234.5"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::.00}",
+   "params": {
+    "n": 3.256
+   },
+   "expected": "3.26"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::.00}",
+   "params": {
+    "n": 7
+   },
+   "expected": "7.00"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::.00}",
+   "params": {
+    "n": -1234.5
+   },
+   "expected": "-1,234.50"
+  },
+  {
    "lang": "tr",
    "msg": "{n, number}",
    "params": {
@@ -8089,6 +8417,130 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "x {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "A",
+      "B",
+      "C",
+      "D"
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "x A、B、C或D"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "x {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "A"
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "x A"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "x {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "A",
+      "B"
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "x A和B"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "x {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "A",
+      "B",
+      "C"
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "x A、B和C"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "x {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "A",
+      "B",
+      "C",
+      "D"
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "x A、B、C和D"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "x {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "A"
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "x A"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "x {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "A",
+      "B"
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "x A或B"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "x {l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      "A",
+      "B",
+      "C"
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "x A、B或C"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "x {l}",
    "params": {
     "l": {
@@ -11559,6 +12011,228 @@
    "expected": "a 20.2°C b z"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 72.3,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "72°F"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": 72.3,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "72°F"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 72.3,
+     "unit": "fahrenheit",
+     "d": 1
+    }
+   },
+   "expected": "72.3°F"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": 72.3,
+     "unit": "fahrenheit",
+     "d": 1
+    }
+   },
+   "expected": "72.3°F"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 72.3,
+     "unit": "celsius",
+     "d": 0
+    }
+   },
+   "expected": "22°C"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": 72.3,
+     "unit": "celsius",
+     "d": 0
+    }
+   },
+   "expected": "40°C"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 72.3,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "22.4°C"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": 72.3,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "40.2°C"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 72.3,
+     "unit": "celsius",
+     "d": 2
+    }
+   },
+   "expected": "22.39°C"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": 72.3,
+     "unit": "celsius",
+     "d": 2
+    }
+   },
+   "expected": "40.17°C"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": -4.1,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "-20.1°C"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": -4.1,
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "-2.3°C"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 1234.56,
+     "unit": "fahrenheit",
+     "d": 1
+    }
+   },
+   "expected": "1234.6°F"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": 1234.56,
+     "unit": "fahrenheit",
+     "d": 1
+    }
+   },
+   "expected": "1234.6°F"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 20.4,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "20°F"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": 20.4,
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "20°F"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "a {t} b {n}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": 68.3,
+     "unit": "celsius",
+     "d": 1
+    },
+    "n": "z"
+   },
+   "expected": "a 20.2°C b z"
+  },
+  {
    "lang": "tr",
    "msg": "{t}",
    "params": {
@@ -14031,6 +14705,156 @@
    "expected": "-Infinity"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "非數值"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "非數值%"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "非數值"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "x 非數值"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "nan"
+    }
+   },
+   "expected": "NaN"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞%"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "∞"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "x ∞"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "inf"
+    }
+   },
+   "expected": "Infinity"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::percent}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞%"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, number, ::.0}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-∞"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n, plural, one {o #} other {x #}}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "x -∞"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{n}",
+   "params": {
+    "n": {
+     "$f": "-inf"
+    }
+   },
+   "expected": "-Infinity"
+  },
+  {
    "lang": "tr",
    "msg": "{n, number}",
    "params": {
@@ -14294,6 +15118,14 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{n, number}",
+   "params": {
+    "n": 1e+300
+   },
+   "expected": "1,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000,000"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{n, number}",
    "params": {
     "n": 1e+300
@@ -14803,6 +15635,40 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "or"
+    }
+   },
+   "expected": "1,234.5、x、3或1,000,000"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{l}",
+   "params": {
+    "l": {
+     "$t": "list",
+     "items": [
+      1234.5,
+      "x",
+      3,
+      1000000
+     ],
+     "style": "and"
+    }
+   },
+   "expected": "1,234.5、x、3和1,000,000"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{l}",
    "params": {
     "l": {
@@ -15705,6 +16571,36 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "tdelta",
+     "f": {
+      "$f": "-inf"
+     },
+     "unit": "fahrenheit",
+     "d": 0
+    }
+   },
+   "expected": "-∞°F"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "{t}",
+   "params": {
+    "t": {
+     "$t": "temp",
+     "f": {
+      "$f": "nan"
+     },
+     "unit": "celsius",
+     "d": 1
+    }
+   },
+   "expected": "非數值°C"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{t}",
    "params": {
     "t": {
@@ -20297,6 +21193,96 @@
    "expected": "t=9:00 d=7月4日"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T15:05:00-05:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T15:05:00-05:00"
+    }
+   },
+   "expected": "t=下午3:05 d=11月14日"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-11-14T00:05:00+09:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T00:05:00+09:00"
+    }
+   },
+   "expected": "t=上午12:05 d=11月14日"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-03-01T12:00:00+00:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-01T12:00:00+00:00"
+    }
+   },
+   "expected": "t=下午12:00 d=3月1日"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-01-05T07:30:00-08:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-05T07:30:00-08:00"
+    }
+   },
+   "expected": "t=上午7:30 d=1月5日"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-12-31T23:59:00+01:00"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-31T23:59:00+01:00"
+    }
+   },
+   "expected": "t=下午11:59 d=12月31日"
+  },
+  {
+   "lang": "zh-Hant",
+   "msg": "t={t} d={d}",
+   "params": {
+    "t": {
+     "$t": "time",
+     "ts": "2026-07-04T09:00:00+05:30"
+    },
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-04T09:00:00+05:30"
+    }
+   },
+   "expected": "t=上午9:00 d=7月4日"
+  },
+  {
    "lang": "tr",
    "msg": "t={t} d={d}",
    "params": {
@@ -20552,6 +21538,17 @@
    "expected": "1月14日"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-01-14T13:45:00+00:00"
+    }
+   },
+   "expected": "1月14日"
+  },
+  {
    "lang": "tr",
    "msg": "{d}",
    "params": {
@@ -20718,6 +21715,17 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-02-14T13:45:00+00:00"
+    }
+   },
+   "expected": "2月14日"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{d}",
    "params": {
     "d": {
@@ -20904,6 +21912,17 @@
    "expected": "3月14日"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-03-14T13:45:00+00:00"
+    }
+   },
+   "expected": "3月14日"
+  },
+  {
    "lang": "tr",
    "msg": "{d}",
    "params": {
@@ -21070,6 +22089,17 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-04-14T13:45:00+00:00"
+    }
+   },
+   "expected": "4月14日"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{d}",
    "params": {
     "d": {
@@ -21256,6 +22286,17 @@
    "expected": "5月14日"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-05-14T13:45:00+00:00"
+    }
+   },
+   "expected": "5月14日"
+  },
+  {
    "lang": "tr",
    "msg": "{d}",
    "params": {
@@ -21422,6 +22463,17 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-06-14T13:45:00+00:00"
+    }
+   },
+   "expected": "6月14日"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{d}",
    "params": {
     "d": {
@@ -21608,6 +22660,17 @@
    "expected": "7月14日"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-07-14T13:45:00+00:00"
+    }
+   },
+   "expected": "7月14日"
+  },
+  {
    "lang": "tr",
    "msg": "{d}",
    "params": {
@@ -21774,6 +22837,17 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-08-14T13:45:00+00:00"
+    }
+   },
+   "expected": "8月14日"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{d}",
    "params": {
     "d": {
@@ -21960,6 +23034,17 @@
    "expected": "9月14日"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-09-14T13:45:00+00:00"
+    }
+   },
+   "expected": "9月14日"
+  },
+  {
    "lang": "tr",
    "msg": "{d}",
    "params": {
@@ -22126,6 +23211,17 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-10-14T13:45:00+00:00"
+    }
+   },
+   "expected": "10月14日"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{d}",
    "params": {
     "d": {
@@ -22312,6 +23408,17 @@
    "expected": "11月14日"
   },
   {
+   "lang": "zh-Hant",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-11-14T13:45:00+00:00"
+    }
+   },
+   "expected": "11月14日"
+  },
+  {
    "lang": "tr",
    "msg": "{d}",
    "params": {
@@ -22478,6 +23585,17 @@
   },
   {
    "lang": "zh-Hans",
+   "msg": "{d}",
+   "params": {
+    "d": {
+     "$t": "date",
+     "ts": "2026-12-14T13:45:00+00:00"
+    }
+   },
+   "expected": "12月14日"
+  },
+  {
+   "lang": "zh-Hant",
    "msg": "{d}",
    "params": {
     "d": {

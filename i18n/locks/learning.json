@@ -208,5 +208,19 @@
     "learning.suggestion.low_window_compliance": "2f070d8903c5",
     "learning.suggestion.short_departures": "166ce1c9e0e6",
     "learning.suggestion.thermal_model_ready": "797b904705ad"
+  },
+  "zh-Hant": {
+    "learning.override_detail": "566d0cca083c",
+    "learning.override_detail_peak": "697463bed1af",
+    "learning.suggestion.comfort_violations": "b4113a94f1cb",
+    "learning.suggestion.forecast_bias_significant": "5e515d339d92",
+    "learning.suggestion.frequent_door_pauses": "a92fab8cbff0",
+    "learning.suggestion.frequent_door_pauses_sensor": "ee70cf3f5335",
+    "learning.suggestion.frequent_overrides": "13b1c5e0cf16",
+    "learning.suggestion.frequent_overrides_no_detail": "529b854b5aff",
+    "learning.suggestion.high_runtime_mild_days": "49050e3c1255",
+    "learning.suggestion.low_window_compliance": "2f070d8903c5",
+    "learning.suggestion.short_departures": "166ce1c9e0e6",
+    "learning.suggestion.thermal_model_ready": "797b904705ad"
   }
 }

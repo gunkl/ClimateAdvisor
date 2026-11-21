@@ -130,7 +130,8 @@ def test_parallel_updates_set_on_both_platforms():
 
 def test_update_failed_message_in_every_language():
     paths = [_PKG / "strings.json", *sorted((_PKG / "translations").glob("*.json"))]
-    assert len(paths) == 17
+    langs = json.loads((_PKG / "frontend" / "i18n" / "index.json").read_text(encoding="utf-8"))["languages"]
+    assert len(paths) == 1 + len(langs)  # strings.json plus one translations file per language
     for path in paths:
         message = json.loads(path.read_text(encoding="utf-8"))["exceptions"]["update_failed"]["message"]
         assert "{error}" in message, path.name

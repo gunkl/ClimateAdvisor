@@ -2353,7 +2353,7 @@
     const lead = you && s.lead_minutes > 0 && s._ms - s.lead_minutes * 60000 > now
       ? '<span class="plan-note">' + escapeHtml(_t('plan.reminder', { time: _clock(s._ms - s.lead_minutes * 60000) })) + '</span>' : '';
     return '<li class="plan-row ' + (you ? 'plan-you' : 'plan-ca') + (low ? ' plan-low' : '') + (held ? ' plan-held' : '') + '" data-kind="' + escapeHtml(s.kind || '') + '" data-actor="' + escapeHtml(s.actor || '') + '">' +
-      '<span class="plan-time">' + day + escapeHtml(_clock(s._ms)) + '</span>' +
+      '<span class="plan-time">' + day + '<span class="plan-clock">' + escapeHtml(_clock(s._ms)) + '</span></span>' +
       '<span class="plan-actor" title="' + escapeHtml(_t(you ? 'plan.you_title' : 'plan.ca_title')) + '">' +
         '<svg width="12" height="12" viewBox="-7 -7 14 14" aria-hidden="true">' + (you
           ? '<path d="M0 -6 L6 0 L0 6 L-6 0 Z" fill="' + (low ? 'none' : 'var(--c-target)') + '" stroke="var(--c-ink)" stroke-width="1.5"/>'

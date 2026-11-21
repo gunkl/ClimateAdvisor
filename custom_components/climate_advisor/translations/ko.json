@@ -130,6 +130,40 @@
           "briefing_time": "그날의 일기 예보와 냉난방 계획이 담긴 일일 기후 브리핑 알림을 보낼 시간입니다.",
           "briefing_notifications_enabled": "예약된 일일 브리핑을 이 구역의 푸시 알림으로 보냅니다. 첫 번째 구역만 기본값이 켜짐이라 여러 구역이 있는 집에서도 구역마다 같은 알림이 오지 않습니다. 나중에 알림에서 변경할 수 있습니다."
         }
+      },
+      "reconfigure": {
+        "title": "구역 설정 변경",
+        "description": "{zone}의 온도 조절기, 날씨 서비스 또는 알림 서비스를 변경합니다. 구역의 학습 내용, 기록, 설정은 그대로 유지됩니다. 온도 조절기를 바꾼 후에는 새 측정값이 학습 내용을 점차 업데이트합니다.",
+        "data": {
+          "weather_entity": "날씨 서비스",
+          "climate_entity": "온도 조절기",
+          "notify_service": "알림 서비스"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor가 일기 예보와 실외 날씨 정보를 가져오는 데 사용하는 날씨 통합 구성요소입니다.",
+          "climate_entity": "Climate Advisor가 모니터링하고 제어할 온도 조절기입니다.",
+          "notify_service": "알림과 일일 브리핑에 사용하는 Home Assistant 알림 서비스입니다 (예: notify.mobile_app_yourphone)."
+        }
+      },
+      "reauth_ai_key": {
+        "title": "새 Claude API 키",
+        "description": "Anthropic이 내장 Claude API 키를 거부하여 AI 기능이 중지되었습니다. 새 키를 입력하세요. 먼저 테스트한 후 모든 구역에 저장합니다.",
+        "data": {
+          "ai_api_key": "Claude API 키"
+        },
+        "data_description": {
+          "ai_api_key": "Anthropic 계정에서 발급합니다. 저장하기 전에 테스트합니다."
+        }
+      },
+      "reauth_github_token": {
+        "title": "새 GitHub 토큰",
+        "description": "GitHub가 이 구역의 토큰을 거부하여 더 이상 보고서를 {repo}에 이슈로 제출할 수 없습니다. 새 토큰을 입력하세요. 먼저 테스트한 후 저장합니다.",
+        "data": {
+          "github_token": "GitHub 개인 액세스 토큰"
+        },
+        "data_description": {
+          "github_token": "issues:write 범위가 있는 토큰입니다. 저장하기 전에 테스트합니다."
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "취침 냉방이 외출 냉방보다 높아서 밤에는 집에 사람이 없을 때보다 더 따뜻해지도록 허용됩니다. 그대로 사용하려면 다시 제출하세요.",
       "vacation_heat_above_away_warning": "휴가 난방이 외출 난방보다 높아서 휴가 중에 평소 외출한 날보다 에너지를 더 많이 씁니다. 그대로 사용하려면 다시 제출하세요.",
       "vacation_cool_below_away_warning": "휴가 냉방이 외출 냉방보다 낮아서 휴가 중에 평소 외출한 날보다 에너지를 더 많이 씁니다. 그대로 사용하려면 다시 제출하세요.",
-      "vacation_freeze_warning": "이 설정에서는 휴가 난방이 45 °F (7 °C) 아래로 내려갑니다. 장기 여행 중에 배관이 얼 수 있습니다. 그대로 사용하려면 다시 제출하세요."
+      "vacation_freeze_warning": "이 설정에서는 휴가 난방이 45 °F (7 °C) 아래로 내려갑니다. 장기 여행 중에 배관이 얼 수 있습니다. 그대로 사용하려면 다시 제출하세요.",
+      "ai_connection_failed": "Claude API에 연결할 수 없습니다. API 키를 확인한 후 다시 시도하세요.",
+      "github_token_invalid": "GitHub가 이 토큰을 거부했습니다. 만료되지 않았는지, issues:write 범위가 있는지 확인하세요.",
+      "github_unreachable": "토큰을 테스트하기 위해 GitHub에 연결할 수 없습니다. 연결을 확인한 후 다시 시도하세요."
     },
     "abort": {
-      "already_configured": "이 온도 조절기에는 이미 Climate Advisor 구역이 설정되어 있습니다."
+      "already_configured": "이 온도 조절기에는 이미 Climate Advisor 구역이 설정되어 있습니다.",
+      "reauth_successful": "새 자격 증명을 저장하고 구역을 다시 불러왔습니다.",
+      "reconfigure_successful": "구역 설정을 변경하고 구역을 다시 불러왔습니다. 학습 내용과 기록은 유지됩니다."
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "취침 냉방이 외출 냉방보다 높아서 밤에는 집에 사람이 없을 때보다 더 따뜻해지도록 허용됩니다. 그대로 사용하려면 다시 제출하세요.",
       "vacation_heat_above_away_warning": "휴가 난방이 외출 난방보다 높아서 휴가 중에 평소 외출한 날보다 에너지를 더 많이 씁니다. 그대로 사용하려면 다시 제출하세요.",
       "vacation_cool_below_away_warning": "휴가 냉방이 외출 냉방보다 낮아서 휴가 중에 평소 외출한 날보다 에너지를 더 많이 씁니다. 그대로 사용하려면 다시 제출하세요.",
-      "vacation_freeze_warning": "이 설정에서는 휴가 난방이 45 °F (7 °C) 아래로 내려갑니다. 장기 여행 중에 배관이 얼 수 있습니다. 그대로 사용하려면 다시 제출하세요."
+      "vacation_freeze_warning": "이 설정에서는 휴가 난방이 45 °F (7 °C) 아래로 내려갑니다. 장기 여행 중에 배관이 얼 수 있습니다. 그대로 사용하려면 다시 제출하세요.",
+      "thermostat_shared_zone": "다른 Climate Advisor 구역이 이미 이 온도 조절기를 사용하고 있습니다. 다른 온도 조절기를 선택하세요."
     }
   },
   "issues": {

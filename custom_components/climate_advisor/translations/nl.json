@@ -130,6 +130,40 @@
           "briefing_time": "Wanneer de dagelijkse klimaatnotificatie met de weersverwachting en het HVAC-plan wordt bezorgd.",
           "briefing_notifications_enabled": "Verstuur de geplande dagelijkse briefing als pushnotificatie voor deze zone. Alleen de eerste zone staat standaard aan, zodat een huis met meerdere zones niet per zone een kopie verstuurt. Je kunt dit later wijzigen bij Notificaties."
         }
+      },
+      "reconfigure": {
+        "title": "Zone wijzigen",
+        "description": "Wijzig de thermostaat, de weerdienst of de meldingsdienst van {zone}. De zone behoudt wat ze heeft geleerd, haar geschiedenis en haar instellingen. Na een thermostaatwissel werken nieuwe metingen het geleerde geleidelijk bij.",
+        "data": {
+          "weather_entity": "Weerdienst",
+          "climate_entity": "Thermostaat",
+          "notify_service": "Notificatieservice"
+        },
+        "data_description": {
+          "weather_entity": "De weerintegratie die Climate Advisor gebruikt voor voorspellingen en de buitenomstandigheden.",
+          "climate_entity": "De thermostaat die Climate Advisor bewaakt en bedient.",
+          "notify_service": "De Home Assistant-notificatieservice voor meldingen en dagelijkse briefings (bijv. notify.mobile_app_yourphone)."
+        }
+      },
+      "reauth_ai_key": {
+        "title": "Nieuwe Claude API-sleutel",
+        "description": "Anthropic heeft de ingebouwde Claude API-sleutel geweigerd, dus de AI-functies zijn gestopt. Voer een nieuwe sleutel in. Die wordt eerst getest en daarna voor elke zone opgeslagen.",
+        "data": {
+          "ai_api_key": "Claude API-sleutel"
+        },
+        "data_description": {
+          "ai_api_key": "Uit je Anthropic-account. Wordt getest voordat hij wordt opgeslagen."
+        }
+      },
+      "reauth_github_token": {
+        "title": "Nieuw GitHub-token",
+        "description": "GitHub heeft het token van deze zone geweigerd, dus rapporten kunnen niet meer als issues naar {repo} worden verstuurd. Voer een nieuw token in. Het wordt eerst getest en daarna opgeslagen.",
+        "data": {
+          "github_token": "GitHub Personal Access Token"
+        },
+        "data_description": {
+          "github_token": "Token met het bereik issues:write. Wordt getest voordat het wordt opgeslagen."
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "De koeling tijdens slapen staat warmer dan de koeling bij afwezigheid. 's Nachts mag het huis dus warmer worden dan wanneer er niemand is. Verstuur opnieuw om dit te behouden.",
       "vacation_heat_above_away_warning": "De vakantieverwarming staat warmer dan de verwarming bij afwezigheid. Een vakantie kost dus meer energie dan een gewone dag van huis. Verstuur opnieuw om dit te behouden.",
       "vacation_cool_below_away_warning": "De vakantiekoeling staat koeler dan de koeling bij afwezigheid. Een vakantie kost dus meer energie dan een gewone dag van huis. Verstuur opnieuw om dit te behouden.",
-      "vacation_freeze_warning": "Met deze instelling komt de vakantieverwarming onder 45 °F (7 °C). Tijdens een lange reis kunnen leidingen bevriezen. Verstuur opnieuw om dit te behouden."
+      "vacation_freeze_warning": "Met deze instelling komt de vakantieverwarming onder 45 °F (7 °C). Tijdens een lange reis kunnen leidingen bevriezen. Verstuur opnieuw om dit te behouden.",
+      "ai_connection_failed": "Kan geen verbinding maken met de Claude API. Controleer je API-sleutel en probeer het opnieuw.",
+      "github_token_invalid": "GitHub heeft dit token geweigerd. Controleer of het niet is verlopen en het bereik issues:write heeft.",
+      "github_unreachable": "GitHub was niet bereikbaar om het token te testen. Controleer de verbinding en probeer het opnieuw."
     },
     "abort": {
-      "already_configured": "Voor deze thermostaat is al een Climate Advisor-zone ingesteld."
+      "already_configured": "Voor deze thermostaat is al een Climate Advisor-zone ingesteld.",
+      "reauth_successful": "De nieuwe inloggegevens zijn opgeslagen en de zone is opnieuw geladen.",
+      "reconfigure_successful": "De instelling van de zone is gewijzigd en de zone is opnieuw geladen. Wat ze heeft geleerd en haar geschiedenis blijven behouden."
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "De koeling tijdens slapen staat warmer dan de koeling bij afwezigheid. 's Nachts mag het huis dus warmer worden dan wanneer er niemand is. Verstuur opnieuw om dit te behouden.",
       "vacation_heat_above_away_warning": "De vakantieverwarming staat warmer dan de verwarming bij afwezigheid. Een vakantie kost dus meer energie dan een gewone dag van huis. Verstuur opnieuw om dit te behouden.",
       "vacation_cool_below_away_warning": "De vakantiekoeling staat koeler dan de koeling bij afwezigheid. Een vakantie kost dus meer energie dan een gewone dag van huis. Verstuur opnieuw om dit te behouden.",
-      "vacation_freeze_warning": "Met deze instelling komt de vakantieverwarming onder 45 °F (7 °C). Tijdens een lange reis kunnen leidingen bevriezen. Verstuur opnieuw om dit te behouden."
+      "vacation_freeze_warning": "Met deze instelling komt de vakantieverwarming onder 45 °F (7 °C). Tijdens een lange reis kunnen leidingen bevriezen. Verstuur opnieuw om dit te behouden.",
+      "thermostat_shared_zone": "Een andere Climate Advisor-zone gebruikt deze thermostaat al. Kies een andere thermostaat."
     }
   },
   "issues": {

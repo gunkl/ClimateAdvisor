@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.59"
+VERSION = "0.9.60"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -2323,8 +2323,8 @@ AI_ERROR_PROVIDER = "ai_provider_error"  # any other provider failure
 AI_CUT_SHORT = "ai_report_cut_short"  # a reply that came back missing required sections
 
 # The one AI client (and skill registry) every zone shares: hass.data[AI_SHARED_DATA_KEY] =
-# {"client": ClaudeAPIClient, "skills": AISkillRegistry}. Kept outside hass.data[DOMAIN], whose values are
-# all coordinators (the zone count). Removed with the last zone, like the panel.
+# {"client": ClaudeAPIClient, "skills": AISkillRegistry}. Install-wide, so not on a config entry (Issue #1639: each
+# zone's coordinator is its entry's runtime_data). Removed with the last zone, like the panel.
 AI_SHARED_DATA_KEY = f"{DOMAIN}_ai"
 
 # Investigation report history (Issue #82)

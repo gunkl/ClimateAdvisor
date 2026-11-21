@@ -171,18 +171,18 @@ class TestServiceCallValidation:
 
         Occupant-facing framing: before this fix, deleting a zone left its
         services silently acting on a now-defunct LearningEngine with no
-        error. After the fix, the unloaded zone's entry_id is no longer in
-        hass.data[DOMAIN], so the call is rejected outright instead of
+        error. After the fix, the unloaded zone's entry is no longer LOADED
+        (Issue #1639: nor has a runtime_data), so the call is rejected outright instead of
         appearing to succeed against dead state.
         """
-        from custom_components.climate_advisor import async_unload_entry
         from custom_components.climate_advisor.const import DOMAIN
+        from tools.sim_harness.build_coordinator import async_unload_entry_like_ha
 
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
         zone_1_entry = zones["zone_1"]["entry"]
         ServiceValidationError = _service_validation_error()
 
-        run_coro(async_unload_entry(fake_hass, zone_1_entry))
+        run_coro(async_unload_entry_like_ha(fake_hass, zone_1_entry))
 
         with pytest.raises(ServiceValidationError):
             run_coro(
@@ -210,20 +210,20 @@ class TestServiceTeardown:
     """
 
     def test_services_survive_every_unload_and_reject_the_unloaded_zone(self):
-        from custom_components.climate_advisor import async_unload_entry
         from custom_components.climate_advisor.const import DOMAIN
+        from tools.sim_harness.build_coordinator import async_unload_entry_like_ha
         from tools.sim_harness.multi_zone_assertions import KNOWN_SERVICE_NAMES
 
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
         ServiceValidationError = _service_validation_error()
 
-        run_coro(async_unload_entry(fake_hass, zones["zone_0"]["entry"]))
+        run_coro(async_unload_entry_like_ha(fake_hass, zones["zone_0"]["entry"]))
         for name in KNOWN_SERVICE_NAMES:
             assert fake_hass.services.has_service(DOMAIN, name), (
                 f"{name} was removed after only one of two zones unloaded"
             )
 
-        run_coro(async_unload_entry(fake_hass, zones["zone_1"]["entry"]))
+        run_coro(async_unload_entry_like_ha(fake_hass, zones["zone_1"]["entry"]))
         for name in KNOWN_SERVICE_NAMES:
             assert fake_hass.services.has_service(DOMAIN, name), f"{name} removed after the last zone unloaded"
 

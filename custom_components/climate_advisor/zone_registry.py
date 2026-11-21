@@ -4,7 +4,7 @@ Issue #796 Gap 4: ``api.py``'s ``_get_coordinator(hass)`` used to return
 ``next(iter(entries.values()))`` — an arbitrary "first" entry HA's dict
 iteration happened to hand back — across all 21 of its REST view classes.
 This module is the single source of truth for resolving one or more zone
-coordinators out of ``hass.data[DOMAIN]``, following the same precedent as
+coordinators out of the loaded config entries' ``runtime_data``, following the same precedent as
 ``fan_status.py``: a small, dependency-light plain-function module (no HA
 subclassing) that multiple call sites can share instead of each hand-rolling
 the same lookup. The functions carry no module-level globals — the one piece
@@ -22,8 +22,13 @@ which is setup/teardown orchestration only; nothing else in this codebase
 imports from ``__init__.py``. ``get_coordinator``/``iter_coordinators`` serve
 both Gap 4 (dashboard/API resolving the RIGHT entry) and the future Zone
 Influence feature (enumerating siblings, resolving one by entry_id) off the
-same underlying data (``hass.data[DOMAIN]``, populated at
-``__init__.py``'s ``hass.data[DOMAIN][entry.entry_id] = coordinator``).
+same underlying data.
+
+Issue #1639 (quality scale runtime-data): each zone's coordinator lives on its own config entry
+(``entry.runtime_data``, set in ``__init__.py``'s ``async_setup_entry()``), not in ``hass.data[DOMAIN]``. A zone
+counts as loaded only while Home Assistant reports its entry LOADED
+(``hass.config_entries.async_loaded_entries(DOMAIN)``, already in the stable ``async_entries()`` order). HA
+drops ``runtime_data`` itself when the entry unloads, so an unloaded or failed zone can never be resolved here.
 """
 
 from __future__ import annotations
@@ -38,7 +43,13 @@ from homeassistant.helpers import issue_registry as ir
 from .const import CONF_FAN_ENTITY, CONF_FAN_MODE, DOMAIN, FAN_MODE_BOTH, FAN_MODE_WHOLE_HOUSE
 
 if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntry
+
     from .coordinator import ClimateAdvisorCoordinator
+
+# Issue #1639: the typed config entry of one zone (``entry.runtime_data`` is its coordinator). A ``type`` alias is
+# evaluated lazily, so this module still imports nothing from coordinator.py at run time.
+type ClimateAdvisorConfigEntry = ConfigEntry[ClimateAdvisorCoordinator]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,14 +111,27 @@ def reset_warning_state(hass: HomeAssistant) -> None:
     hass.data.pop(_WARNED_STATE_KEY, None)
 
 
+def loaded_zones(hass: HomeAssistant) -> dict[str, ClimateAdvisorCoordinator]:
+    """Every loaded zone as ``{entry_id: coordinator}``, in the stable ``async_entries()`` order (Issue #1639).
+
+    The one place that reads ``entry.runtime_data``. An entry that is still setting up, unloading, failed or
+    disabled is not LOADED, so it is not listed.
+    """
+    return {
+        entry.entry_id: entry.runtime_data
+        for entry in hass.config_entries.async_loaded_entries(DOMAIN)
+        if getattr(entry, "runtime_data", None) is not None
+    }
+
+
 def get_coordinator(hass: HomeAssistant, entry_id: str) -> ClimateAdvisorCoordinator | None:
     """Resolve one zone's coordinator by entry_id, or None if not found/unloaded."""
-    return hass.data.get(DOMAIN, {}).get(entry_id)
+    return loaded_zones(hass).get(entry_id)
 
 
 def iter_coordinators(hass: HomeAssistant) -> Iterable[ClimateAdvisorCoordinator]:
     """All currently-loaded zone coordinators."""
-    return hass.data.get(DOMAIN, {}).values()
+    return loaded_zones(hass).values()
 
 
 def list_zones(hass: HomeAssistant) -> list[dict[str, str]]:
@@ -119,16 +143,13 @@ def list_zones(hass: HomeAssistant) -> list[dict[str, str]]:
     ``ClimateAdvisorStatusView.get()`` in ``api.py``). Ordered via
     ``hass.config_entries.async_entries(DOMAIN)`` — the same stable-order
     precedent already used by ``get_default_coordinator()`` above and by
-    ``repairs.py:38,77`` — rather than dict-iteration order over
-    ``hass.data[DOMAIN]``, which is not guaranteed stable across restarts.
-    Only entries with a loaded coordinator are included, matching
-    ``iter_coordinators()``'s scope.
+    ``repairs.py:38,77``. Only entries with a loaded coordinator are included, matching
+    ``iter_coordinators()``'s scope (Issue #1639: ``async_loaded_entries()`` keeps that order).
     """
-    loaded = hass.data.get(DOMAIN, {})
     return [
         {"entry_id": entry.entry_id, "title": entry.title}
-        for entry in hass.config_entries.async_entries(DOMAIN)
-        if entry.entry_id in loaded
+        for entry in hass.config_entries.async_loaded_entries(DOMAIN)
+        if getattr(entry, "runtime_data", None) is not None
     ]
 
 
@@ -208,6 +229,25 @@ def fan_entity_owned_by_other_zone(hass: HomeAssistant, fan_entity: str | None, 
         other_fan = data.get(CONF_FAN_ENTITY)
         if other_fan and str(other_fan).strip().lower() == wanted:
             return True
+    return False
+
+
+def thermostat_owned_by_other_zone(hass: HomeAssistant, climate_entity: str | None, entry_id: str | None) -> bool:
+    """Whether another Climate Advisor zone already runs this thermostat (Issue #1646).
+
+    A zone's unique id is its thermostat, so two zones on one thermostat is a duplicate. Checks both the other
+    zones' unique ids and their stored ``climate_entity`` (an entry can lack a unique id). ``entry_id`` excludes
+    the zone being changed. Reads only this integration's own config entries (HA boundary).
+    """
+    if not climate_entity:
+        return False
+    wanted = str(climate_entity).strip().lower()
+    for other in hass.config_entries.async_entries(DOMAIN):
+        if entry_id is not None and other.entry_id == entry_id:
+            continue
+        for owned in (other.unique_id, (other.data or {}).get("climate_entity")):
+            if owned and str(owned).strip().lower() == wanted:
+                return True
     return False
 
 
@@ -307,72 +347,36 @@ def get_default_coordinator(hass: HomeAssistant, *, context: str | None = None) 
     Defaults to None so any caller that doesn't pass it keeps today's exact
     message text.
     """
-    entries = hass.data.get(DOMAIN, {})
+    entries = loaded_zones(hass)
     if not entries:
         return None
     if len(entries) == 1:
         return next(iter(entries.values()))
 
-    ordered_entries = hass.config_entries.async_entries(DOMAIN)
-    if not ordered_entries:
-        # Defensive: hass.data[DOMAIN] is non-empty but config_entries has no
-        # matching entries — shouldn't happen in practice. Unlike the pre-fix
-        # code it's no longer silent — logged (throttled) rather than
-        # returning None outright. Tie-break is sorted by entry_id (stable,
-        # assigned once by HA and never changes) rather than dict-insertion
-        # order, which is NOT guaranteed stable across restarts.
-        _warn_once(
-            hass,
-            "defensive_empty_config_entries",
-            "Climate Advisor zone fallback: %d zone(s) loaded but "
-            "hass.config_entries.async_entries() returned none — falling "
-            "back to a deterministic entry_id sort. This should not "
-            "normally happen; please file a bug report if it persists.",
-            len(entries),
-        )
-        chosen_id, chosen = sorted(entries.items(), key=lambda kv: kv[0])[0]
-        _raise_ambiguous_issue(hass, request=context, outcome=f'answered with the data of zone "{chosen_id}"')
-        return chosen
-
-    for entry in ordered_entries:
-        coordinator = entries.get(entry.entry_id)
-        if coordinator is not None:
-            _warn_once(
-                hass,
-                f"ambiguous:{entry.entry_id}:{context}",
-                "Multiple Climate Advisor zones are loaded and this request%s did not "
-                "specify a zone — answered with zone %r (entry_id=%s), which may not be "
-                "the zone the caller wanted. To fix it, %s.",
-                f" ({context})" if context else "",
-                _zone_title(hass, entry.entry_id),
-                entry.entry_id,
-                ZONE_PARAM_HINT,
-            )
-            # Issue #813: raised here — at the moment an ambiguous fallback is
-            # actually taken — not unconditionally at zone setup. Issue #1418:
-            # on every such request (only the log line above is throttled).
-            _raise_ambiguous_issue(
-                hass,
-                request=context,
-                outcome=f'answered with the data of zone "{_zone_title(hass, entry.entry_id)}"',
-            )
-            return coordinator
-
-    # Every ordered entry is unloaded/missing from hass.data — fall back to a
-    # deterministic entry_id sort rather than returning None outright. Also
-    # logged (throttled) rather than silent, same as the branch above.
+    # Issue #1639: loaded_zones() is already in async_entries()' stable order, so the first one is the stably-first
+    # loaded zone. (The old "hass.data has a zone that config_entries does not" fallbacks cannot happen any more:
+    # both now come from the same config entries.)
+    entry_id, coordinator = next(iter(entries.items()))
     _warn_once(
         hass,
-        "defensive_no_matching_loaded_entry",
-        "Climate Advisor zone fallback: none of the %d ordered config entries "
-        "matched a loaded coordinator in hass.data — falling back to a "
-        "deterministic entry_id sort. This should not normally happen; "
-        "please file a bug report if it persists.",
-        len(ordered_entries),
+        f"ambiguous:{entry_id}:{context}",
+        "Multiple Climate Advisor zones are loaded and this request%s did not "
+        "specify a zone — answered with zone %r (entry_id=%s), which may not be "
+        "the zone the caller wanted. To fix it, %s.",
+        f" ({context})" if context else "",
+        _zone_title(hass, entry_id),
+        entry_id,
+        ZONE_PARAM_HINT,
     )
-    chosen_id, chosen = sorted(entries.items(), key=lambda kv: kv[0])[0]
-    _raise_ambiguous_issue(hass, request=context, outcome=f'answered with the data of zone "{chosen_id}"')
-    return chosen
+    # Issue #813: raised here — at the moment an ambiguous fallback is
+    # actually taken — not unconditionally at zone setup. Issue #1418:
+    # on every such request (only the log line above is throttled).
+    _raise_ambiguous_issue(
+        hass,
+        request=context,
+        outcome=f'answered with the data of zone "{_zone_title(hass, entry_id)}"',
+    )
+    return coordinator
 
 
 def resolve_zone(
@@ -403,7 +407,7 @@ def resolve_zone(
     """
     if entry_id:
         return get_coordinator(hass, entry_id), False
-    entries = hass.data.get(DOMAIN, {})
+    entries = loaded_zones(hass)
     if len(entries) <= 1:
         return get_default_coordinator(hass), False
     if not allow_guess:

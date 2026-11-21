@@ -25,7 +25,7 @@ from custom_components.climate_advisor import night_strategy as ns
 from custom_components.climate_advisor import predictor_v4 as p4
 from custom_components.climate_advisor import v4_shadow
 from custom_components.climate_advisor.api import API_VIEWS, ClimateAdvisorNightStrategyView
-from custom_components.climate_advisor.const import API_NIGHT_STRATEGY, DOMAIN
+from custom_components.climate_advisor.const import API_NIGHT_STRATEGY
 from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
 from custom_components.climate_advisor.operation_timeline import (
     SENTENCES,
@@ -37,6 +37,7 @@ from custom_components.climate_advisor.temperature import display_temp
 from tests.test_night_strategy import BED, GOOD_EVIDENCE, GOOD_VALIDATION, HALL, make_model, outdoor
 from tests.test_night_strategy_replay import _history as replay_history
 from tests.timeline_fixtures import TZ, make_snapshot
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 NOW = datetime(2026, 11, 6, 19, 0, tzinfo=TZ)  # evening, bedtime 20:30 (fixture config), wake 06:30
 START = datetime(2026, 11, 6, 20, 30, tzinfo=TZ)
@@ -446,7 +447,7 @@ def test_the_payload_reads_the_cache_and_answers_not_ready_before_a_night_is_in_
 # ------------------------------------------------------------------------------------ endpoint
 def _request(coordinators: dict, query: dict | None = None):
     hass = MagicMock()
-    hass.data = {DOMAIN: coordinators}
+    set_loaded_zones(hass, coordinators)
     hass.config_entries.async_entries = MagicMock(return_value=[])
     req = MagicMock()
     req.app = {"hass": hass}

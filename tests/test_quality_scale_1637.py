@@ -77,10 +77,10 @@ def _entities(platform):
     coord = MagicMock()
     coord.config = {}
     coord.data = {}
-    hass = MagicMock()
-    hass.data = {DOMAIN: {"zone1": coord}}
+    entry = _entry()
+    entry.runtime_data = coord  # Issue #1639: the platforms read the zone's coordinator from its entry
     added: list = []
-    asyncio.run(platform.async_setup_entry(hass, _entry(), added.extend))
+    asyncio.run(platform.async_setup_entry(MagicMock(), entry, added.extend))
     return added
 
 
@@ -140,7 +140,7 @@ def test_update_failed_message_in_every_language():
 
 # ── Batch 2 (#1637): icons.json, ENUM device classes, services in async_setup, service errors ──
 
-_ENUM_SENSORS = {"day_type", "trend_direction", "occupancy_mode"}
+_ENUM_SENSORS = {"day_type", "trend_direction", "occupancy_mode", "ai_status"}  # ai_status: Issue #1648
 
 
 def _strings() -> dict:

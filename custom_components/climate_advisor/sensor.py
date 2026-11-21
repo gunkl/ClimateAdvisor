@@ -8,14 +8,17 @@ and other automations.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.util import dt as dt_util
 
 from . import i18n
 from .automation import active_thresholds_for
@@ -59,29 +62,35 @@ from .const import (
     DAY_TYPE_HOT,
     DAY_TYPE_MILD,
     DAY_TYPE_WARM,
-    DOMAIN,
     OCCUPANCY_AWAY,
     OCCUPANCY_GUEST,
     OCCUPANCY_HOME,
     OCCUPANCY_VACATION,
+    TEMP_SOURCE_INPUT_NUMBER,
+    TEMP_SOURCE_SENSOR,
 )
 from .coordinator import ClimateAdvisorCoordinator
 from .entity import ClimateAdvisorEntity
 from .temperature import FAHRENHEIT, convert_delta, display_delta, display_temp
+from .zone_registry import ClimateAdvisorConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
 # Coordinator-driven: entities never poll on their own, so no limit on parallel updates (quality scale, #1637).
 PARALLEL_UPDATES = 0
 
+# Home Assistant's ``STATE_UNAVAILABLE``, spelled out so the lightweight test stubs (a mocked ``homeassistant.const``)
+# compare against the real value.
+_STATE_UNAVAILABLE = "unavailable"
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: ClimateAdvisorConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Climate Advisor sensors from a config entry."""
-    coordinator: ClimateAdvisorCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ClimateAdvisorCoordinator = entry.runtime_data
 
     entities = [
         ClimateAdvisorDayTypeSensor(coordinator, entry),
@@ -127,6 +136,50 @@ class ClimateAdvisorBaseSensor(ClimateAdvisorEntity, SensorEntity):
         """Initialize the sensor (unique id, translated name and zone device come from ClimateAdvisorEntity)."""
         super().__init__(coordinator, entry, key)
         self._key = key
+
+    # --- Availability (quality scale entity-unavailable, Issue #1642) ---------------------------------------------
+    # Every sensor is unavailable while the coordinator's last update failed (CoordinatorEntity). A sensor that shows
+    # a reading of the house (Indoor / Outdoor Temperature, Forecast High / Low) is also unavailable while the source
+    # behind that reading is gone, instead of showing the last value as if it were current. Plan and status sensors
+    # stay available: Climate Advisor keeps deciding on its fallbacks, and Status names the outage.
+    _source_check_failed_warned: bool = False
+
+    def _source_entities(self) -> list[str | None]:
+        """The configured entities this sensor's reading comes from; a change of one re-checks availability."""
+        return []
+
+    def _source_lost(self) -> bool:
+        """True while the source behind this sensor's reading is gone (never, for a plan or status sensor)."""
+        return False
+
+    @property
+    def available(self) -> bool:
+        """Unavailable while the coordinator's last update failed or this sensor's source is gone (Issue #1642)."""
+        if not super().available:
+            return False
+        try:
+            return not self._source_lost()
+        except Exception:  # noqa: BLE001 - an availability check must never break the state write
+            if not self._source_check_failed_warned:
+                _LOGGER.warning("Source check failed: sensor=%s (shown as available)", self._key, exc_info=True)
+                self._source_check_failed_warned = True
+            return True
+
+    async def async_added_to_hass(self) -> None:
+        """Also follow the source entities, so a lost or recovered source shows at once (Issue #1642)."""
+        await super().async_added_to_hass()
+        sources = sorted({entity_id for entity_id in self._source_entities() if entity_id})
+        if sources:
+            self.async_on_remove(async_track_state_change_event(self.hass, sources, self._async_source_changed))
+
+    @callback
+    def _async_source_changed(self, _event: Any) -> None:
+        """Write the state only when the availability flips; the value itself follows the coordinator's cycle."""
+        current = self.hass.states.get(self.entity_id) if self.entity_id else None
+        if current is None:
+            return
+        if (current.state == _STATE_UNAVAILABLE) == self.available:
+            self.async_write_ha_state()
 
     def _lang(self) -> str:
         """The language HA uses for entity names (D2): a shipped language, ``en`` when unreadable."""
@@ -279,8 +332,28 @@ class ClimateAdvisorNextAutomationSensor(_ProseSensor):
         )
 
 
+def _aware_datetime(value: Any) -> datetime | None:
+    """A timezone-aware datetime for a TIMESTAMP sensor (Issue #1648), or None.
+
+    Accepts a datetime or an ISO string; a naive one is read as Home Assistant's local time. Anything else is None.
+    """
+    if isinstance(value, str) and value:
+        value = dt_util.parse_datetime(value)
+    if not isinstance(value, datetime):
+        return None
+    return dt_util.as_local(value) if value.tzinfo is None else value
+
+
 class ClimateAdvisorNextAutomationTimeSensor(ClimateAdvisorBaseSensor):
-    """Sensor showing when the next automation action will execute."""
+    """Sensor showing when the next automation action will execute.
+
+    TIMESTAMP (quality scale entity-device-class, Issue #1648): the state is the moment itself, so a card shows it in
+    the viewer's language and zone ("in 2 hours"), and an automation can trigger on it. The coordinator's value is the
+    clock label (``status.clock``) the dashboard shows; its ``t`` parameter carries the datetime. No next action
+    (``none``) reads as unknown.
+    """
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(self, coordinator, entry):
         super().__init__(
@@ -288,6 +361,13 @@ class ClimateAdvisorNextAutomationTimeSensor(ClimateAdvisorBaseSensor):
             entry,
             ATTR_NEXT_AUTOMATION_TIME,
         )
+
+    @property
+    def native_value(self) -> datetime | None:
+        """The next automation action's time, timezone-aware."""
+        msg = i18n.msg_of(self._raw())
+        param = msg.params.get("t") if msg is not None else None
+        return _aware_datetime(param.dt if isinstance(param, i18n.Time) else None)
 
 
 class ClimateAdvisorBriefingSensor(ClimateAdvisorBaseSensor):
@@ -413,12 +493,22 @@ class ClimateAdvisorOccupancySensor(ClimateAdvisorBaseSensor):
 
 
 class ClimateAdvisorLastActionTimeSensor(ClimateAdvisorBaseSensor):
-    """Sensor showing when the last HVAC action was taken (diagnostic: about Climate Advisor itself, #1637)."""
+    """Sensor showing when the last HVAC action was taken (diagnostic: about Climate Advisor itself, #1637).
+
+    TIMESTAMP (quality scale entity-device-class, Issue #1648): the engine records an ISO string (also what the
+    dashboard and the saved state hold, unchanged); the sensor hands Home Assistant the aware datetime.
+    """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, ATTR_LAST_ACTION_TIME)
+
+    @property
+    def native_value(self) -> datetime | None:
+        """The last action's time, timezone-aware (None before the first action)."""
+        return _aware_datetime(self._raw())
 
 
 class ClimateAdvisorLastActionReasonSensor(ClimateAdvisorBaseSensor):
@@ -510,6 +600,10 @@ class ClimateAdvisorAIStatusSensor(ClimateAdvisorBaseSensor):
     """Sensor showing the AI integration status (diagnostic: about Climate Advisor itself, #1637)."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Quality scale entity-device-class (#1648): the fixed set ``ClaudeAPIClient.get_status()`` reports (the state
+    # names are in strings.json). The states are unchanged.
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["active", "inactive", "error", "disabled", "circuit_open", "budget_exceeded"]
 
     def __init__(self, coordinator, entry):
         """Initialize the AI status sensor."""
@@ -550,6 +644,18 @@ class ClimateAdvisorIndoorTempSensor(ClimateAdvisorBaseSensor):
         """Initialize the indoor temperature sensor."""
         super().__init__(coordinator, entry, ATTR_INDOOR_TEMP)
 
+    def _source_entities(self) -> list[str | None]:
+        config = self.coordinator.config
+        return [config.get("climate_entity"), config.get("indoor_temp_entity"), config.get("sleep_indoor_temp_entity")]
+
+    def _source_lost(self) -> bool:
+        """No indoor reading: neither the configured sensor nor the thermostat answers now (Issue #1642).
+
+        A dedicated sensor that fails while the thermostat still reads the room is not a loss: the thermostat's
+        reading is a real one, and it is what Climate Advisor controls on.
+        """
+        return self._raw() is None or self.coordinator._get_indoor_temp() is None
+
 
 class ClimateAdvisorOutdoorTempSensor(ClimateAdvisorBaseSensor):
     """Current outdoor temperature sensor, tracked by HA Recorder for long-term history."""
@@ -561,6 +667,24 @@ class ClimateAdvisorOutdoorTempSensor(ClimateAdvisorBaseSensor):
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the outdoor temperature sensor."""
         super().__init__(coordinator, entry, ATTR_OUTDOOR_TEMP)
+
+    def _source_entities(self) -> list[str | None]:
+        config = self.coordinator.config
+        dedicated = config.get("outdoor_temp_source") in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+        return [config.get("weather_entity"), config.get("outdoor_temp_entity") if dedicated else None]
+
+    def _source_lost(self) -> bool:
+        """No live outdoor reading (Issue #1642).
+
+        With the weather service down, Climate Advisor keeps going on the kept forecast's value (Issue #1337); that
+        is a forecast, not a reading, so this sensor shows unavailable unless a dedicated outdoor sensor still reads.
+        A dedicated sensor that fails while the weather service is up falls back to the service: still a reading.
+        """
+        if self._raw() is None:
+            return True
+        if not self.coordinator._weather_attrs_and_down()[1]:
+            return False
+        return self.coordinator._live_dedicated_outdoor_temp() is None
 
 
 class ClimateAdvisorEffectiveTargetTempSensor(ClimateAdvisorBaseSensor):
@@ -655,7 +779,20 @@ class ClimateAdvisorCoolThresholdSensor(_ClimateAdvisorThresholdSensor):
         super().__init__(coordinator, entry, ATTR_COOL_THRESHOLD)
 
 
-class ClimateAdvisorForecastHighSensor(ClimateAdvisorBaseSensor):
+class _ForecastTempSensor(ClimateAdvisorBaseSensor):
+    """Today's forecast high or low (Issue #1642: unavailable while the weather service is missing or unavailable).
+
+    Climate Advisor still plans on the kept forecast, and Day Type and the plan sensors keep showing that plan.
+    """
+
+    def _source_entities(self) -> list[str | None]:
+        return [self.coordinator.config.get("weather_entity")]
+
+    def _source_lost(self) -> bool:
+        return self._raw() is None or self.coordinator._weather_attrs_and_down()[1]
+
+
+class ClimateAdvisorForecastHighSensor(_ForecastTempSensor):
     """Today's forecast high temperature, tracked by HA Recorder for long-term history."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -667,7 +804,7 @@ class ClimateAdvisorForecastHighSensor(ClimateAdvisorBaseSensor):
         super().__init__(coordinator, entry, ATTR_FORECAST_HIGH)
 
 
-class ClimateAdvisorForecastLowSensor(ClimateAdvisorBaseSensor):
+class ClimateAdvisorForecastLowSensor(_ForecastTempSensor):
     """Today's forecast low temperature, tracked by HA Recorder for long-term history."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT

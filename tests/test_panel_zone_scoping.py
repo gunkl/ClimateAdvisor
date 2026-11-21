@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from custom_components.climate_advisor import zone_registry
 from custom_components.climate_advisor.api import API_VIEWS, ZONELESS_VIEWS
 from custom_components.climate_advisor.const import DOMAIN, PANEL_FRONTEND_PATH
 from custom_components.climate_advisor.dashboard_api import DASHBOARD_VIEWS
@@ -178,7 +179,10 @@ class TestPanelTeardownScoping:
         assert ok, reason
         # The surviving zone must still be resolvable — its coordinator was
         # never touched by unloading the other zone.
-        assert fake_hass.data[DOMAIN][zones["zone_0"]["entry"].entry_id] is zones["zone_0"]["coordinator"]
+        survivor = zones["zone_0"]
+        assert zone_registry.get_coordinator(fake_hass, survivor["entry"].entry_id) is survivor["coordinator"]
+        assert zone_registry.get_coordinator(fake_hass, zones["zone_1"]["entry"].entry_id) is None
+        assert not hasattr(zones["zone_1"]["entry"], "runtime_data")  # Issue #1639: nothing stale left on the entry
 
     def test_panel_and_services_removed_only_after_last_zone_unloads(self):
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
@@ -213,7 +217,8 @@ class TestPanelTeardownScoping:
             )
         )
         assert ok, reason
-        assert fake_hass.data[DOMAIN] == {}
+        assert zone_registry.loaded_zones(fake_hass) == {}
+        assert DOMAIN not in fake_hass.data  # Issue #1639: zones never live in hass.data[DOMAIN]
 
     def test_panel_registration_flag_cleared_after_last_zone_unloads(self):
         """The _PANEL_HASS_DATA_KEY guard flag must reset so a later zone can re-register.
@@ -228,9 +233,9 @@ class TestPanelTeardownScoping:
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=1)
         assert fake_hass.data.get(_PANEL_HASS_DATA_KEY) is True
 
-        from custom_components.climate_advisor import async_unload_entry
+        from tools.sim_harness.build_coordinator import async_unload_entry_like_ha
 
-        run_coro(async_unload_entry(fake_hass, zones["zone_0"]["entry"]))
+        run_coro(async_unload_entry_like_ha(fake_hass, zones["zone_0"]["entry"]))
 
         assert _PANEL_HASS_DATA_KEY not in fake_hass.data
         assert PANEL_FRONTEND_PATH not in fake_hass.data.get("_panels", {})

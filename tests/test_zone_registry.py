@@ -15,31 +15,41 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from custom_components.climate_advisor import zone_registry
-from custom_components.climate_advisor.const import DOMAIN
+from tools.sim_harness.ha_stubs import ConfigEntry, ConfigEntryState
 
 
 def _make_hass(coordinators: dict[str, MagicMock], ordered_entry_ids: list[str] | None = None) -> MagicMock:
-    """Build a fake hass with hass.data[DOMAIN] and a stable async_entries() order.
+    """Build a fake hass whose config entries are the zones (Issue #1639: ``entry.runtime_data``).
 
-    ordered_entry_ids, when given, drives hass.config_entries.async_entries()'s
-    return order — independent of hass.data[DOMAIN]'s (a plain dict's) own
-    iteration order, so tests can prove the fallback uses the CORRECT stable
-    source, not whatever a dict happens to do.
+    ``ordered_entry_ids``, when given, is the config entries' stable registration order
+    (``async_entries()``); only the ids in ``coordinators`` are LOADED, each with its coordinator as
+    ``runtime_data``, so an id listed only in ``ordered_entry_ids`` models an entry that is registered but
+    still setting up (or unloaded). ``coordinators``' own dict order never drives a result, so tests can
+    prove the stable order is the one used. Without ``ordered_entry_ids`` the order is ``coordinators``'.
     """
     hass = MagicMock()
-    hass.data = {DOMAIN: dict(coordinators)}
-
-    if ordered_entry_ids is not None:
-        entries = []
-        for entry_id in ordered_entry_ids:
-            entry = MagicMock()
-            entry.entry_id = entry_id
-            entries.append(entry)
-        hass.config_entries.async_entries = MagicMock(return_value=entries)
-    else:
-        hass.config_entries.async_entries = MagicMock(return_value=[])
-
+    hass.data = {}
+    order = list(coordinators) if ordered_entry_ids is None else list(ordered_entry_ids)
+    entries = []
+    for entry_id in order:
+        entry = ConfigEntry(entry_id=entry_id, title=entry_id)
+        if entry_id in coordinators:
+            entry.runtime_data = coordinators[entry_id]
+            entry.state = ConfigEntryState.LOADED
+        entries.append(entry)
+    hass.config_entries.async_entries = MagicMock(return_value=entries)
+    hass.config_entries.async_loaded_entries = MagicMock(
+        side_effect=lambda domain=None: [e for e in entries if e.state == ConfigEntryState.LOADED]
+    )
     return hass
+
+
+def _unload(hass: MagicMock, entry_id: str) -> None:
+    """Unload one zone the way HA does: its entry leaves LOADED and loses its ``runtime_data``."""
+    for entry in hass.config_entries.async_entries():
+        if entry.entry_id == entry_id:
+            del entry.runtime_data
+            entry.state = ConfigEntryState.NOT_LOADED
 
 
 class TestGetCoordinator:
@@ -106,7 +116,7 @@ class TestGetDefaultCoordinatorMultiZoneFallback:
     def test_deterministic_first_entry_by_config_entries_order(self):
         """Fallback picks the FIRST entry per async_entries()'s stable order.
 
-        entry_b is inserted into hass.data[DOMAIN] first (so plain dict
+        entry_b is listed first in the coordinators dict (so plain dict
         iteration order would favor it) but async_entries() reports entry_a
         first — the fallback must follow async_entries(), not dict order.
         """
@@ -144,30 +154,6 @@ class TestGetDefaultCoordinatorMultiZoneFallback:
             ordered_entry_ids=["entry_b", "entry_c", "entry_a"],
         )
         assert zone_registry.get_default_coordinator(hass) is coord_b
-
-    def test_falls_back_to_dict_order_when_async_entries_empty(self):
-        """Defensive path: hass.data non-empty but async_entries() returns nothing."""
-        coord_a = MagicMock()
-        hass = _make_hass({"entry_a": coord_a, "entry_b": MagicMock()}, ordered_entry_ids=[])
-        result = zone_registry.get_default_coordinator(hass)
-        assert result is not None
-
-    def test_defensive_empty_config_entries_path_logs_warning(self, caplog):
-        """N1: the previously-silent 'async_entries() returned nothing' path now warns."""
-        hass = _make_hass({"entry_a": MagicMock(), "entry_b": MagicMock()}, ordered_entry_ids=[])
-        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.zone_registry"):
-            zone_registry.get_default_coordinator(hass)
-        assert any("async_entries() returned none" in rec.message for rec in caplog.records)
-
-    def test_defensive_no_matching_loaded_entry_path_logs_warning(self, caplog):
-        """N1: the previously-silent 'no ordered entry matched hass.data' path now warns."""
-        hass = _make_hass(
-            {"entry_a": MagicMock(), "entry_b": MagicMock()},
-            ordered_entry_ids=["entry_pending_1", "entry_pending_2"],
-        )
-        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.zone_registry"):
-            zone_registry.get_default_coordinator(hass)
-        assert any("matched a loaded coordinator" in rec.message for rec in caplog.records)
 
 
 class TestGetDefaultCoordinatorWarningThrottle:
@@ -222,7 +208,7 @@ class TestGetDefaultCoordinatorWarningThrottle:
             # entry_a unloads mid-run (e.g. that zone's config entry removed) —
             # the ordered-entries loop now resolves to entry_b instead. Two
             # zones (b, c) still remain, so this stays on the multi-zone branch.
-            del hass.data[DOMAIN]["entry_a"]
+            _unload(hass, "entry_a")
             zone_registry.get_default_coordinator(hass)
 
         ambiguous_records = [rec for rec in caplog.records if "Multiple Climate Advisor zones" in rec.message]
@@ -252,50 +238,15 @@ class TestGetDefaultCoordinatorWarningThrottle:
         hass = _make_hass({"entry_a": MagicMock()})
         zone_registry.reset_warning_state(hass)  # should not raise
 
-    def test_defensive_empty_config_entries_picks_lowest_entry_id_regardless_of_dict_order(self):
-        """Defensive path (async_entries() empty): tie-break must sort by entry_id, not
-        dict-insertion order. Same zones inserted in two different orders must both
-        resolve to the SAME coordinator (the one whose entry_id sorts first)."""
-        coord_a, coord_b, coord_c = MagicMock(), MagicMock(), MagicMock()
-
-        hass_forward = _make_hass(
-            {"entry_a": coord_a, "entry_b": coord_b, "entry_c": coord_c},
-            ordered_entry_ids=[],
-        )
-        hass_scrambled = _make_hass(
-            {"entry_c": coord_c, "entry_a": coord_a, "entry_b": coord_b},
-            ordered_entry_ids=[],
-        )
-
-        assert zone_registry.get_default_coordinator(hass_forward) is coord_a
-        assert zone_registry.get_default_coordinator(hass_scrambled) is coord_a
-
-    def test_defensive_no_matching_loaded_entry_picks_lowest_entry_id_regardless_of_dict_order(self):
-        """Defensive path (no ordered entry matches hass.data): same determinism proof
-        as above, but via the second fallback branch (ordered entries all unloaded)."""
-        coord_a, coord_b, coord_c = MagicMock(), MagicMock(), MagicMock()
-
-        hass_forward = _make_hass(
-            {"entry_a": coord_a, "entry_b": coord_b, "entry_c": coord_c},
-            ordered_entry_ids=["entry_pending_1", "entry_pending_2"],
-        )
-        hass_scrambled = _make_hass(
-            {"entry_c": coord_c, "entry_a": coord_a, "entry_b": coord_b},
-            ordered_entry_ids=["entry_pending_1", "entry_pending_2"],
-        )
-
-        assert zone_registry.get_default_coordinator(hass_forward) is coord_a
-        assert zone_registry.get_default_coordinator(hass_scrambled) is coord_a
-
-    def test_skips_config_entries_not_yet_in_hass_data(self):
-        """async_entries() may list an entry mid-setup, before hass.data[DOMAIN] has it —
+    def test_skips_config_entries_not_yet_loaded(self):
+        """async_entries() may list an entry mid-setup, before it is LOADED with its runtime_data —
         the fallback must skip past it to the next entry that IS actually loaded."""
         coord_a = MagicMock()
         hass = _make_hass(
             {"entry_a": coord_a},
             ordered_entry_ids=["entry_pending", "entry_a"],
         )
-        # len(hass.data[DOMAIN]) is 1 here, so this actually exercises the
+        # One zone is loaded here, so this actually exercises the
         # single-zone convenience path — add a second loaded zone to force
         # the multi-zone branch while still including an unloaded entry.
         coord_b = MagicMock()
@@ -561,3 +512,21 @@ class TestAmbiguousCardSaysWhatAndWhy:
             # hassfest rejects anything that reads as HTML in a translation string (CI "validate", #1427)
             assert "<" not in text and ">" not in text, name
             assert "/api/climate_advisor/status" in text, name
+
+
+class TestOwnershipAndTitleEdges:
+    """No entity named means nothing to own; an unknown zone's title falls back to its id (Issues #1144, #1646)."""
+
+    def test_no_fan_entity_is_never_owned(self) -> None:
+        hass = _make_hass({"a": MagicMock()})
+        assert zone_registry.fan_entity_owned_by_other_zone(hass, None) is False
+        assert zone_registry.fan_entity_owned_by_other_zone(hass, "") is False
+
+    def test_no_thermostat_is_never_owned(self) -> None:
+        hass = _make_hass({"a": MagicMock()})
+        assert zone_registry.thermostat_owned_by_other_zone(hass, None, None) is False
+        assert zone_registry.thermostat_owned_by_other_zone(hass, "", "a") is False
+
+    def test_title_of_an_unknown_zone_is_its_entry_id(self) -> None:
+        hass = _make_hass({"a": MagicMock()})
+        assert zone_registry._zone_title(hass, "missing") == "missing"

@@ -37,12 +37,12 @@ from custom_components.climate_advisor.api import (
     ClimateAdvisorForceReclassifyView,
     ClimateAdvisorToggleAutomationView,
 )
-from custom_components.climate_advisor.const import DOMAIN
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 
 def _make_request(coordinators: dict[str, MagicMock], entry_id: str | None = None) -> MagicMock:
     hass = MagicMock()
-    hass.data = {DOMAIN: dict(coordinators)}
+    set_loaded_zones(hass, dict(coordinators))
     # No second zone in these tests needs the async_entries()-driven fallback
     # (see test_zone_registry.py for that path in isolation) — an empty list
     # here would only matter if len(coordinators) > 1 and entry_id is absent,
@@ -199,7 +199,7 @@ class TestAmbiguousZonePostRefusal:
 
     def _make_ambiguous_request(self, coordinators: dict[str, MagicMock]) -> MagicMock:
         hass = MagicMock()
-        hass.data = {DOMAIN: dict(coordinators)}
+        set_loaded_zones(hass, dict(coordinators))
         entries = []
         for entry_id in coordinators:
             entry = MagicMock()

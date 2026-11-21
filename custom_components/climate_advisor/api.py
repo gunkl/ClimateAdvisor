@@ -1895,6 +1895,13 @@ class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
 
             # Never log the token — log only the HTTP status
             _LOGGER.warning("GitHub issue submission: API returned status %d", resp.status)
+            if resp.status == 401:
+                # Issue #1643: the token was revoked or expired; ask the owner for a new one.
+                from .reauth import async_request_reauth  # noqa: PLC0415
+
+                async_request_reauth(
+                    hass, hass.config_entries.async_get_entry(getattr(coordinator, "_entry_id", "")), CONF_GITHUB_TOKEN
+                )
             return self.json(
                 {
                     "success": False,

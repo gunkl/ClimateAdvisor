@@ -29,7 +29,7 @@
         Tomorrow: Stable (84°F)
     ''',
     'fan': 'disabled',
-    'next_automation': 'No more actions today @ ',
+    'next_automation': 'No more actions today @ unknown',
     'next_user_action': "You're away — the house says it's fine, promise.",
     'notifications': list([
       dict({
@@ -87,7 +87,7 @@
         Tomorrow: Stable (29°C)
     ''',
     'fan': 'disabled',
-    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_automation': 'Morning wake-up check @ 2026-07-15T06:30:00+00:00',
     'next_user_action': 'Open windows at 6:30 AM',
     'notifications': list([
       dict({
@@ -145,7 +145,7 @@
         Tomorrow: Stable (72°F)
     ''',
     'fan': 'nat-vent (session active, fan idle)',
-    'next_automation': 'Bedtime check @ 10:30 PM',
+    'next_automation': 'Bedtime check @ 2026-07-15T22:30:00+00:00',
     'next_user_action': 'Open windows at 10:00 AM',
     'status': 'nat-vent',
   })
@@ -185,7 +185,7 @@
         Tomorrow: Stable (41°F)
     ''',
     'fan': 'disabled',
-    'next_automation': 'Morning wake-up — restore heat comfort @ 6:30 AM',
+    'next_automation': 'Morning wake-up — restore heat comfort @ 2026-07-15T06:30:00+00:00',
     'next_user_action': 'Keep doors closed.',
     'notifications': list([
       dict({
@@ -235,7 +235,7 @@
         Tomorrow: Stable (62°F)
     ''',
     'fan': 'disabled',
-    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_automation': 'Morning wake-up check @ 2026-07-15T06:30:00+00:00',
     'next_user_action': 'Comfortable — no action needed.',
     'notifications': list([
       dict({
@@ -291,7 +291,7 @@
         Tomorrow: Stable (96°F)
     ''',
     'fan': 'disabled',
-    'next_automation': 'Morning wake-up — restore cool comfort @ 6:30 AM',
+    'next_automation': 'Morning wake-up — restore cool comfort @ 2026-07-15T06:30:00+00:00',
     'next_user_action': 'Open windows at 6:30 AM',
     'notifications': list([
       dict({
@@ -347,7 +347,7 @@
         Tomorrow: Stable (72°F)
     ''',
     'fan': 'disabled',
-    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_automation': 'Morning wake-up check @ 2026-07-15T06:30:00+00:00',
     'next_user_action': 'Open windows at 10:00 AM',
     'notifications': list([
       dict({
@@ -404,7 +404,7 @@
         Tomorrow: Stable (84°F)
     ''',
     'fan': 'disabled',
-    'next_automation': 'Morning wake-up check @ 6:30 AM',
+    'next_automation': 'Morning wake-up check @ 2026-07-15T06:30:00+00:00',
     'next_user_action': 'Open windows at 6:30 AM',
     'notifications': list([
       dict({
@@ -462,7 +462,7 @@
           Tomorrow: Stable (84°F)
       ''',
       'fan': 'disabled',
-      'next_automation': 'Morning wake-up check @ 6:30 AM',
+      'next_automation': 'Morning wake-up check @ 2026-07-15T06:30:00+00:00',
       'next_user_action': 'Open windows at 6:30 AM',
       'status': 'active',
     }),
@@ -499,7 +499,7 @@
           Tomorrow: Stable (84°F)
       ''',
       'fan': 'disabled',
-      'next_automation': 'Bedtime check @ 10:30 PM',
+      'next_automation': 'Bedtime check @ 2026-07-15T22:30:00+00:00',
       'next_user_action': 'Comfortable — no action needed.',
       'status': 'active',
     }),
@@ -536,7 +536,7 @@
           Tomorrow: Stable (84°F)
       ''',
       'fan': 'disabled',
-      'next_automation': 'Bedtime check @ 10:30 PM',
+      'next_automation': 'Bedtime check @ 2026-07-15T22:30:00+00:00',
       'next_user_action': 'Comfortable — no action needed.',
       'status': 'active',
     }),

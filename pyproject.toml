@@ -26,8 +26,11 @@ test-ha = [
     # Snapshot tests of occupant-facing text (Issue #945). Also installed transitively by the
     # plugin; named here so a plugin upgrade that drops it cannot silently remove it.
     "syrupy>=5",
-    # Coverage for the README badges (Issue #1343, .github/workflows/badges.yml); not used by the PR jobs.
+    # Coverage for the README badges (Issue #1343) and the per-module coverage ratchet (Issue #1644).
     "pytest-cov>=4.0",
+    # Strict typing ratchet (Issue #1645, tools/typing_ratchet.py). In this group, not `test`, because mypy has to see
+    # the real Home Assistant package: under `test` homeassistant is only a runtime stub.
+    "mypy>=2.4",
 ]
 
 [tool.uv]
@@ -64,6 +67,38 @@ select = ["E", "W", "F", "I", "UP", "B", "SIM", "T20", "ASYNC"]
 [tool.coverage.run]
 # Issue #1343 (badges.yml): relative paths so the unit and real-HA tiers' data combine into one report.
 relative_files = true
+
+# Issue #1645 (Platinum strict-typing): Home Assistant core's own mypy settings, its general settings plus the strict
+# set it applies to every module listed in its .strict-typing. Run through `python tools/typing_ratchet.py` (real-HA
+# environment), which checks the whole package with these settings and requires zero errors only in the modules
+# listed in .strict-typing; a bare `mypy` run reports every module's errors.
+[tool.mypy]
+python_version = "3.14"
+platform = "linux"
+mypy_path = "."
+explicit_package_bases = true
+show_error_codes = true
+follow_imports = "normal"
+local_partial_types = true
+strict_equality = true
+strict_bytes = true
+no_implicit_optional = true
+warn_incomplete_stub = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true
+enable_error_code = ["deprecated", "ignore-without-code", "redundant-self", "truthy-iterable"]
+disable_error_code = ["annotation-unchecked", "import-not-found", "import-untyped"]
+extra_checks = false
+# Home Assistant's STRICT_SETTINGS
+check_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+warn_return_any = true
+warn_unreachable = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

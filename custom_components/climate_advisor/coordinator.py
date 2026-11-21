@@ -22895,6 +22895,10 @@ async def _async_attach_shared_ai_client(coord: Any, ai_client_config: dict[str,
             store["skills"] = coord.ai_skills
         coord.ai_skills = store.get("skills") or coord.ai_skills
     client.hass = coord.hass
+    # Issue #1643: a rejected built-in Claude key asks the owner for a new one (install-wide: one card).
+    from .reauth import async_request_ai_key_reauth  # noqa: PLC0415
+
+    client.on_auth_failed = functools.partial(async_request_ai_key_reauth, coord.hass)
     coord.claude_client = client
 
 

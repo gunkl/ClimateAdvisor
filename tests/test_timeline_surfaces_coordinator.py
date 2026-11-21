@@ -17,12 +17,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from custom_components.climate_advisor.api import API_VIEWS, ClimateAdvisorTimelineView
-from custom_components.climate_advisor.const import API_TIMELINE, DOMAIN
+from custom_components.climate_advisor.const import API_TIMELINE
 from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
 from custom_components.climate_advisor.operation_timeline import build_timeline, detail_dict, to_dict
 from custom_components.climate_advisor.temperature import display_temp
 from custom_components.climate_advisor.timeline_surfaces import timeline_api_payload
 from tests.timeline_fixtures import TZ, make_snapshot
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 NOW = datetime(2026, 11, 4, 9, 0, tzinfo=TZ)
 
@@ -33,7 +34,7 @@ def _timeline(**kw):
 
 def _request(coordinators: dict, query: dict | None = None):
     hass = MagicMock()
-    hass.data = {DOMAIN: coordinators}
+    set_loaded_zones(hass, coordinators)
     hass.config_entries.async_entries = MagicMock(return_value=[])
     req = MagicMock()
     req.app = {"hass": hass}

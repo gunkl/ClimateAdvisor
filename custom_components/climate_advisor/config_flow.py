@@ -18,7 +18,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector, translation
 
-from . import ai_settings_sync, prediction_engines, zone_registry
+from . import ai_settings_sync, prediction_engines, reauth, zone_registry
 from .const import (
     AI_MODELS,
     AI_PROVIDER_BUILTIN_CLAUDE,
@@ -131,6 +131,7 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    GITHUB_API_BASE,
     HVAC_FAN_RESTRICT_BOTH,
     HVAC_FAN_RESTRICT_COOL,
     HVAC_FAN_RESTRICT_HEAT,
@@ -642,6 +643,49 @@ def _setpoint_warnings(hass: HomeAssistant, climate_entity: str | None, values_f
     )
 
 
+def _core_entities_schema() -> vol.Schema:
+    """The setup wizard's first step: weather service, thermostat, notify service (also the reconfigure form)."""
+    return vol.Schema(
+        {
+            vol.Required("weather_entity"): selector.EntitySelector(selector.EntitySelectorConfig(domain="weather")),
+            vol.Required("climate_entity"): selector.EntitySelector(selector.EntitySelectorConfig(domain="climate")),
+            vol.Required("notify_service", default="notify.notify"): selector.TextSelector(),
+        }
+    )
+
+
+async def _async_check_github_token(hass: HomeAssistant, token: str, repo: str) -> str | None:
+    """Issue #1643: test a GitHub token by reading the zone's repository. Returns an error key, or None when usable.
+
+    Only a 401 (the token itself is refused) or no answer at all counts as a failure; any other answer (a private
+    repository the token cannot see, a rate limit) is left to the submission, which reports it. The token is never
+    logged.
+    """
+    if not token:
+        return "github_token_invalid"
+    import aiohttp  # noqa: PLC0415
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession  # noqa: PLC0415
+
+    url = f"{GITHUB_API_BASE}/repos/{repo}" if repo else f"{GITHUB_API_BASE}/user"
+    try:
+        resp = await async_get_clientsession(hass).get(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=aiohttp.ClientTimeout(total=15),
+        )
+    except Exception:  # noqa: BLE001 - shown as "could not reach GitHub", never raised
+        _LOGGER.info("GitHub token check: no answer from GitHub")
+        return "github_unreachable"
+    if resp.status == 401:
+        _LOGGER.info("GitHub token check: token refused (status 401)")
+        return "github_token_invalid"
+    return None
+
+
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
@@ -681,20 +725,114 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 return await self.async_step_unit()
 
+        return self.async_show_form(step_id="user", data_schema=_core_entities_schema(), errors=errors)
+
+    # ---- Reconfigure (Issue #1646) ----
+
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
+        """Change a zone's thermostat, weather service or notify service without deleting the zone (Issue #1646).
+
+        The zone keeps its entry id, so its learning, history and settings (per-zone files named by entry id) stay:
+        owner decision on #1646, "keep the data" (a new thermostat in the same house is the same house). The unique
+        id follows the thermostat; a thermostat another zone already runs is refused, as in setup.
+        """
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if not _NOTIFY_SERVICE_RE.match(user_input.get("notify_service", "")):
+                errors["notify_service"] = "invalid_notify_service"
+            if not errors:
+                climate = user_input["climate_entity"]
+                if zone_registry.thermostat_owned_by_other_zone(self.hass, climate, entry.entry_id):
+                    _LOGGER.info("Reconfigure refused: thermostat already has a zone — zone=%s", entry.title)
+                    return self.async_abort(reason="already_configured")
+                _LOGGER.info(
+                    "Zone reconfigured — zone=%s thermostat_changed=%s weather_changed=%s (learning kept)",
+                    entry.title,
+                    climate != entry.data.get("climate_entity"),
+                    user_input.get("weather_entity") != entry.data.get("weather_entity"),
+                )
+                return self.async_update_reload_and_abort(entry, unique_id=climate, data_updates=user_input)
+
+        schema = self.add_suggested_values_to_schema(_core_entities_schema(), {**entry.data, **(user_input or {})})
         return self.async_show_form(
-            step_id="user",
+            step_id="reconfigure",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"zone": entry.title},
+        )
+
+    # ---- Reauthentication (Issue #1643) ----
+
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> config_entries.ConfigFlowResult:
+        """A stored credential was rejected (``reauth.async_request_reauth``); ask for a new one."""
+        credential = entry_data.get(reauth.REAUTH_CREDENTIAL, CONF_AI_API_KEY)
+        if credential == CONF_GITHUB_TOKEN:
+            return await self.async_step_reauth_github_token()
+        return await self.async_step_reauth_ai_key()
+
+    async def async_step_reauth_ai_key(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """New built-in Claude API key: tested, then saved to every zone (the key is install-wide)."""
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            key = str(user_input.get(CONF_AI_API_KEY, "")).strip()
+            try:
+                from .claude_api import ClaudeAPIClient  # noqa: PLC0415
+
+                test_config = {**entry.data, CONF_AI_API_KEY: key}
+                # The constructor does blocking I/O (TLS bundle), as in the options flow's AI step.
+                client = await self.hass.async_add_executor_job(functools.partial(ClaudeAPIClient, test_config))
+                success, _message = await client.async_test_connection(hass=self.hass)
+            except Exception:  # noqa: BLE001 - a failed test is shown, never raised
+                success = False
+            if not success:
+                errors["base"] = "ai_connection_failed"
+            else:
+                values = ai_settings_sync.extract_ai_values({**entry.data, CONF_AI_API_KEY: key})
+                ai_settings_sync.async_copy_to_other_entries(self.hass, entry.entry_id, values)
+                _LOGGER.info("Reauthentication saved: credential=ai_api_key zone=%s", entry.title)
+                return self.async_update_reload_and_abort(entry, data_updates={CONF_AI_API_KEY: key})
+        return self.async_show_form(
+            step_id="reauth_ai_key",
             data_schema=vol.Schema(
                 {
-                    vol.Required("weather_entity"): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="weather")
-                    ),
-                    vol.Required("climate_entity"): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="climate")
-                    ),
-                    vol.Required("notify_service", default="notify.notify"): selector.TextSelector(),
+                    vol.Required(CONF_AI_API_KEY): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                    )
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_reauth_github_token(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """New GitHub token for this zone's report submission: tested against the zone's repository, then saved."""
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        repo = str(entry.data.get(CONF_GITHUB_REPO, ""))
+        if user_input is not None:
+            token = str(user_input.get(CONF_GITHUB_TOKEN, "")).strip()
+            error = await _async_check_github_token(self.hass, token, repo)
+            if error:
+                errors["base"] = error
+            else:
+                _LOGGER.info("Reauthentication saved: credential=github_token zone=%s", entry.title)
+                return self.async_update_reload_and_abort(entry, data_updates={CONF_GITHUB_TOKEN: token})
+        return self.async_show_form(
+            step_id="reauth_github_token",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_GITHUB_TOKEN): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                    )
+                }
+            ),
+            errors=errors,
+            description_placeholders={"repo": repo or "-"},
         )
 
     async def async_step_unit(self, user_input: dict | None = None) -> config_entries.ConfigFlowResult:
@@ -1122,9 +1260,16 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             new_title = str(user_input.get("zone_name", "")).strip()
             if len(new_title) > 50:
                 errors["zone_name"] = "zone_name_too_long"
+            # Issue #1646 (mirror of the reconfigure step): never two zones on one thermostat.
+            new_climate = user_input.get("climate_entity")
+            if zone_registry.thermostat_owned_by_other_zone(self.hass, new_climate, self.config_entry.entry_id):
+                errors["climate_entity"] = "thermostat_shared_zone"
             if not errors:
                 section = {k: v for k, v in user_input.items() if k != "zone_name"}
                 await self._commit_section(section)
+                if new_climate and self.config_entry.unique_id != new_climate:
+                    # The unique id is the thermostat, so setup's duplicate check keeps seeing the right one.
+                    self.hass.config_entries.async_update_entry(self.config_entry, unique_id=new_climate)
                 if new_title and new_title != self.config_entry.title:
                     _LOGGER.info("Zone renamed — old=%s new=%s", self.config_entry.title, new_title)
                     self.hass.config_entries.async_update_entry(self.config_entry, title=new_title)
@@ -2277,6 +2422,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 ai_settings_sync.async_copy_to_other_entries(
                     self.hass, self.config_entry.entry_id, ai_settings_sync.extract_ai_values(saved)
                 )
+                if (new_key and new_key != existing_key) or not builtin or not ai_enabled:
+                    # Issue #1643: a new key saved here answers a pending "re-authentication required" card, and
+                    # so does switching to an AI Task provider or turning AI off (no Claude key is needed then).
+                    reauth.async_dismiss_reauth(
+                        self.hass, self.hass.config_entries.async_entries(DOMAIN), CONF_AI_API_KEY
+                    )
                 failed = await self._async_failed_ai_limits(saved)
                 if failed:
                     self._ai_limits_text = await self._async_ai_limits_text(failed)
@@ -2510,6 +2661,9 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     merged.pop(CONF_GITHUB_TOKEN, None)
                 merged[CONF_GITHUB_REPO] = repo
                 await self._commit_section(merged)
+                if new_token:
+                    # Issue #1643: a new token saved here answers a pending "re-authentication required" card.
+                    reauth.async_dismiss_reauth(self.hass, [self.config_entry], CONF_GITHUB_TOKEN)
                 return await self.async_step_init()
 
         existing_token = current.get(CONF_GITHUB_TOKEN, "")

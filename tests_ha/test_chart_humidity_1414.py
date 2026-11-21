@@ -15,7 +15,6 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.climate_advisor.const import DOMAIN
 from tests_ha.test_unload_cleanup import _seed_entry, _setup_zone
 
 HUMIDITY = "sensor.ecobee_humidity"
@@ -73,7 +72,7 @@ async def test_rows_carry_humidity_and_feels_like(hass: HomeAssistant, tmp_path)
     climate_id, weather_id = seed["climate_entity"], seed["weather_entity"]
     _register(hass, climate_id)
     entry = await _setup_zone(hass, tmp_path)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     coordinator._companion_sensors_cache = {}  # entities appeared after setup; re-resolve
 
     # Hot humid afternoon.

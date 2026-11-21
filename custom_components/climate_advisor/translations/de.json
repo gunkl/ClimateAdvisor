@@ -130,6 +130,40 @@
           "briefing_time": "Wann die tägliche Klima-Benachrichtigung mit der Wettervorhersage und dem Heizungs-/Kühlplan zugestellt wird.",
           "briefing_notifications_enabled": "Das geplante Tagesbriefing als Push-Benachrichtigung für diese Zone senden. Nur die erste Zone ist standardmäßig aktiv, damit ein Haushalt mit mehreren Zonen nicht pro Zone eine Kopie erhält. Du kannst das später unter Benachrichtigungen ändern."
         }
+      },
+      "reconfigure": {
+        "title": "Zone ändern",
+        "description": "Ändere das Thermostat, den Wetterdienst oder den Benachrichtigungsdienst von {zone}. Die Zone behält ihr Gelerntes, ihren Verlauf und ihre Einstellungen. Nach einem Thermostatwechsel aktualisieren neue Messwerte nach und nach, was sie gelernt hat.",
+        "data": {
+          "weather_entity": "Wetterdienst",
+          "climate_entity": "Thermostat",
+          "notify_service": "Benachrichtigungsdienst"
+        },
+        "data_description": {
+          "weather_entity": "Die Wetter-Integration, die Climate Advisor für Vorhersagen und die Außenbedingungen nutzt.",
+          "climate_entity": "Das Thermostat, das Climate Advisor überwacht und steuert.",
+          "notify_service": "Der Home-Assistant-Benachrichtigungsdienst für Hinweise und Tagesbriefings (z. B. notify.mobile_app_yourphone)."
+        }
+      },
+      "reauth_ai_key": {
+        "title": "Neuer Claude-API-Schlüssel",
+        "description": "Anthropic hat den integrierten Claude-API-Schlüssel abgelehnt, daher sind die KI-Funktionen gestoppt. Gib einen neuen Schlüssel ein. Er wird zuerst getestet und dann für alle Zonen gespeichert.",
+        "data": {
+          "ai_api_key": "Claude-API-Schlüssel"
+        },
+        "data_description": {
+          "ai_api_key": "Aus deinem Anthropic-Konto. Er wird vor dem Speichern getestet."
+        }
+      },
+      "reauth_github_token": {
+        "title": "Neues GitHub-Token",
+        "description": "GitHub hat das Token dieser Zone abgelehnt, daher können Berichte nicht mehr als Issues an {repo} gesendet werden. Gib ein neues Token ein. Es wird zuerst getestet und dann gespeichert.",
+        "data": {
+          "github_token": "GitHub Personal Access Token"
+        },
+        "data_description": {
+          "github_token": "Token mit dem Bereich issues:write. Es wird vor dem Speichern getestet."
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "Die Schlafkühlung ist wärmer als die Abwesenheitskühlung. Nachts darf das Haus also wärmer werden als bei Abwesenheit. Sende erneut ab, um das beizubehalten.",
       "vacation_heat_above_away_warning": "Die Urlaubsheizung ist wärmer als die Abwesenheitsheizung. Ein Urlaub verbraucht also mehr Energie als ein normaler Tag außer Haus. Sende erneut ab, um das beizubehalten.",
       "vacation_cool_below_away_warning": "Die Urlaubskühlung ist kühler als die Abwesenheitskühlung. Ein Urlaub verbraucht also mehr Energie als ein normaler Tag außer Haus. Sende erneut ab, um das beizubehalten.",
-      "vacation_freeze_warning": "Mit dieser Einstellung liegt die Urlaubsheizung unter 45 °F (7 °C). Bei einer langen Reise können Leitungen einfrieren. Sende erneut ab, um das beizubehalten."
+      "vacation_freeze_warning": "Mit dieser Einstellung liegt die Urlaubsheizung unter 45 °F (7 °C). Bei einer langen Reise können Leitungen einfrieren. Sende erneut ab, um das beizubehalten.",
+      "ai_connection_failed": "Verbindung zur Claude-API fehlgeschlagen. Prüfe deinen API-Schlüssel und versuche es erneut.",
+      "github_token_invalid": "GitHub hat dieses Token abgelehnt. Prüfe, ob es abgelaufen ist und den Bereich issues:write hat.",
+      "github_unreachable": "GitHub war zum Testen des Tokens nicht erreichbar. Prüfe die Verbindung und versuche es erneut."
     },
     "abort": {
-      "already_configured": "Für dieses Thermostat ist bereits eine Climate-Advisor-Zone eingerichtet."
+      "already_configured": "Für dieses Thermostat ist bereits eine Climate-Advisor-Zone eingerichtet.",
+      "reauth_successful": "Die neuen Zugangsdaten sind gespeichert und die Zone wurde neu geladen.",
+      "reconfigure_successful": "Die Einrichtung der Zone ist geändert und die Zone wurde neu geladen. Ihr Gelerntes und ihr Verlauf bleiben erhalten."
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "Die Schlafkühlung ist wärmer als die Abwesenheitskühlung. Nachts darf das Haus also wärmer werden als bei Abwesenheit. Sende erneut ab, um das beizubehalten.",
       "vacation_heat_above_away_warning": "Die Urlaubsheizung ist wärmer als die Abwesenheitsheizung. Ein Urlaub verbraucht also mehr Energie als ein normaler Tag außer Haus. Sende erneut ab, um das beizubehalten.",
       "vacation_cool_below_away_warning": "Die Urlaubskühlung ist kühler als die Abwesenheitskühlung. Ein Urlaub verbraucht also mehr Energie als ein normaler Tag außer Haus. Sende erneut ab, um das beizubehalten.",
-      "vacation_freeze_warning": "Mit dieser Einstellung liegt die Urlaubsheizung unter 45 °F (7 °C). Bei einer langen Reise können Leitungen einfrieren. Sende erneut ab, um das beizubehalten."
+      "vacation_freeze_warning": "Mit dieser Einstellung liegt die Urlaubsheizung unter 45 °F (7 °C). Bei einer langen Reise können Leitungen einfrieren. Sende erneut ab, um das beizubehalten.",
+      "thermostat_shared_zone": "Eine andere Climate-Advisor-Zone nutzt dieses Thermostat bereits. Wähle ein anderes Thermostat."
     }
   },
   "issues": {

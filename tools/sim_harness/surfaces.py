@@ -350,12 +350,12 @@ def read_chart_band(session: Any) -> Shown | None:
 def read_status_api(session: Any, armed: Armed) -> Shown | None:
     """The real Status endpoint's ``ca_target_heat`` / ``ca_target_cool``, back to internal F."""
     from custom_components.climate_advisor.api import ClimateAdvisorStatusView  # noqa: PLC0415
-    from custom_components.climate_advisor.const import DOMAIN  # noqa: PLC0415
     from custom_components.climate_advisor.temperature import to_fahrenheit  # noqa: PLC0415
+    from tools.sim_harness.ha_stubs import set_loaded_zones  # noqa: PLC0415
 
     coord = session.coordinator
     hass = MagicMock()
-    hass.data = {DOMAIN: {"p8": coord}}
+    set_loaded_zones(hass, {"p8": coord})
     hass.states = session.fake_hass.states
     request = MagicMock()
     request.app = {"hass": hass}

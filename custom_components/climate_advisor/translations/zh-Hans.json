@@ -130,6 +130,40 @@
           "briefing_time": "发送每日气候简报通知的时间，简报包含当天的天气预报和空调计划。",
           "briefing_notifications_enabled": "将定时的每日简报作为推送通知发送给此区域。只有第一个区域默认开启，因此多区域的家不会为每个区域各发一份。您之后可以在通知中更改。"
         }
+      },
+      "reconfigure": {
+        "title": "更改区域设置",
+        "description": "更改 {zone} 的恒温器、天气服务或通知服务。区域会保留其学习数据、历史记录和设置。更换恒温器后，新的读数会逐步更新它已学到的内容。",
+        "data": {
+          "weather_entity": "天气服务",
+          "climate_entity": "恒温器",
+          "notify_service": "通知服务"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor 用于获取天气预报和室外天气状况的天气集成。",
+          "climate_entity": "Climate Advisor 将监控和控制的恒温器。",
+          "notify_service": "用于警报和每日简报的 Home Assistant 通知服务（例如 notify.mobile_app_yourphone）。"
+        }
+      },
+      "reauth_ai_key": {
+        "title": "新的 Claude API 密钥",
+        "description": "Anthropic 拒绝了内置 Claude 的 API 密钥，因此 AI 功能已停止。请输入新密钥。它会先经过测试，然后为所有区域保存。",
+        "data": {
+          "ai_api_key": "Claude API 密钥"
+        },
+        "data_description": {
+          "ai_api_key": "来自您的 Anthropic 账户。保存前会先测试。"
+        }
+      },
+      "reauth_github_token": {
+        "title": "新的 GitHub 令牌",
+        "description": "GitHub 拒绝了此区域的令牌，因此报告无法再作为议题提交到 {repo}。请输入新令牌。它会先经过测试，然后保存。",
+        "data": {
+          "github_token": "GitHub 个人访问令牌"
+        },
+        "data_description": {
+          "github_token": "具有 issues:write 权限范围的令牌。保存前会先测试。"
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "睡眠制冷温度高于离家制冷温度，因此夜间房子允许比没人在家时更热。再次提交可保留此设置。",
       "vacation_heat_above_away_warning": "度假制热温度高于离家制热温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
       "vacation_cool_below_away_warning": "度假制冷温度低于离家制冷温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
-      "vacation_freeze_warning": "按此设置，度假制热温度最终会低于 45 °F (7 °C)。长途旅行期间水管可能会冻结。再次提交可保留此设置。"
+      "vacation_freeze_warning": "按此设置，度假制热温度最终会低于 45 °F (7 °C)。长途旅行期间水管可能会冻结。再次提交可保留此设置。",
+      "ai_connection_failed": "无法连接到 Claude API。请检查您的 API 密钥后重试。",
+      "github_token_invalid": "GitHub 拒绝了此令牌。请检查它是否已过期，以及是否具有 issues:write 权限范围。",
+      "github_unreachable": "无法连接 GitHub 来测试令牌。请检查网络连接后重试。"
     },
     "abort": {
-      "already_configured": "此恒温器已配置了 Climate Advisor 区域。"
+      "already_configured": "此恒温器已配置了 Climate Advisor 区域。",
+      "reauth_successful": "新的凭据已保存，区域已重新加载。",
+      "reconfigure_successful": "区域设置已更改，区域已重新加载。其学习数据和历史记录会保留。"
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "睡眠制冷温度高于离家制冷温度，因此夜间房子允许比没人在家时更热。再次提交可保留此设置。",
       "vacation_heat_above_away_warning": "度假制热温度高于离家制热温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
       "vacation_cool_below_away_warning": "度假制冷温度低于离家制冷温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
-      "vacation_freeze_warning": "按此设置，度假制热温度最终会低于 45 °F (7 °C)。长途旅行期间水管可能会冻结。再次提交可保留此设置。"
+      "vacation_freeze_warning": "按此设置，度假制热温度最终会低于 45 °F (7 °C)。长途旅行期间水管可能会冻结。再次提交可保留此设置。",
+      "thermostat_shared_zone": "另一个 Climate Advisor 区域已在使用此恒温器。请选择其他恒温器。"
     }
   },
   "issues": {

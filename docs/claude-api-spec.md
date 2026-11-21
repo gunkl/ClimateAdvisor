@@ -425,7 +425,7 @@ When `success=False` and all guard flags are `False`, the failure came from insi
 
 ### One shared client per install (Issue #1336)
 
-The client is created once per install, when the first zone whose entry data passes `ai_settings_sync.is_ai_configured()` sets up, and stored with the skill registry in `hass.data[f"{DOMAIN}_ai"] = {"client": ClaudeAPIClient, "skills": AISkillRegistry}`. Every zone's `coordinator.claude_client` / `coordinator.ai_skills` point at those objects, and the coordinator sets `client.hass`. Each zone's setup or reload calls `client.update_config(entry.data)`; all entries hold the same AI values ([install-wide settings](ai-integration.md#install-wide-settings-and-the-shared-client)), so the order does not matter. The last zone to unload removes it, in the same `if not hass.data[DOMAIN]:` block that removes the panel.
+The client is created once per install, when the first zone whose entry data passes `ai_settings_sync.is_ai_configured()` sets up, and stored with the skill registry in `hass.data[f"{DOMAIN}_ai"] = {"client": ClaudeAPIClient, "skills": AISkillRegistry}`. Every zone's `coordinator.claude_client` / `coordinator.ai_skills` point at those objects, and the coordinator sets `client.hass`. Each zone's setup or reload calls `client.update_config(entry.data)`; all entries hold the same AI values ([install-wide settings](ai-integration.md#install-wide-settings-and-the-shared-client)), so the order does not matter. The last zone to unload removes it, in the same `if not remaining:` block of `async_unload_entry()` that removes the panel.
 
 ### `__init__()` Config Keys Read
 

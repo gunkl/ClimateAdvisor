@@ -22,9 +22,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
 from .coordinator import ClimateAdvisorCoordinator
 from .entity import ClimateAdvisorEntity
+from .zone_registry import ClimateAdvisorConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,11 +34,11 @@ PARALLEL_UPDATES = 0
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: ClimateAdvisorConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Climate Advisor switch entities from a config entry."""
-    coordinator: ClimateAdvisorCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ClimateAdvisorCoordinator = entry.runtime_data
     async_add_entities(
         [
             ClimateAdvisorAutomationSwitch(coordinator, entry),
@@ -62,6 +62,16 @@ class ClimateAdvisorAutomationSwitch(ClimateAdvisorEntity, SwitchEntity):
         """Initialize the automation switch."""
         # Unique id ``<entry_id>_automation_enabled``; name from strings.json ``entity.switch.automation_enabled``.
         super().__init__(coordinator, entry, "automation_enabled")
+
+    @property
+    def available(self) -> bool:
+        """Always available (quality scale entity-unavailable, Issue #1642).
+
+        The switch shows and sets a flag of Climate Advisor itself, not a reading of a device or service. A failed
+        coordinator update must not take away the occupant's way to stop Climate Advisor from commanding the
+        thermostat (observe-only) while something is wrong.
+        """
+        return True
 
     @property
     def is_on(self) -> bool:

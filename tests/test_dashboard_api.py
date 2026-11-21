@@ -6,12 +6,13 @@ import asyncio
 from unittest.mock import MagicMock
 
 from custom_components.climate_advisor import dashboard_api
-from custom_components.climate_advisor.const import CONFIG_METADATA, DOMAIN
+from custom_components.climate_advisor.const import CONFIG_METADATA
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 
 def _request(coordinator):
     hass = MagicMock()
-    hass.data = {DOMAIN: {"entry1": coordinator}}
+    set_loaded_zones(hass, {"entry1": coordinator})
     req = MagicMock()
     req.app = {"hass": hass}
     req.query = {}
@@ -96,7 +97,7 @@ def test_github_unconfigured_and_schedules():
 
 def test_no_coordinator_is_503():
     hass = MagicMock()
-    hass.data = {DOMAIN: {}}
+    set_loaded_zones(hass, {})
     req = MagicMock()
     req.app = {"hass": hass}
     req.query = {}

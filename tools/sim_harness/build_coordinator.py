@@ -415,7 +415,7 @@ def build_headless_multi_zone(
     ``async_setup_entry()``/``async_unload_entry()`` at all, this function
     drives the REAL ``custom_components.climate_advisor.async_setup_entry()``
     once per zone against a shared ``hass`` — exercising service
-    registration, panel registration, and ``hass.data[DOMAIN]`` population
+    registration, panel registration, and ``entry.runtime_data`` population
     exactly as production does. This is the only harness path that can
     regression-test Gaps 5/6/8/9 (all of which live inside
     ``async_setup_entry()``/``async_unload_entry()``, code the single-zone
@@ -542,8 +542,7 @@ def setup_entry_like_ha(fake_hass: FakeHass, scheduler: FakeScheduler, entry: An
     (a reload), against the same FakeHass and config_dir.
     """
     from custom_components.climate_advisor import async_setup, async_setup_entry  # noqa: PLC0415
-    from custom_components.climate_advisor.const import DOMAIN  # noqa: PLC0415
-    from tools.sim_harness.ha_stubs import _current_entry  # noqa: PLC0415
+    from tools.sim_harness.ha_stubs import ConfigEntryState, _current_entry  # noqa: PLC0415
 
     # Issue #1637: real HA runs the integration's async_setup() once, before its first entry sets up (it registers
     # the five services, for the life of HA). Mirror that once per FakeHass, so a reload does not re-run it.
@@ -551,12 +550,19 @@ def setup_entry_like_ha(fake_hass: FakeHass, scheduler: FakeScheduler, entry: An
         run_coro(async_setup(fake_hass, {}))
         fake_hass.data["_ca_component_setup"] = True
 
+    # Issue #1639: HA's ConfigEntry.async_setup moves the entry to SETUP_IN_PROGRESS, then LOADED on success (only a
+    # LOADED entry is a zone to zone_registry) or SETUP_ERROR when setup raised.
+    entry.state = ConfigEntryState.SETUP_IN_PROGRESS
     token = _current_entry.set(entry)
     try:
         run_coro(async_setup_entry(fake_hass, entry))
+    except BaseException:
+        entry.state = ConfigEntryState.SETUP_ERROR
+        raise
     finally:
         _current_entry.reset(token)
-    coordinator = fake_hass.data[DOMAIN][entry.entry_id]
+    entry.state = ConfigEntryState.LOADED
+    coordinator = entry.runtime_data
     # Issue #1317: the start-up window this set-up opened must also END at +300 s, as in production
     # (the multi-zone/reload mirror of #1291/#1297/#1309). The real 300 s timer fired, but before #1337 its refresh
     # found no forecast, so the gate inside ``if forecast:`` was never reached and every later occupant
@@ -590,8 +596,17 @@ async def async_unload_entry_like_ha(fake_hass: FakeHass, entry: Any) -> bool:
     call, so a bug that only shows on it (N4: the lost fan-off grace) could not be seen.
     """
     from custom_components.climate_advisor import async_unload_entry  # noqa: PLC0415
+    from tools.sim_harness.ha_stubs import ConfigEntryState  # noqa: PLC0415
 
+    # Issue #1639: HA's state moves and its runtime_data drop, so an unloaded zone is gone from zone_registry and no
+    # stale coordinator is left on the entry (homeassistant/config_entries.py ConfigEntry.async_unload).
+    entry.state = ConfigEntryState.UNLOAD_IN_PROGRESS
     ok = await async_unload_entry(fake_hass, entry)
     if ok:
         await entry.async_process_on_unload(fake_hass)
+        if hasattr(entry, "runtime_data"):
+            del entry.runtime_data
+        entry.state = ConfigEntryState.NOT_LOADED
+    else:
+        entry.state = ConfigEntryState.FAILED_UNLOAD
     return ok

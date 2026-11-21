@@ -130,6 +130,40 @@
           "briefing_time": "Kiedy dostarczać codzienne powiadomienie z prognozą pogody i planem HVAC.",
           "briefing_notifications_enabled": "Wysyłaj zaplanowane codzienne podsumowanie jako powiadomienie push dla tej strefy. Domyślnie włączona jest tylko pierwsza strefa, aby dom z wieloma strefami nie dostawał jednej kopii na strefę. Możesz to później zmienić w Powiadomieniach."
         }
+      },
+      "reconfigure": {
+        "title": "Zmień strefę",
+        "description": "Zmień termostat, usługę pogodową lub usługę powiadomień strefy {zone}. Strefa zachowuje wyuczone dane, historię i ustawienia. Po zmianie termostatu nowe odczyty stopniowo aktualizują to, czego się nauczyła.",
+        "data": {
+          "weather_entity": "Usługa pogodowa",
+          "climate_entity": "Termostat",
+          "notify_service": "Usługa powiadomień"
+        },
+        "data_description": {
+          "weather_entity": "Integracja pogodowa, z której Climate Advisor korzysta przy prognozach i warunkach na zewnątrz.",
+          "climate_entity": "Termostat, który Climate Advisor będzie monitorować i sterować.",
+          "notify_service": "Usługa powiadomień Home Assistant dla alertów i codziennych podsumowań (np. notify.mobile_app_yourphone)."
+        }
+      },
+      "reauth_ai_key": {
+        "title": "Nowy klucz API Claude",
+        "description": "Anthropic odrzucił klucz API wbudowanego Claude, więc funkcje AI przestały działać. Wpisz nowy klucz. Najpierw zostanie sprawdzony, a potem zapisany dla każdej strefy.",
+        "data": {
+          "ai_api_key": "Klucz API Claude"
+        },
+        "data_description": {
+          "ai_api_key": "Z Twojego konta Anthropic. Jest sprawdzany przed zapisaniem."
+        }
+      },
+      "reauth_github_token": {
+        "title": "Nowy token GitHub",
+        "description": "GitHub odrzucił token tej strefy, więc raportów nie można już wysyłać jako zgłoszeń do {repo}. Wpisz nowy token. Najpierw zostanie sprawdzony, a potem zapisany.",
+        "data": {
+          "github_token": "Osobisty token dostępu GitHub"
+        },
+        "data_description": {
+          "github_token": "Token z zakresem issues:write. Jest sprawdzany przed zapisaniem."
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "Chłodzenie podczas snu jest cieplejsze niż chłodzenie podczas nieobecności, więc w nocy w domu może być cieplej niż wtedy, gdy nikogo nie ma. Zatwierdź ponownie, aby to zachować.",
       "vacation_heat_above_away_warning": "Ogrzewanie podczas wakacji jest cieplejsze niż ogrzewanie podczas nieobecności, więc wakacje zużywają więcej energii niż zwykły dzień poza domem. Zatwierdź ponownie, aby to zachować.",
       "vacation_cool_below_away_warning": "Chłodzenie podczas wakacji jest chłodniejsze niż chłodzenie podczas nieobecności, więc wakacje zużywają więcej energii niż zwykły dzień poza domem. Zatwierdź ponownie, aby to zachować.",
-      "vacation_freeze_warning": "Przy tym ustawieniu ogrzewanie podczas wakacji spada poniżej 45 °F (7 °C). Podczas długiego wyjazdu rury mogą zamarznąć. Zatwierdź ponownie, aby to zachować."
+      "vacation_freeze_warning": "Przy tym ustawieniu ogrzewanie podczas wakacji spada poniżej 45 °F (7 °C). Podczas długiego wyjazdu rury mogą zamarznąć. Zatwierdź ponownie, aby to zachować.",
+      "ai_connection_failed": "Nie można połączyć się z API Claude. Sprawdź klucz API i spróbuj ponownie.",
+      "github_token_invalid": "GitHub odrzucił ten token. Sprawdź, czy nie wygasł i czy ma zakres issues:write.",
+      "github_unreachable": "Nie można połączyć się z GitHub, aby sprawdzić token. Sprawdź połączenie i spróbuj ponownie."
     },
     "abort": {
-      "already_configured": "Ten termostat ma już skonfigurowaną strefę Climate Advisor."
+      "already_configured": "Ten termostat ma już skonfigurowaną strefę Climate Advisor.",
+      "reauth_successful": "Nowe dane logowania zostały zapisane, a strefa została ponownie wczytana.",
+      "reconfigure_successful": "Konfiguracja strefy została zmieniona, a strefa ponownie wczytana. Wyuczone dane i historia zostają zachowane."
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "Chłodzenie podczas snu jest cieplejsze niż chłodzenie podczas nieobecności, więc w nocy w domu może być cieplej niż wtedy, gdy nikogo nie ma. Zatwierdź ponownie, aby to zachować.",
       "vacation_heat_above_away_warning": "Ogrzewanie podczas wakacji jest cieplejsze niż ogrzewanie podczas nieobecności, więc wakacje zużywają więcej energii niż zwykły dzień poza domem. Zatwierdź ponownie, aby to zachować.",
       "vacation_cool_below_away_warning": "Chłodzenie podczas wakacji jest chłodniejsze niż chłodzenie podczas nieobecności, więc wakacje zużywają więcej energii niż zwykły dzień poza domem. Zatwierdź ponownie, aby to zachować.",
-      "vacation_freeze_warning": "Przy tym ustawieniu ogrzewanie podczas wakacji spada poniżej 45 °F (7 °C). Podczas długiego wyjazdu rury mogą zamarznąć. Zatwierdź ponownie, aby to zachować."
+      "vacation_freeze_warning": "Przy tym ustawieniu ogrzewanie podczas wakacji spada poniżej 45 °F (7 °C). Podczas długiego wyjazdu rury mogą zamarznąć. Zatwierdź ponownie, aby to zachować.",
+      "thermostat_shared_zone": "Inna strefa Climate Advisor już używa tego termostatu. Wybierz inny termostat."
     }
   },
   "issues": {

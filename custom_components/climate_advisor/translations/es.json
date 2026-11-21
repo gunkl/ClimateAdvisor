@@ -130,6 +130,40 @@
           "briefing_time": "Cuándo enviar la notificación del resumen climático diario con la previsión del día y el plan de climatización.",
           "briefing_notifications_enabled": "Envía el resumen diario programado como notificación push para esta zona. Solo la primera zona está activada por defecto, para que un hogar con varias zonas no envíe una copia por zona. Podrás cambiarlo más tarde en Notificaciones."
         }
+      },
+      "reconfigure": {
+        "title": "Cambiar la zona",
+        "description": "Cambia el termostato, el servicio meteorológico o el servicio de notificaciones de {zone}. La zona conserva su aprendizaje, su historial y sus ajustes. Tras cambiar el termostato, las nuevas lecturas actualizan poco a poco lo aprendido.",
+        "data": {
+          "weather_entity": "Servicio meteorológico",
+          "climate_entity": "Termostato",
+          "notify_service": "Servicio de notificaciones"
+        },
+        "data_description": {
+          "weather_entity": "La integración meteorológica que Climate Advisor usa para las previsiones y las condiciones exteriores.",
+          "climate_entity": "El termostato que Climate Advisor supervisará y controlará.",
+          "notify_service": "El servicio de notificaciones de Home Assistant para alertas y resúmenes diarios (p. ej., notify.mobile_app_yourphone)."
+        }
+      },
+      "reauth_ai_key": {
+        "title": "Nueva clave de API de Claude",
+        "description": "Anthropic rechazó la clave de API de Claude integrada, así que las funciones de IA se han detenido. Introduce una clave nueva. Primero se prueba y luego se guarda para todas las zonas.",
+        "data": {
+          "ai_api_key": "Clave de API de Claude"
+        },
+        "data_description": {
+          "ai_api_key": "De tu cuenta de Anthropic. Se prueba antes de guardarla."
+        }
+      },
+      "reauth_github_token": {
+        "title": "Nuevo token de GitHub",
+        "description": "GitHub rechazó el token de esta zona, así que ya no se pueden enviar informes como incidencias a {repo}. Introduce un token nuevo. Primero se prueba y luego se guarda.",
+        "data": {
+          "github_token": "Token de acceso personal de GitHub"
+        },
+        "data_description": {
+          "github_token": "Token con el permiso issues:write. Se prueba antes de guardarlo."
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "La refrigeración para dormir es más alta que la refrigeración en ausencia, así que por la noche la casa puede estar más caliente que cuando no hay nadie. Envía de nuevo para conservarla.",
       "vacation_heat_above_away_warning": "La calefacción de vacaciones es más alta que la calefacción en ausencia, así que unas vacaciones consumen más energía que un día normal fuera. Envía de nuevo para conservarla.",
       "vacation_cool_below_away_warning": "La refrigeración de vacaciones es más fría que la refrigeración en ausencia, así que unas vacaciones consumen más energía que un día normal fuera. Envía de nuevo para conservarla.",
-      "vacation_freeze_warning": "Con este ajuste, la calefacción de vacaciones queda por debajo de 45 °F (7 °C). Las tuberías pueden congelarse durante un viaje largo. Envía de nuevo para conservarla."
+      "vacation_freeze_warning": "Con este ajuste, la calefacción de vacaciones queda por debajo de 45 °F (7 °C). Las tuberías pueden congelarse durante un viaje largo. Envía de nuevo para conservarla.",
+      "ai_connection_failed": "No se pudo conectar con la API de Claude. Comprueba tu clave de API e inténtalo de nuevo.",
+      "github_token_invalid": "GitHub rechazó este token. Comprueba que no haya caducado y que tenga el permiso issues:write.",
+      "github_unreachable": "No se pudo contactar con GitHub para probar el token. Comprueba la conexión e inténtalo de nuevo."
     },
     "abort": {
-      "already_configured": "Este termostato ya tiene una zona de Climate Advisor configurada."
+      "already_configured": "Este termostato ya tiene una zona de Climate Advisor configurada.",
+      "reauth_successful": "La nueva credencial se ha guardado y la zona se ha recargado.",
+      "reconfigure_successful": "La configuración de la zona ha cambiado y la zona se ha recargado. Se conservan su aprendizaje y su historial."
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "La refrigeración para dormir es más alta que la refrigeración en ausencia, así que por la noche la casa puede estar más caliente que cuando no hay nadie. Envía de nuevo para conservarla.",
       "vacation_heat_above_away_warning": "La calefacción de vacaciones es más alta que la calefacción en ausencia, así que unas vacaciones consumen más energía que un día normal fuera. Envía de nuevo para conservarla.",
       "vacation_cool_below_away_warning": "La refrigeración de vacaciones es más fría que la refrigeración en ausencia, así que unas vacaciones consumen más energía que un día normal fuera. Envía de nuevo para conservarla.",
-      "vacation_freeze_warning": "Con este ajuste, la calefacción de vacaciones queda por debajo de 45 °F (7 °C). Las tuberías pueden congelarse durante un viaje largo. Envía de nuevo para conservarla."
+      "vacation_freeze_warning": "Con este ajuste, la calefacción de vacaciones queda por debajo de 45 °F (7 °C). Las tuberías pueden congelarse durante un viaje largo. Envía de nuevo para conservarla.",
+      "thermostat_shared_zone": "Otra zona de Climate Advisor ya usa este termostato. Elige otro termostato."
     }
   },
   "issues": {

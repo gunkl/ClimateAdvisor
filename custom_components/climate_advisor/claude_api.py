@@ -13,7 +13,7 @@ import functools
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -79,6 +79,12 @@ try:
     from anthropic import NotFoundError
 except ImportError:
     NotFoundError = None  # type: ignore[assignment,misc]
+
+try:
+    # Issue #1643: a revoked or expired key (401). Import-guarded like NotFoundError: never a bare except clause.
+    from anthropic import AuthenticationError
+except ImportError:
+    AuthenticationError = None  # type: ignore[assignment,misc]
 
 # Issue #563 — capability-tier keywords used for substring-matching a model ID to its
 # tier (e.g. "claude-sonnet-4-6" -> "sonnet"). Intentionally not a maintained list of
@@ -327,6 +333,9 @@ class ClaudeAPIClient:
         # Issue #1336: the client is shared by every zone, and every zone's state file carries its stats; only the
         # first zone to restore them applies them (they are the same install-wide counters).
         self.stats_restored: bool = False
+        # Issue #1643: called (no arguments, on the event loop) when Anthropic rejects the key, so the owner is asked
+        # for a new one (reauth.async_request_ai_key_reauth). Set by the coordinator that attaches the client.
+        self.on_auth_failed: Callable[[], Any] | None = None
 
         if self.uses_ai_task:
             _LOGGER.debug("AI client uses Home Assistant AI Task — no API key needed")
@@ -738,7 +747,9 @@ class ClaudeAPIClient:
             # new/unexpected failure for a model this table claims to have verified —
             # not a known, retryable capability mismatch. Log it distinctly and
             # re-raise; no in-place retry.
-            if isinstance(exc, APIError):
+            if self._is_auth_failure(exc):
+                pass  # Issue #1643: logged and reauth requested; not an unexpected model error
+            elif isinstance(exc, APIError):
                 _LOGGER.warning(
                     "Unexpected API error for model '%s' (streaming): %s",
                     resolved_model,
@@ -1013,6 +1024,9 @@ class ClaudeAPIClient:
         if new_key != old_key or (self._client is None and new_key):
             if new_key and ANTHROPIC_AVAILABLE:
                 self._client = AsyncAnthropic(api_key=new_key)
+                # Issue #1643: failures counted against the old key say nothing about the new one, so a
+                # reauth must not leave AI paused for the circuit breaker's cooldown.
+                self._circuit_breaker = _CircuitBreaker()
                 _LOGGER.debug("API client re-initialized — key updated")
             else:
                 self._client = None
@@ -1021,6 +1035,18 @@ class ClaudeAPIClient:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _is_auth_failure(self, exc: BaseException) -> bool:
+        """Issue #1643: whether Anthropic rejected the key; if so, ask the owner for a new one (never raises)."""
+        if not isinstance(AuthenticationError, type) or not isinstance(exc, AuthenticationError):
+            return False
+        _LOGGER.warning("Claude API key rejected (authentication failed); not retrying")
+        if self.on_auth_failed is not None:
+            try:
+                self.on_auth_failed()
+            except Exception:  # noqa: BLE001 - asking for a new key must never break the request path
+                _LOGGER.debug("Reauthentication request failed", exc_info=True)
+        return True
 
     def _check_rate_limit(self, triggered_by: str) -> bool:
         """Return True if the request is within the daily rate limit.
@@ -1442,6 +1468,10 @@ class ClaudeAPIClient:
                     exc,
                 )
             except APIError as exc:
+                if self._is_auth_failure(exc):
+                    # Issue #1643: the same key fails the same way on every retry.
+                    last_error = f"Authentication failed: {exc}"
+                    break
                 # Issue #572: request shape is built from the verified
                 # AI_MODEL_CAPABILITIES table up front, so an APIError here is not a
                 # known, retryable capability mismatch — except a deprecated/invalid

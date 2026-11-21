@@ -130,6 +130,40 @@
           "briefing_time": "その日の天気予報と空調の計画を含む、毎日の気象ブリーフィング通知を送る時刻です。",
           "briefing_notifications_enabled": "予定された毎日のブリーフィングを、このゾーンのプッシュ通知として送信します。最初のゾーンのみ初期値がオンのため、複数ゾーンの住まいでもゾーンごとに同じ通知は届きません。後から通知で変更できます。"
         }
+      },
+      "reconfigure": {
+        "title": "ゾーン設定の変更",
+        "description": "{zone} のサーモスタット、天気サービス、通知サービスを変更します。ゾーンの学習内容、履歴、設定はそのまま残ります。サーモスタットを変更した後は、新しい測定値によって学習内容が少しずつ更新されます。",
+        "data": {
+          "weather_entity": "天気サービス",
+          "climate_entity": "サーモスタット",
+          "notify_service": "通知サービス"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor が天気予報と屋外の状況の取得に使う天気連携です。",
+          "climate_entity": "Climate Advisor が監視・制御するサーモスタットです。",
+          "notify_service": "アラートと毎日のブリーフィングに使う Home Assistant の通知サービスです(例: notify.mobile_app_yourphone)。"
+        }
+      },
+      "reauth_ai_key": {
+        "title": "新しい Claude API キー",
+        "description": "Anthropic が内蔵 Claude の API キーを拒否したため、AI 機能が停止しています。新しいキーを入力してください。まずテストし、その後すべてのゾーンに保存します。",
+        "data": {
+          "ai_api_key": "Claude API キー"
+        },
+        "data_description": {
+          "ai_api_key": "Anthropic アカウントで取得します。保存する前にテストします。"
+        }
+      },
+      "reauth_github_token": {
+        "title": "新しい GitHub トークン",
+        "description": "GitHub がこのゾーンのトークンを拒否したため、レポートを {repo} に Issue として送信できなくなりました。新しいトークンを入力してください。まずテストし、その後保存します。",
+        "data": {
+          "github_token": "GitHub パーソナルアクセストークン"
+        },
+        "data_description": {
+          "github_token": "issues:write スコープを持つトークン。保存する前にテストします。"
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "就寝時の冷房が外出時の冷房より高いため、夜間は不在時より家の温度が上がることを許容します。このまま使う場合はもう一度送信してください。",
       "vacation_heat_above_away_warning": "バケーション時の暖房が外出時の暖房より高いため、バケーション中の方が通常の外出日よりエネルギーを使います。このまま使う場合はもう一度送信してください。",
       "vacation_cool_below_away_warning": "バケーション時の冷房が外出時の冷房より低いため、バケーション中の方が通常の外出日よりエネルギーを使います。このまま使う場合はもう一度送信してください。",
-      "vacation_freeze_warning": "この設定では、バケーション時の暖房が 45 °F (7 °C) を下回ります。長期の旅行中に水道管が凍結するおそれがあります。このまま使う場合はもう一度送信してください。"
+      "vacation_freeze_warning": "この設定では、バケーション時の暖房が 45 °F (7 °C) を下回ります。長期の旅行中に水道管が凍結するおそれがあります。このまま使う場合はもう一度送信してください。",
+      "ai_connection_failed": "Claude API に接続できませんでした。API キーを確認して、もう一度お試しください。",
+      "github_token_invalid": "GitHub がこのトークンを拒否しました。有効期限が切れていないこと、issues:write スコープがあることを確認してください。",
+      "github_unreachable": "トークンをテストするために GitHub に接続できませんでした。接続を確認して、もう一度お試しください。"
     },
     "abort": {
-      "already_configured": "このサーモスタットには、すでに Climate Advisor のゾーンが設定されています。"
+      "already_configured": "このサーモスタットには、すでに Climate Advisor のゾーンが設定されています。",
+      "reauth_successful": "新しい認証情報を保存し、ゾーンを再読み込みしました。",
+      "reconfigure_successful": "ゾーンの設定を変更し、ゾーンを再読み込みしました。学習内容と履歴はそのまま残ります。"
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "就寝時の冷房が外出時の冷房より高いため、夜間は不在時より家の温度が上がることを許容します。このまま使う場合はもう一度送信してください。",
       "vacation_heat_above_away_warning": "バケーション時の暖房が外出時の暖房より高いため、バケーション中の方が通常の外出日よりエネルギーを使います。このまま使う場合はもう一度送信してください。",
       "vacation_cool_below_away_warning": "バケーション時の冷房が外出時の冷房より低いため、バケーション中の方が通常の外出日よりエネルギーを使います。このまま使う場合はもう一度送信してください。",
-      "vacation_freeze_warning": "この設定では、バケーション時の暖房が 45 °F (7 °C) を下回ります。長期の旅行中に水道管が凍結するおそれがあります。このまま使う場合はもう一度送信してください。"
+      "vacation_freeze_warning": "この設定では、バケーション時の暖房が 45 °F (7 °C) を下回ります。長期の旅行中に水道管が凍結するおそれがあります。このまま使う場合はもう一度送信してください。",
+      "thermostat_shared_zone": "このサーモスタットは、すでに別の Climate Advisor ゾーンが使用しています。別のサーモスタットを選んでください。"
     }
   },
   "issues": {

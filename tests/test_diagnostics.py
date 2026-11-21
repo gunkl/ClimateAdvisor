@@ -13,12 +13,13 @@ import math
 import re
 from unittest.mock import MagicMock
 
-from custom_components.climate_advisor.const import CONFIG_METADATA, DOMAIN
+from custom_components.climate_advisor.const import CONFIG_METADATA
 from custom_components.climate_advisor.diagnostics import (
     TO_REDACT,
     async_get_config_entry_diagnostics,
     async_get_diagnostics_payload,
 )
+from tools.sim_harness.ha_stubs import set_loaded_zones
 
 
 def _make_coordinator(config: dict) -> MagicMock:
@@ -43,7 +44,7 @@ def _make_entry(entry_id: str, title: str):
 
 def _make_hass(zones: dict, all_entries: list):
     hass = MagicMock()
-    hass.data = {DOMAIN: zones}
+    set_loaded_zones(hass, zones)
     hass.config_entries.async_entries.return_value = all_entries
     return hass
 

@@ -130,6 +130,40 @@
           "briefing_time": "When to deliver the daily climate briefing notification with the day's forecast and HVAC plan.",
           "briefing_notifications_enabled": "Send the scheduled daily briefing as a push notification for this zone. Only the first zone defaults to on, so a multi-zone home does not send one copy per zone. You can change this later in Notifications."
         }
+      },
+      "reconfigure": {
+        "title": "Change zone setup",
+        "description": "Change the thermostat, weather service or notification service of {zone}. The zone keeps its learning, history and settings. After a thermostat change, new readings gradually update what it has learned.",
+        "data": {
+          "weather_entity": "Weather Service",
+          "climate_entity": "Thermostat",
+          "notify_service": "Notification Service"
+        },
+        "data_description": {
+          "weather_entity": "The weather integration Climate Advisor uses for forecasts and outdoor conditions.",
+          "climate_entity": "The thermostat Climate Advisor will monitor and control.",
+          "notify_service": "The Home Assistant notify service for alerts and daily briefings (e.g. notify.mobile_app_yourphone)."
+        }
+      },
+      "reauth_ai_key": {
+        "title": "New Claude API key",
+        "description": "Anthropic refused the built-in Claude API key, so the AI features have stopped. Enter a new key. It is tested first, then saved for every zone.",
+        "data": {
+          "ai_api_key": "Claude API Key"
+        },
+        "data_description": {
+          "ai_api_key": "From your Anthropic account. It is tested before it is saved."
+        }
+      },
+      "reauth_github_token": {
+        "title": "New GitHub token",
+        "description": "GitHub refused this zone's token, so reports can no longer be submitted as issues to {repo}. Enter a new token. It is tested first, then saved.",
+        "data": {
+          "github_token": "GitHub Personal Access Token"
+        },
+        "data_description": {
+          "github_token": "Token with issues:write scope. It is tested before it is saved."
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "Sleep cooling is warmer than away cooling, so overnight the house is allowed to get warmer than when nobody is home. Submit again to keep this.",
       "vacation_heat_above_away_warning": "Vacation heating is warmer than away heating, so a vacation uses more energy than a normal day out. Submit again to keep this.",
       "vacation_cool_below_away_warning": "Vacation cooling is cooler than away cooling, so a vacation uses more energy than a normal day out. Submit again to keep this.",
-      "vacation_freeze_warning": "With this setting, vacation heating ends up below 45 °F (7 °C). Pipes can freeze during a long trip. Submit again to keep this."
+      "vacation_freeze_warning": "With this setting, vacation heating ends up below 45 °F (7 °C). Pipes can freeze during a long trip. Submit again to keep this.",
+      "ai_connection_failed": "Could not connect to Claude API. Check your API key and try again.",
+      "github_token_invalid": "GitHub refused this token. Check that it has not expired and has the issues:write scope.",
+      "github_unreachable": "Could not reach GitHub to test the token. Check the connection and try again."
     },
     "abort": {
-      "already_configured": "This thermostat already has a Climate Advisor zone configured."
+      "already_configured": "This thermostat already has a Climate Advisor zone configured.",
+      "reauth_successful": "The new credential is saved and the zone has reloaded.",
+      "reconfigure_successful": "The zone's setup is changed and the zone has reloaded. Its learning and history are kept."
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "Sleep cooling is warmer than away cooling, so overnight the house is allowed to get warmer than when nobody is home. Submit again to keep this.",
       "vacation_heat_above_away_warning": "Vacation heating is warmer than away heating, so a vacation uses more energy than a normal day out. Submit again to keep this.",
       "vacation_cool_below_away_warning": "Vacation cooling is cooler than away cooling, so a vacation uses more energy than a normal day out. Submit again to keep this.",
-      "vacation_freeze_warning": "With this setting, vacation heating ends up below 45 °F (7 °C). Pipes can freeze during a long trip. Submit again to keep this."
+      "vacation_freeze_warning": "With this setting, vacation heating ends up below 45 °F (7 °C). Pipes can freeze during a long trip. Submit again to keep this.",
+      "thermostat_shared_zone": "Another Climate Advisor zone already uses this thermostat. Pick a different thermostat."
     }
   },
   "issues": {

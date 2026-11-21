@@ -302,14 +302,15 @@ async def check_teardown_cleanup(zones: dict[str, Any], fake_hass: Any, assertio
     step already unloaded it, since no other event type currently drives an
     unload through the harness.
     """
-    from custom_components.climate_advisor import async_unload_entry  # noqa: PLC0415
+    from tools.sim_harness.build_coordinator import async_unload_entry_like_ha  # noqa: PLC0415
 
     unload_zone = assertion["unload_entry"]
     if unload_zone not in zones:
         return False, f'unload_entry "{unload_zone}" not in zones {list(zones)}'
 
     entry = zones[unload_zone]["entry"]
-    await async_unload_entry(fake_hass, entry)
+    # Issue #1639: as HA does it (entry state and runtime_data), so the unloaded zone is really gone.
+    await async_unload_entry_like_ha(fake_hass, entry)
 
     checks: list[str] = []
     passed = True

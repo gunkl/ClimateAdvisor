@@ -137,7 +137,7 @@ class House:
     def coordinator(self):
         """The live Climate Advisor coordinator, or None while unloaded."""
         assert self.ca_entry is not None
-        return self.hass.data.get(CA_DOMAIN, {}).get(self.ca_entry.entry_id)
+        return getattr(self.ca_entry, "runtime_data", None)  # Issue #1639: HA drops it on unload
 
     @property
     def instances(self) -> list:

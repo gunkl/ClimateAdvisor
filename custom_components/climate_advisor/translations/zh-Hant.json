@@ -130,6 +130,40 @@
           "briefing_time": "何時傳送每日空調簡報通知，內容包含當天的天氣預報與空調計畫。",
           "briefing_notifications_enabled": "以推播通知傳送此區域的定時每日簡報。只有第一個區域預設為開啟，以免多區域的家庭每個區域各收到一份。之後可在「通知」中變更。"
         }
+      },
+      "reconfigure": {
+        "title": "變更區域設定",
+        "description": "變更 {zone} 的溫控器、天氣服務或通知服務。區域會保留其學習資料、歷史記錄和設定。更換溫控器後，新的讀數會逐步更新它已學到的內容。",
+        "data": {
+          "weather_entity": "天氣服務",
+          "climate_entity": "溫控器",
+          "notify_service": "通知服務"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor 用於天氣預報與戶外狀況的天氣整合。",
+          "climate_entity": "Climate Advisor 將監控並控制的溫控器。",
+          "notify_service": "用於警示與每日簡報的 Home Assistant 通知服務（例如 notify.mobile_app_yourphone）。"
+        }
+      },
+      "reauth_ai_key": {
+        "title": "新的 Claude API 金鑰",
+        "description": "Anthropic 拒絕了內建 Claude 的 API 金鑰，因此 AI 功能已停止。請輸入新金鑰。它會先經過測試，再為所有區域儲存。",
+        "data": {
+          "ai_api_key": "Claude API 金鑰"
+        },
+        "data_description": {
+          "ai_api_key": "來自您的 Anthropic 帳戶。儲存前會先測試。"
+        }
+      },
+      "reauth_github_token": {
+        "title": "新的 GitHub 權杖",
+        "description": "GitHub 拒絕了此區域的權杖，因此報告無法再以議題形式提交到 {repo}。請輸入新權杖。它會先經過測試，再儲存。",
+        "data": {
+          "github_token": "GitHub 個人存取權杖"
+        },
+        "data_description": {
+          "github_token": "具有 issues:write 權限範圍的權杖。儲存前會先測試。"
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "睡眠冷氣溫度比離家冷氣溫度還高，因此夜間房子可以比沒人在家時更熱。若要保留此設定，請再次傳送。",
       "vacation_heat_above_away_warning": "度假暖氣溫度比離家暖氣溫度還高，因此度假期間會比平常外出一天更耗能。若要保留此設定，請再次傳送。",
       "vacation_cool_below_away_warning": "度假冷氣溫度比離家冷氣溫度還低，因此度假期間會比平常外出一天更耗能。若要保留此設定，請再次傳送。",
-      "vacation_freeze_warning": "依此設定，度假暖氣溫度最終會低於 45 °F（7 °C）。長時間外出旅行時，水管可能會結凍。若要保留此設定，請再次傳送。"
+      "vacation_freeze_warning": "依此設定，度假暖氣溫度最終會低於 45 °F（7 °C）。長時間外出旅行時，水管可能會結凍。若要保留此設定，請再次傳送。",
+      "ai_connection_failed": "無法連線至 Claude API。請檢查您的 API 金鑰後再試一次。",
+      "github_token_invalid": "GitHub 拒絕了此權杖。請檢查它是否已過期，以及是否具有 issues:write 權限範圍。",
+      "github_unreachable": "無法連線至 GitHub 來測試權杖。請檢查網路連線後再試一次。"
     },
     "abort": {
-      "already_configured": "此溫控器已設定 Climate Advisor 區域。"
+      "already_configured": "此溫控器已設定 Climate Advisor 區域。",
+      "reauth_successful": "新的憑證已儲存，區域已重新載入。",
+      "reconfigure_successful": "區域設定已變更，區域已重新載入。其學習資料和歷史記錄會保留。"
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "睡眠冷氣溫度比離家冷氣溫度還高，因此夜間房子可以比沒人在家時更熱。若要保留此設定，請再次傳送。",
       "vacation_heat_above_away_warning": "度假暖氣溫度比離家暖氣溫度還高，因此度假期間會比平常外出一天更耗能。若要保留此設定，請再次傳送。",
       "vacation_cool_below_away_warning": "度假冷氣溫度比離家冷氣溫度還低，因此度假期間會比平常外出一天更耗能。若要保留此設定，請再次傳送。",
-      "vacation_freeze_warning": "依此設定，度假暖氣溫度最終會低於 45 °F（7 °C）。長時間外出旅行時，水管可能會結凍。若要保留此設定，請再次傳送。"
+      "vacation_freeze_warning": "依此設定，度假暖氣溫度最終會低於 45 °F（7 °C）。長時間外出旅行時，水管可能會結凍。若要保留此設定，請再次傳送。",
+      "thermostat_shared_zone": "另一個 Climate Advisor 區域已在使用此溫控器。請選擇其他溫控器。"
     }
   },
   "issues": {

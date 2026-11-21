@@ -130,6 +130,40 @@
           "briefing_time": "Günün tahmini ve HVAC planını içeren günlük iklim özeti bildiriminin ne zaman gönderileceği.",
           "briefing_notifications_enabled": "Zamanlanmış günlük özeti bu bölge için anlık bildirim olarak gönderin. Yalnızca ilk bölge varsayılan olarak açıktır; böylece çok bölgeli bir ev her bölge için bir kopya göndermez. Bunu daha sonra Bildirimler'den değiştirebilirsiniz."
         }
+      },
+      "reconfigure": {
+        "title": "Bölge kurulumunu değiştir",
+        "description": "{zone} bölgesinin termostatını, hava durumu hizmetini veya bildirim hizmetini değiştirin. Bölge öğrendiklerini, geçmişini ve ayarlarını korur. Termostat değiştikten sonra yeni ölçümler öğrendiklerini yavaş yavaş günceller.",
+        "data": {
+          "weather_entity": "Hava durumu hizmeti",
+          "climate_entity": "Termostat",
+          "notify_service": "Bildirim hizmeti"
+        },
+        "data_description": {
+          "weather_entity": "Climate Advisor'ın tahminler ve dış hava koşulları için kullandığı hava durumu entegrasyonu.",
+          "climate_entity": "Climate Advisor'ın izleyeceği ve kontrol edeceği termostat.",
+          "notify_service": "Uyarılar ve günlük özetler için Home Assistant notify hizmeti (ör. notify.mobile_app_yourphone)."
+        }
+      },
+      "reauth_ai_key": {
+        "title": "Yeni Claude API anahtarı",
+        "description": "Anthropic yerleşik Claude API anahtarını reddetti, bu yüzden yapay zekâ özellikleri durdu. Yeni bir anahtar girin. Önce test edilir, ardından tüm bölgeler için kaydedilir.",
+        "data": {
+          "ai_api_key": "Claude API anahtarı"
+        },
+        "data_description": {
+          "ai_api_key": "Anthropic hesabınızdan. Kaydedilmeden önce test edilir."
+        }
+      },
+      "reauth_github_token": {
+        "title": "Yeni GitHub belirteci",
+        "description": "GitHub bu bölgenin belirtecini reddetti, bu yüzden raporlar artık {repo} deposuna issue olarak gönderilemiyor. Yeni bir belirteç girin. Önce test edilir, ardından kaydedilir.",
+        "data": {
+          "github_token": "GitHub kişisel erişim belirteci"
+        },
+        "data_description": {
+          "github_token": "issues:write kapsamına sahip belirteç. Kaydedilmeden önce test edilir."
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "Uyku soğutması evde yokken soğutmadan daha sıcak; bu yüzden gece boyunca evin, kimse yokken olduğundan daha fazla ısınmasına izin verilir. Korumak için yeniden gönderin.",
       "vacation_heat_above_away_warning": "Tatil ısıtması evde yokken ısıtmadan daha sıcak; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
       "vacation_cool_below_away_warning": "Tatil soğutması evde yokken soğutmadan daha serin; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
-      "vacation_freeze_warning": "Bu ayarla tatil ısıtması 45 °F (7 °C) altına düşer. Uzun bir yolculukta borular donabilir. Korumak için yeniden gönderin."
+      "vacation_freeze_warning": "Bu ayarla tatil ısıtması 45 °F (7 °C) altına düşer. Uzun bir yolculukta borular donabilir. Korumak için yeniden gönderin.",
+      "ai_connection_failed": "Claude API'sine bağlanılamadı. API anahtarınızı kontrol edip yeniden deneyin.",
+      "github_token_invalid": "GitHub bu belirteci reddetti. Süresinin dolmadığını ve issues:write kapsamına sahip olduğunu kontrol edin.",
+      "github_unreachable": "Belirteci test etmek için GitHub'a ulaşılamadı. Bağlantıyı kontrol edip yeniden deneyin."
     },
     "abort": {
-      "already_configured": "Bu termostat için zaten bir Climate Advisor bölgesi yapılandırılmış."
+      "already_configured": "Bu termostat için zaten bir Climate Advisor bölgesi yapılandırılmış.",
+      "reauth_successful": "Yeni kimlik bilgisi kaydedildi ve bölge yeniden yüklendi.",
+      "reconfigure_successful": "Bölgenin kurulumu değişti ve bölge yeniden yüklendi. Öğrendikleri ve geçmişi korunur."
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "Uyku soğutması evde yokken soğutmadan daha sıcak; bu yüzden gece boyunca evin, kimse yokken olduğundan daha fazla ısınmasına izin verilir. Korumak için yeniden gönderin.",
       "vacation_heat_above_away_warning": "Tatil ısıtması evde yokken ısıtmadan daha sıcak; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
       "vacation_cool_below_away_warning": "Tatil soğutması evde yokken soğutmadan daha serin; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
-      "vacation_freeze_warning": "Bu ayarla tatil ısıtması 45 °F (7 °C) altına düşer. Uzun bir yolculukta borular donabilir. Korumak için yeniden gönderin."
+      "vacation_freeze_warning": "Bu ayarla tatil ısıtması 45 °F (7 °C) altına düşer. Uzun bir yolculukta borular donabilir. Korumak için yeniden gönderin.",
+      "thermostat_shared_zone": "Bu termostatı başka bir Climate Advisor bölgesi zaten kullanıyor. Farklı bir termostat seçin."
     }
   },
   "issues": {

@@ -86,6 +86,11 @@ REFERENCES: dict[str, list[str]] = {
     "fe:dashboard.analysis.days.tip.hvac_mode": ["fe:dashboard.analysis.days.row.hvac_runtime"],
     "fe:status.auto.override_stuck": [TAB_DEBUG],
     "fe:briefing.suggestions": [TAB_ANALYSIS],
+    # Learning advice (#1652) sends the occupant to the Settings tab
+    "fe:learning.suggestion.frequent_overrides": [TAB_SETTINGS],
+    "fe:learning.suggestion.frequent_overrides_no_detail": [TAB_SETTINGS],
+    "fe:learning.suggestion.high_runtime_mild_days": [TAB_SETTINGS],
+    "fe:learning.suggestion.short_departures": [TAB_SETTINGS],
     "fe:settings.energy_rate.description": [TAB_ANALYSIS],
     "fe:settings.briefing_notifications_enabled.description": [SEND_BRIEFING, ACTIONS],
     "ha:options.step.notifications.data_description.briefing_notifications_enabled": [SEND_BRIEFING, ACTIONS],

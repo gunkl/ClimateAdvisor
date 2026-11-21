@@ -11,7 +11,7 @@
   'use strict';
 
   // Same 16 codes as frontend/i18n/index.json (the file wins when it loads; these are the offline fallback).
-  var LANGUAGES = ['en', 'fr', 'es', 'de', 'nl', 'ja', 'pt', 'it', 'pl', 'uk', 'ko', 'hi', 'ar', 'ru', 'zh-Hans', 'tr'];
+  var LANGUAGES = ['en', 'fr', 'es', 'de', 'nl', 'ja', 'pt', 'it', 'pl', 'uk', 'ko', 'hi', 'ar', 'ru', 'zh-Hans', 'zh-Hant', 'tr'];
   var AREAS = ['common', 'notify', 'status', 'timeline', 'learning', 'night', 'activity', 'briefing', 'dashboard',
     'settings', 'errors', 'ai'];
   var RTL = ['ar'];
@@ -47,12 +47,12 @@
     for (i = 0; i < langs.length; i++) if (langs[i].toLowerCase() === lower) return langs[i];
     var parts = lower.split('-');
     if (parts[0] === 'zh') {
-      // zh, zh-CN, zh-SG, zh-Hans-* (any region) -> Simplified. zh-TW / zh-HK / zh-Hant -> en until Traditional ships.
+      // zh, zh-CN, zh-SG, zh-Hans-* (any region) -> Simplified. zh-TW / zh-HK / zh-MO / zh-Hant -> Traditional (#1656).
       // An explicit Hans script wins over any region (zh-Hans-TW is Simplified). Same as i18n.resolve_language.
       var rest = parts.slice(1), hans = rest.indexOf('hans') >= 0;
       var hant = ['hant', 'tw', 'hk', 'mo'].some(function (m) { return rest.indexOf(m) >= 0; });
-      if (!hans && hant) return 'en';
-      return langs.indexOf('zh-Hans') >= 0 ? 'zh-Hans' : 'en';
+      var want = !hans && hant ? 'zh-Hant' : 'zh-Hans';
+      return langs.indexOf(want) >= 0 ? want : 'en';
     }
     for (i = 0; i < langs.length; i++) if (langs[i].toLowerCase() === parts[0]) return langs[i];
     return 'en';

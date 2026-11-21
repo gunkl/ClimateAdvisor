@@ -70,7 +70,7 @@ def test_index_json_is_the_single_source_of_the_lists():
     index = json.loads((FRONTEND / "i18n" / "index.json").read_text(encoding="utf-8"))
     assert tuple(index["languages"]) == i18n.LANGUAGES
     assert tuple(index["areas"]) == i18n.AREAS
-    assert len(i18n.LANGUAGES) == 16
+    assert len(i18n.LANGUAGES) == 17  # Issue #1656 added zh-Hant (Traditional Chinese, Taiwan)
     for area in i18n.AREAS:
         for lang in i18n.LANGUAGES:
             assert (FRONTEND / "i18n" / area / f"{lang}.json").is_file()

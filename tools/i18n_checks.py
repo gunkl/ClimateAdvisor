@@ -879,6 +879,43 @@ def glossary_warnings(
     return out
 
 
+# ------------------------------------------------------------------------------------------------ zh-Hant wording
+ZH_HANT_TERMS_PATH = REPO / "i18n" / "zh_hant_terms.json"
+
+
+def check_zh_hant(
+    i18n_dir: Path | None = None, translations_dir: Path | None = None, terms_path: Path | None = None
+) -> list[str]:
+    """Traditional Chinese (Taiwan) must not read like converted Simplified (Issue #1656).
+
+    Fails on a Simplified-only character or a mainland-only term in any ``zh-Hant`` value, dashboard or
+    Home Assistant catalog. The lists (``i18n/zh_hant_terms.json``) were checked against Home Assistant's own
+    zh-Hant translations: nothing in them occurs there.
+    """
+    data = _read_json(terms_path or ZH_HANT_TERMS_PATH)
+    chars = set(data.get("simplified_chars", ""))
+    terms = [(t["term"], t["taiwan"]) for t in data.get("mainland_only", [])]
+    values: list[tuple[str, str, str]] = []
+    catalogs, _errors = load_catalogs(i18n_dir)
+    for area, langs in catalogs.items():
+        for key, text in langs.get("zh-Hant", {}).items():
+            values.append((area, key, text))
+    ha = load_ha(translations_dir).get("zh-Hant")
+    if ha is not None:
+        for key, text in flatten(ha).items():
+            values.append((HA_AREA, key, str(text)))
+    out: list[str] = []
+    for area, key, text in sorted(values):
+        plain = re.sub(r"\{[^{}]*\}", " ", text)  # an argument name is not wording
+        bad = sorted({c for c in plain if c in chars})
+        if bad:
+            out.append(f"{area}/zh-Hant: {key}: Simplified character(s) {''.join(bad)}")
+        for term, taiwan in terms:
+            if term in plain:
+                out.append(f"{area}/zh-Hant: {key}: mainland term {term!r}; Taiwan usage is {taiwan!r}")
+    return out
+
+
 # ------------------------------------------------------------------------------------------------ everything
 def run_guards(
     i18n_dir: Path | None = None,
@@ -889,6 +926,7 @@ def run_guards(
     """Every guard, by name (the Stage 1 three plus the budgets and the four ratchets)."""
     out = run_all(i18n_dir, locks_dir, translations_dir)
     out["length budgets"] = check_budgets(None, i18n_dir, translations_dir)
+    out["zh-Hant wording"] = check_zh_hant(i18n_dir, translations_dir)
     for name, result in run_ratchets(baselines_dir).items():
         out[f"ratchet {name}"] = result.errors
     return out

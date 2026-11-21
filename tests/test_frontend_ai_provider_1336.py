@@ -66,7 +66,7 @@ def _args(msg: str) -> set[str]:
 
 @pytest.mark.parametrize("lang", _LANGS)
 def test_every_new_key_exists_in_every_language_with_the_english_arguments(lang):
-    assert len(_LANGS) == 16
+    assert len(_LANGS) == 17  # #1656: zh-Hant
     for area, keys in (("ai", _NEW_AI_KEYS), ("settings", _NEW_SETTINGS_KEYS)):
         en, cat = _cat(area, "en"), _cat(area, lang)
         for key in keys:

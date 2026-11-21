@@ -86,7 +86,8 @@ def cmd_lock(args: argparse.Namespace) -> int:
 LANGUAGE_NAMES = {
     "en": "English", "fr": "French", "es": "Spanish", "de": "German", "nl": "Dutch", "ja": "Japanese",
     "pt": "European Portuguese", "it": "Italian", "pl": "Polish", "uk": "Ukrainian", "ko": "Korean", "hi": "Hindi",
-    "ar": "Arabic", "ru": "Russian", "zh-Hans": "Simplified Chinese", "tr": "Turkish",
+    "ar": "Arabic", "ru": "Russian", "zh-Hans": "Simplified Chinese",
+    "zh-Hant": "Traditional Chinese (Taiwan)", "tr": "Turkish",
 }  # fmt: skip
 
 

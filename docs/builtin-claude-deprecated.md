@@ -24,7 +24,7 @@ Claude model and the same report, and Climate Advisor no longer holds your key.
   until the occupant switches.
 - **Notices:** the AI settings step's description while `builtin_claude` is selected, and the
   install-wide Repairs issue `builtin_claude_deprecated`, raised at setup when any configured
-  zone uses built-in Claude and deleted otherwise. Both are in 16 languages.
+  zone uses built-in Claude and deleted otherwise. Both are in every shipped language.
 - **Still supported until removal:** the API key, model choice, reasoning (low or medium; a
   stored `high` became `medium`), max tokens, temperature, the monthly budget and cost
   figures, and live streaming. These fields are labelled "Built-in Claude only" in AI

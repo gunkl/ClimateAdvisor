@@ -8,11 +8,11 @@ Issue #1341. Plan and recheck record: the #1341 plan (D1-D9, phases P0a-P5). Thi
 
 | Question | Short answer | → Full answer |
 |---|---|---|
-| Which languages ship, and how is a code mapped? | Exactly 16: `en fr es de nl ja pt it pl uk ko hi ar ru zh-Hans tr`. Exact match, then case-insensitive, then the primary subtag (`pt-BR`→`pt`, `de-CH`→`de`, `zh`/`zh-CN`/`zh-SG`/`zh-Hans-*` (any region, so `zh-Hans-TW` too)→`zh-Hans`; `zh-TW`/`zh-HK`/`zh-Hant`→`en` for now), else `en`. | [Languages](#languages-and-resolution) |
+| Which languages ship, and how is a code mapped? | Exactly 17: `en fr es de nl ja pt it pl uk ko hi ar ru zh-Hans zh-Hant tr`. Exact match, then case-insensitive, then the primary subtag (`pt-BR`→`pt`, `de-CH`→`de`, `zh`/`zh-CN`/`zh-SG`/`zh-Hans-*` (any region, so `zh-Hans-TW` too)→`zh-Hans`; `zh-TW`/`zh-HK`/`zh-MO`/`zh-Hant`→`zh-Hant`, Issue #1656), else `en`. | [Languages](#languages-and-resolution) |
 | Which language does the dashboard use? | `?lang=`, then the parent frame's `hass.language`, then the status payload's `language`, then `navigator.language`, then `en`. The first non-empty candidate wins and is mapped to a shipped language. | [Languages](#languages-and-resolution) |
 | Which language do notifications and entity states use? | `hass.config.language` (the language HA uses for entity names), mapped the same way. No Climate Advisor-specific option. | [Languages](#languages-and-resolution) |
 | Where do translations live? | Two catalogs split by who renders the text: `translations/<lang>.json` (HA renders; plain `{name}` only) and `frontend/i18n/<area>/<lang>.json` (Climate Advisor renders; ICU subset). | [Catalogs](#catalogs-d1) |
-| How do I add or change a user-visible string? | English first, then the 15 translations, then `tools/i18n.py lock`, then `tools/i18n.py check`. | [How to add a string](#how-to-add-a-string-and-the-lane-workflow) |
+| How do I add or change a user-visible string? | English first, then the 16 translations, then `tools/i18n.py lock`, then `tools/i18n.py check`. | [How to add a string](#how-to-add-a-string-and-the-lane-workflow) |
 | What ICU syntax is allowed? | `{name}`, plural, select (with mandatory `other`), `number` with exactly `::percent ::precision-integer ::.0 ::.00`; apostrophes, argument whitespace and `<` as FormatJS; no tags, no offset, no selectordinal, no date/time, depth at most 2. | [ICU subset](#icu-subset) |
 | How do Python and the dashboard stay identical? | One shared conformance fixture rendered by both (`tests/test_i18n_conformance.py`, `tests/i18n_conformance.mjs`; 1,989 rows including typed params, fallbacks, bad parameters, times and dates), one shared language-resolution table, and a plural-table drift test against `Intl.PluralRules`. | [Conformance](#conformance) |
 | What does the dashboard JS API look like? | `window.CAI18N`: `init`, `lang`, `locale`, `dir`, `t`, `tw`, `fmt.*`, `esc`, `hass`. Loaded first on the new dashboard, `entry.html` and `prediction_accuracy.html`, never on classic `index.html`. | [Dashboard runtime](#dashboard-runtime) |
@@ -20,13 +20,19 @@ Issue #1341. Plan and recheck record: the #1341 plan (D1-D9, phases P0a-P5). Thi
 
 ## Languages and resolution
 
-- **Shipped (16):** `en fr es de nl ja pt it pl uk ko hi ar ru zh-Hans tr`. The code is the catalog file name. `frontend/i18n/index.json` (`{"languages": [...], "areas": [...]}`) is the single source of both lists for JS and Python.
-- **Mapping:** see the first Anchors row. Python: `i18n.resolve_language`. JS: `CAI18N.resolveLanguage`. The same table drives both: `tests/fixtures/i18n_language_resolution.json` (`[input, shipped language]` pairs, `null`/non-string included) is read by `tests/test_i18n_engine.py` and by `tests/i18n_runtime.mjs`, so the two cannot disagree. An explicit `Hans` script wins over any region (`zh-Hans-TW` is Simplified); any `Hant`/`TW`/`HK`/`MO` marker without it gives `en`.
+- **Shipped (17):** `en fr es de nl ja pt it pl uk ko hi ar ru zh-Hans zh-Hant tr` (`zh-Hant` is Traditional Chinese written for Taiwan, Issue #1656). The code is the catalog file name. `frontend/i18n/index.json` (`{"languages": [...], "areas": [...]}`) is the single source of both lists for JS and Python.
+- **Mapping:** see the first Anchors row. Python: `i18n.resolve_language`. JS: `CAI18N.resolveLanguage`. The same table drives both: `tests/fixtures/i18n_language_resolution.json` (`[input, shipped language]` pairs, `null`/non-string included) is read by `tests/test_i18n_engine.py` and by `tests/i18n_runtime.mjs`, so the two cannot disagree. An explicit `Hans` script wins over any region (`zh-Hans-TW` is Simplified); any `Hant`/`TW`/`HK`/`MO` marker without it gives `zh-Hant`.
 - **Language lists:** `index.json` is the source; `i18n.py` and the offline-fallback arrays in `i18n.js` are each checked against it (`tests/test_i18n_engine.py::test_index_json_is_the_single_source_of_the_lists`, `::test_js_language_and_area_lists_match_index_json`), and `tools/i18n_conformance_gen.mjs` reads it.
 - **Backend (D2):** `i18n.hass_language(hass)` = `resolve_language(hass.config.language)`. The backend never mixes two languages.
 - **Dashboard (D2):** per viewer: `?lang=` → parent `hass.language` (the one lookup, `CAI18N.hass()`, which reaches the `home-assistant` element in the parent or top window inside try/catch) → status payload `language` (the backend language, the one documented contract between the two runtimes) → `navigator.language` → `en`. An unsupported code resolves to its nearest shipped language or `en`; it does not fall through to the browser.
 - `<html lang>` is set on every page that loads `i18n.js`, including `entry.html` and `prediction_accuracy.html`. `<html dir>` is `rtl` for `ar` and `ltr` for every other language (`RTL_LAYOUT_READY` in `i18n.js` is `true`: the dashboard CSS uses logical properties, enforced by the `physical_css` ratchet; the charts' own time axis stays left to right inside an `ltr` chart stack); `CAI18N.dir` reports the language's direction so text code can isolate values.
 - Classic `index.html` stays English (owner Q2).
+
+### Traditional Chinese (Taiwan), `zh-Hant` (Issue #1656)
+
+- **Written for Taiwan from the English, never converted from `zh-Hans`.** Wording follows Home Assistant's own zh-Hant translations wherever HA has the term (glossary column `zh-Hant`, "Per-language style" row), so Climate Advisor reads like the rest of the user's Home Assistant: 溫控器, 暖氣/冷氣, 感測器, 設定, 預設, 排程, 離家, 您.
+- **Guard** (`zh-Hant wording` in `tools/i18n.py check` and `tools/validate.py`): fails on any Simplified-only character or mainland-only term in a `zh-Hant` value, dashboard or HA catalog. The lists are in `i18n/zh_hant_terms.json`; each entry was checked against Home Assistant's zh-Hant translations. Context-dependent words (設置, 信息, 打開, …) are deliberately left out.
+- **Corrections from readers are welcome.** Open an issue with the label `translation: zh-Hant`, naming the screen or the catalog key (for example `status.card.windows_open`, or `ha:entity.sensor.day_type.name`) and the better wording. A list of `key → wording` in one issue is fine. The fix updates `frontend/i18n/<area>/zh-Hant.json` or `translations/zh-Hant.json`, then `python tools/i18n.py lock --area <area> --lang zh-Hant` and `check`. If a correction changes a glossary term, the glossary cell changes too, so later strings follow it.
 
 ## Catalogs (D1)
 
@@ -35,7 +41,7 @@ Issue #1341. Plan and recheck record: the #1341 plan (D1-D9, phases P0a-P5). Thi
 
 - **Fallback is per key:** requested language → `en`, and the English pattern is then formatted with the REQUESTED language's number, plural and list rules (Python and JS do the same; fixture rows pin it). A key missing in `en` is a programming error: tests raise (strict mode); production logs one warning and returns the key.
 - **Rendering never raises** (non-strict, i.e. production): a translation that does not parse or format falls back to the English message rendered in English (parameters decoded in English), then to the key; a parameter that cannot be rendered (`None`, NaN seconds, a non-datetime, a malformed wire object, a wire object with an unknown `$t`) shows as an em dash (U+2014) and the rest of the sentence renders; a message with no key renders as an empty string. Each case logs one warning per key. Strict mode (`i18n.set_strict(True)`, on for the whole unit and real-HA test sessions) raises instead. `async_setup_entry` also treats a failed catalog load as non-fatal (one error with the reason, then the fallbacks above).
-- **Stage 1 content:** every area directory has `en` and the 15 others; only `common` has real keys (mode names heat/cool/off/auto/fan_only, "unknown"), the other areas are `{}`.
+- **Stage 1 content:** every area directory has `en` and the 15 others (16 since `zh-Hant`); only `common` has real keys (mode names heat/cool/off/auto/fan_only, "unknown"), the other areas are `{}`.
 - **Staleness lock** (outside the shipped package): `i18n/locks/<area>.json` and `i18n/locks/ha.json` hold `{"<lang>": {"<key>": "<sha1 of the English value, first 12 hex>"}}`. A translation is current when `lock[lang][key] == hash(en[key])`. `tools/i18n.py lock` records "I translated against this English".
 
 ## HA-rendered text (P1: entities, selectors, services, exceptions)
@@ -160,18 +166,18 @@ The panel registers `entry.html?v=<hash>`. `_panel_asset_bytes` (`__init__.py`) 
 
 ## Non-goals
 
-hreflang and URL routing (a private panel); logs, brand name and email headers stay English; classic `index.html`; `zh-Hant` (maps to `en` for now).
+hreflang and URL routing (a private panel); logs, brand name and email headers stay English; classic `index.html`.
 
 ## How to add a string and the lane workflow
 
 1. Pick the area (`common notify status timeline learning night activity briefing dashboard settings errors ai`); the key is `<area>.<name>`.
 2. Write the English value in `frontend/i18n/<area>/en.json` (HA-rendered text: `strings.json` and `translations/en.json`, plain `{name}` only). Use ICU for counts (`plural`) and grammatical variants (`select`); never join rendered sentences in code.
 3. Use it: Python `from . import i18n` then `i18n.Msg("<area>.<name>", n=3)`; render with `i18n.render(msg, i18n.hass_language(self.hass))`. Dashboard: `CAI18N.t(...)` or `CAI18N.tw(wire)`. Never hard-code English at a sink; never compare against prose, compare codes.
-4. Write the 15 translations in `<area>/<lang>.json` (same keys, same argument names, the language's own plural categories).
+4. Write the 16 translations in `<area>/<lang>.json` (same keys, same argument names, the language's own plural categories).
 5. `python tools/i18n.py lock --area <area> --lang all` records that the translations were made against this English.
 6. `python tools/i18n.py check` (parity, HA parity, staleness; `tools/validate.py` runs the same checks). Changing existing English later marks the key stale in every language until it is re-translated and re-locked: `python tools/i18n.py missing`, `stale`.
 
-Summary: write English → 15 translations → `tools/i18n.py lock` → `check`.
+Summary: write English → 16 translations → `tools/i18n.py lock` → `check`.
 
 ## Guards and commands (lane L1)
 

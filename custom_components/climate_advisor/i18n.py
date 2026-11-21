@@ -74,6 +74,7 @@ LANGUAGES: tuple[str, ...] = (
     "ar",
     "ru",
     "zh-Hans",
+    "zh-Hant",
     "tr",
 )
 AREAS: tuple[str, ...] = (
@@ -116,10 +117,11 @@ _NUMBER_SYMBOLS: dict[str, tuple[str, str, str, str, int, bool]] = {
     "ar": (".", ",", "\u200e-", "{}\u200e%\u200e", 1, False),
     "ru": (",", "\u00a0", "-", "{}\u00a0%", 1, False),
     "zh-Hans": (".", ",", "-", "{}%", 1, False),
+    "zh-Hant": (".", ",", "-", "{}%", 1, False),
     "tr": (",", ".", "-", "%{}", 1, False),
 }
 # Intl.NumberFormat renders NaN as "NaN" except in these languages (infinity is "\u221e" everywhere).
-_NAN_TEXT: dict[str, str] = {"ar": "ليس\u00a0رقمًا", "ru": "не\u00a0число"}
+_NAN_TEXT: dict[str, str] = {"ar": "ليس\u00a0رقمًا", "ru": "не\u00a0число", "zh-Hant": "非數值"}
 BAD_PARAM = "\u2014"  # shown in place of a parameter that cannot be rendered
 _LIST_AND: dict[str, tuple[str, str, str, str]] = {
     # lang: (pair, start, middle, end) separators between items
@@ -138,6 +140,7 @@ _LIST_AND: dict[str, tuple[str, str, str, str]] = {
     "ar": (" و", " و", " و", " و"),
     "ru": (" и ", ", ", ", ", " и "),
     "zh-Hans": ("和", "、", "、", "和"),
+    "zh-Hant": ("和", "、", "、", "和"),
     "tr": (" ve ", ", ", ", ", " ve "),
 }
 _LIST_OR: dict[str, tuple[str, str, str, str]] = {
@@ -157,6 +160,7 @@ _LIST_OR: dict[str, tuple[str, str, str, str]] = {
     "ar": (" أو ", " أو ", " أو ", " أو "),
     "ru": (" или ", ", ", ", ", " или "),
     "zh-Hans": ("或", "、", "、", "或"),
+    "zh-Hant": ("或", "、", "、", "或"),
     "tr": (" veya ", ", ", ", ", " veya "),
 }
 _TIME_FORMATS: dict[str, tuple[str, str, str]] = {
@@ -176,6 +180,7 @@ _TIME_FORMATS: dict[str, tuple[str, str, str]] = {
     "ar": ("{h}:{mm} {p}", "ص", "م"),
     "ru": ("{h}:{mm}", "", ""),
     "zh-Hans": ("{h}:{mm}", "", ""),
+    "zh-Hant": ("{p}{h}:{mm}", "上午", "下午"),
     "tr": ("{h}:{mm}", "", ""),
 }
 _DATE_FORMATS: dict[str, tuple[str, ...]] = {
@@ -390,6 +395,20 @@ _DATE_FORMATS: dict[str, tuple[str, ...]] = {
         "11月{d}日",
         "12月{d}日",
     ),
+    "zh-Hant": (
+        "1月{d}日",
+        "2月{d}日",
+        "3月{d}日",
+        "4月{d}日",
+        "5月{d}日",
+        "6月{d}日",
+        "7月{d}日",
+        "8月{d}日",
+        "9月{d}日",
+        "10月{d}日",
+        "11月{d}日",
+        "12月{d}日",
+    ),
     "tr": (
         "{d} Oca",
         "{d} Şub",
@@ -423,6 +442,7 @@ PLURAL_CATEGORIES_BY_LANG: dict[str, tuple[str, ...]] = {
     "ar": ("zero", "one", "two", "few", "many", "other"),
     "ru": ("one", "few", "many", "other"),
     "zh-Hans": ("other",),
+    "zh-Hant": ("other",),
     "tr": ("one", "other"),
 }
 
@@ -445,8 +465,8 @@ class MissingKeyError(I18nError):
 def resolve_language(code: str | None) -> str:
     """Map any HA/browser language code to one of ``LANGUAGES`` (exact, case-insensitive, primary subtag, else en).
 
-    ``zh``/``zh-CN``/``zh-SG``/``zh-Hans-*`` (any region) map to ``zh-Hans``; ``zh-TW``/``zh-HK``/``zh-Hant`` map to
-    ``en`` for now. The cases live in ``tests/fixtures/i18n_language_resolution.json`` (shared with the JS runtime).
+    ``zh``/``zh-CN``/``zh-SG``/``zh-Hans-*`` (any region) map to ``zh-Hans``; ``zh-TW``/``zh-HK``/``zh-MO``/``zh-Hant``
+    (any Traditional marker without an explicit Hans script) map to ``zh-Hant`` (Issue #1656). The cases live in ``tests/fixtures/i18n_language_resolution.json`` (shared with the JS runtime).
     """
     if not code or not isinstance(code, str):
         return DEFAULT_LANGUAGE
@@ -462,7 +482,8 @@ def resolve_language(code: str | None) -> str:
         rest = parts[1:]
         if "hans" in rest:  # an explicit Simplified script wins over any region (zh-Hans-TW is Simplified)
             return "zh-Hans"
-        return DEFAULT_LANGUAGE if _HANT_MARKERS.intersection(rest) else "zh-Hans"
+        # Issue #1656: Traditional (any Hant/TW/HK/MO marker) is its own language now, written for Taiwan.
+        return "zh-Hant" if _HANT_MARKERS.intersection(rest) else "zh-Hans"
     if primary in lowered and "-" not in lowered[primary]:
         return lowered[primary]
     return DEFAULT_LANGUAGE
@@ -574,6 +595,7 @@ _PLURAL_RULES = {
     "ja": _p_other,
     "ko": _p_other,
     "zh-Hans": _p_other,
+    "zh-Hant": _p_other,
 }
 
 

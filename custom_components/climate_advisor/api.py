@@ -921,7 +921,7 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
                 from .services import async_accept_suggestion
 
                 await async_accept_suggestion(hass, coordinator, suggestion_key)
-                return self.json({"status": "ok", "acknowledged": suggestion_key})
+                return self.json({"status": "ok", "acknowledged": suggestion_key, "changes": {}})
             elif action == "dismiss":
                 coordinator.learning.dismiss_suggestion(suggestion_key)
                 await hass.async_add_executor_job(coordinator.learning.save_state)

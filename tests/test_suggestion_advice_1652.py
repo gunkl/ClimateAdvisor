@@ -179,7 +179,7 @@ def test_rest_accept_changes_no_setting(tmp_path):
     req, hass = _request({"suggestion_key": "frequent_overrides", "action": "accept"}, coord)
     resp = asyncio.run(ClimateAdvisorRespondSuggestionView().post(req))
     assert resp.status == 200
-    assert resp.json_data == {"status": "ok", "acknowledged": "frequent_overrides"}
+    assert resp.json_data == {"status": "ok", "acknowledged": "frequent_overrides", "changes": {}}
     assert coord.config == {"sensor_debounce_seconds": 600, "setback_heat": 62.0, "setback_cool": 80.0}
     hass.config_entries.async_update_entry.assert_not_called()
     hass.async_add_executor_job.assert_awaited_once()  # the learning state is saved

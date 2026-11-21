@@ -137,7 +137,7 @@ class TestRespondSuggestionFeedback:
         hass = request.app["hass"]
         resp = asyncio.run(view.post(request))
         assert resp.status == 200
-        assert resp.json_data == {"status": "ok", "acknowledged": "low_window_compliance"}
+        assert resp.json_data == {"status": "ok", "acknowledged": "low_window_compliance", "changes": {}}
         coord.learning.accept_suggestion.assert_called_once_with("low_window_compliance")
         assert coord.config == {"comfort_heat": 68}
         hass.config_entries.async_update_entry.assert_not_called()

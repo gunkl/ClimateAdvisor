@@ -75,7 +75,7 @@ async def test_accept_changes_no_setting_and_removed_keys_are_rejected(
             json={"action": "accept", "suggestion_key": "thermal_model_ready"},
         )
         assert resp.status == 200
-        assert await resp.json() == {"status": "ok", "acknowledged": "thermal_model_ready"}
+        assert await resp.json() == {"status": "ok", "acknowledged": "thermal_model_ready", "changes": {}}
         resp = await client.post(
             "/api/climate_advisor/respond_suggestion",
             params=params,

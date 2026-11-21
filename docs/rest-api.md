@@ -180,7 +180,7 @@ Errors: 400 several zones loaded and no `zone`/`entry_id` given (body `{message,
 |---|---|---|
 | `/api/climate_advisor/force_reclassify` | Force immediate day reclassification | `status`, `message` |
 | `/api/climate_advisor/send_briefing` | Send today's briefing via notify service | `status`, `message` |
-| `/api/climate_advisor/respond_suggestion` | Accept, dismiss, or feedback a learning suggestion | accept (an acknowledgement; Issue #1652: no setting changes): `status`, `acknowledged` (the key); dismiss: `status`, `dismissed`; feedback-only: `status` |
+| `/api/climate_advisor/respond_suggestion` | Accept, dismiss, or feedback a learning suggestion | accept (an acknowledgement; Issue #1652: no setting changes): `status`, `acknowledged` (the key), `changes` (always `{}`, kept so older clients that read it still work); dismiss: `status`, `dismissed`; feedback-only: `status` |
 | `/api/climate_advisor/cancel_override` | Cancel active manual temperature override | `status`, `message` |
 | `/api/climate_advisor/resume_from_pause` | Resume automation from door/window pause | `status`, `message`, `restored_mode` |
 | `/api/climate_advisor/cancel_fan_override` | Cancel active fan override | `status`, `message` |

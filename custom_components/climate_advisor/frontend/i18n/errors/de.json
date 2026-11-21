@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "Pause aufgehoben. Die Automatisierung ist aus (nur Beobachtung): Es wurde kein Befehl an das Thermostat gesendet.",
   "errors.resume_pending": "Pause aufgehoben. Das Thermostat hat {mode, select, none {die Wiederherstellung} heat {den Heizbetrieb} cool {den Kühlbetrieb} off {den Modus Aus} auto {den Modus Auto} heat_cool {den Modus Heizen/Kühlen} fan_only {den Modus Nur Lüftung} other {{mode}}} noch nicht übernommen; Climate Advisor sendet den Befehl erneut. Die Pausenzeit beginnt, sobald er übernommen wurde.",
   "errors.suggestion_key_required": "Erforderlich: suggestion_key",
+  "errors.suggestion_key_unknown": "Unbekannter suggestion_key: {suggestion_key}",
   "errors.timeline_not_ready": "Die Ablaufübersicht ist noch nicht bereit.",
   "errors.zone_selection_required": "Es sind mehrere Climate-Advisor-Zonen eingerichtet — füge {hint} hinzu (einen der entry_id-Werte in „zones“), damit die Anfrage genau eine Zone benennt."
 }

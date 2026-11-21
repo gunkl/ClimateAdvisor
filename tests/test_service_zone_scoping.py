@@ -113,11 +113,11 @@ class TestServiceCallsResolveByEntryId:
             fake_hass.services.async_call(
                 DOMAIN,
                 "respond_to_suggestion",
-                {"entry_id": zone_0_id, "action": "dismiss", "suggestion_key": "some_suggestion"},
+                {"entry_id": zone_0_id, "action": "dismiss", "suggestion_key": "frequent_overrides"},
             )
         )
 
-        assert coord_0.learning._state.dismissed_suggestions == ["some_suggestion"]
+        assert coord_0.learning._state.dismissed_suggestions == ["frequent_overrides"]
         assert coord_1.learning._state.dismissed_suggestions == []
         assert zone_1_id  # sanity: fixture var used
 
@@ -200,14 +200,22 @@ class TestServiceCallValidation:
 
 
 class TestServiceTeardown:
-    """Gap 9: services must be removed once the LAST zone unloads, not before."""
+    """Gap 9, revised by Issue #1637 (quality scale action-setup).
 
-    def test_services_removed_once_last_zone_unloads(self):
+    Gap 9's requirement still holds: unloading one zone never removes a service another zone needs. What changed:
+    the services are now registered once in async_setup and are never removed on unload, not even with the last
+    zone. The old "removed with the last zone" behavior turned a call made while no zone was loaded into "service
+    not found". Now the call exists and fails with the translated unknown_zone error, which an automation (or the
+    person reading its trace) can understand.
+    """
+
+    def test_services_survive_every_unload_and_reject_the_unloaded_zone(self):
         from custom_components.climate_advisor import async_unload_entry
         from custom_components.climate_advisor.const import DOMAIN
         from tools.sim_harness.multi_zone_assertions import KNOWN_SERVICE_NAMES
 
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)
+        ServiceValidationError = _service_validation_error()
 
         run_coro(async_unload_entry(fake_hass, zones["zone_0"]["entry"]))
         for name in KNOWN_SERVICE_NAMES:
@@ -217,9 +225,15 @@ class TestServiceTeardown:
 
         run_coro(async_unload_entry(fake_hass, zones["zone_1"]["entry"]))
         for name in KNOWN_SERVICE_NAMES:
-            assert not fake_hass.services.has_service(DOMAIN, name), (
-                f"{name} still registered after the last zone unloaded"
+            assert fake_hass.services.has_service(DOMAIN, name), f"{name} removed after the last zone unloaded"
+
+        with pytest.raises(ServiceValidationError) as caught:
+            run_coro(
+                fake_hass.services.async_call(
+                    DOMAIN, "reset_learning_data", {"entry_id": zones["zone_1"]["entry"].entry_id, "scope": "all"}
+                )
             )
+        assert caught.value.translation_key == "unknown_zone"
 
     def test_teardown_cleanup_assertion_confirms_services_survive(self):
         zones, fake_hass, _scheduler = build_headless_multi_zone(zone_count=2)

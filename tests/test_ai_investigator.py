@@ -7,6 +7,8 @@ import datetime
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 # ── HA module stubs must be in place before importing climate_advisor modules ──
 if "homeassistant" not in sys.modules:
     from conftest import _install_ha_stubs
@@ -1449,15 +1451,33 @@ class TestInvestigatorGithubContext:
 
         return asyncio.run(coro)
 
-    def _make_mock_hass(self, mock_session):
-        """Create a hass-like object that returns mock_session from aiohttp_client."""
-        from unittest.mock import MagicMock
+    @pytest.fixture(autouse=True)
+    def _aiohttp_client_module(self, monkeypatch):
+        """Home Assistant's real accessor, ``homeassistant.helpers.aiohttp_client.async_get_clientsession(hass)``.
 
-        hass = MagicMock()
-        hass.helpers = MagicMock()
-        hass.helpers.aiohttp_client = MagicMock()
-        hass.helpers.aiohttp_client.async_get_clientsession = MagicMock(return_value=mock_session)
-        return hass
+        Issue #1650: these tests used to mock ``hass.helpers.aiohttp_client``, an attribute Home Assistant removed.
+        That mock hid the bug: on a real install the call raised, and the investigator never saw any issue.
+        """
+        import types
+
+        module = types.ModuleType("homeassistant.helpers.aiohttp_client")
+        module.async_get_clientsession = lambda hass: hass._test_session
+        monkeypatch.setitem(sys.modules, "homeassistant.helpers.aiohttp_client", module)
+
+    def _make_mock_hass(self, mock_session):
+        """A hass-like object with NO ``helpers`` attribute, like a current Home Assistant."""
+        import types
+
+        return types.SimpleNamespace(_test_session=mock_session, data={})
+
+    def test_github_context_works_without_hass_helpers(self):
+        """Regression (#1650): a hass without ``hass.helpers`` (every supported HA version) still fetches issues."""
+        from custom_components.climate_advisor.ai_skills_investigator import async_build_github_context
+
+        session = self._make_mock_session(status=200, json_data=[{"number": 7, "state": "open", "title": "T"}])
+        hass = self._make_mock_hass(session)
+        assert not hasattr(hass, "helpers")
+        assert "#7" in self._run(async_build_github_context(hass))
 
     def _make_mock_session(self, status=200, json_data=None):
         """Create a mock aiohttp session that returns a response."""

@@ -135,3 +135,33 @@ class TestRespondSuggestionFeedback:
         assert resp.status == 200
         assert resp.json_data["changes"] == {"comfort_heat": 68}
         assert coord.config["comfort_heat"] == 68
+
+
+class TestRespondSuggestionUnknownKey:
+    """Issue #1652: an unknown key is a 400, not an "ok" that changes nothing."""
+
+    def test_unknown_key_returns_400_and_touches_nothing(self):
+        coord = _coord()
+        resp = _post({"suggestion_key": "made_up", "action": "dismiss"}, coord)
+        assert resp.status == 400
+        assert resp.json_data["error_code"] == "suggestion_key_unknown"
+        coord.learning.dismiss_suggestion.assert_not_called()
+        coord.learning.accept_suggestion.assert_not_called()
+        coord.learning.record_feedback.assert_not_called()
+
+    def test_accept_persists_real_settings_to_the_config_entry(self):
+        """The shared helper keeps the REST path's behavior: real settings are written to the zone's entry."""
+        coord = _coord()
+        coord.learning.accept_suggestion = MagicMock(
+            return_value={"comfort_heat": 69, "request_setpoint_analysis": True}
+        )
+        view = ClimateAdvisorRespondSuggestionView()
+        request = _make_request({"suggestion_key": "frequent_door_pauses", "action": "accept"}, coord)
+        hass = request.app["hass"]
+        entry = MagicMock()
+        entry.data = {"comfort_heat": 68}  # only real settings (CONFIG_METADATA) are written
+        hass.config_entries.async_get_entry = MagicMock(return_value=entry)
+        resp = asyncio.run(view.post(request))
+        assert resp.status == 200
+        hass.config_entries.async_get_entry.assert_called_once_with("entry1")
+        hass.config_entries.async_update_entry.assert_called_once_with(entry, data={"comfort_heat": 69})

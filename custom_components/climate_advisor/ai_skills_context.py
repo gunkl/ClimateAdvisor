@@ -1514,6 +1514,18 @@ async def build_version_context(hass: Any, coordinator: Any, **kwargs: Any) -> s
     return "\n".join(lines)
 
 
+def _client_session(hass: Any) -> Any:
+    """Home Assistant's shared aiohttp session (the same accessor api.py uses).
+
+    Issue #1650: this used ``hass.helpers.aiohttp_client.async_get_clientsession()``. Home Assistant removed
+    ``hass.helpers`` before 2026.3, Climate Advisor's minimum, so the call raised. The except below swallowed it,
+    and the AI Investigator never saw the project's open or closed issues.
+    """
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+    return async_get_clientsession(hass)
+
+
 def _trim_issue_fields(issues: list[dict]) -> list[dict]:
     """Keep only the GitHub issue fields the context renderer actually uses.
 
@@ -1578,7 +1590,7 @@ async def _fetch_github_issues(hass: Any, coordinator: Any = None) -> str:
 
     # --- Fetch what's missing ---
     try:
-        session = hass.helpers.aiohttp_client.async_get_clientsession()
+        session = _client_session(hass)
         timeout = aiohttp.ClientTimeout(total=GITHUB_CONTEXT_TIMEOUT)
         base = f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/issues"
 

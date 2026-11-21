@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "Climate Advisor はこのゾーンを更新できませんでした: {error}"
+    },
+    "unknown_suggestion": {
+      "message": "不明な提案キー {suggestion_key}。有効なキー: {valid}。"
+    },
+    "service_failed": {
+      "message": "Climate Advisor は {service} を完了できませんでした: {error}"
     }
   }
 }

@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "Climate Advisor nie mógł zaktualizować tej strefy: {error}"
+    },
+    "unknown_suggestion": {
+      "message": "Nieznany klucz sugestii {suggestion_key}. Prawidłowe klucze: {valid}."
+    },
+    "service_failed": {
+      "message": "Climate Advisor nie mógł wykonać {service}: {error}"
     }
   }
 }

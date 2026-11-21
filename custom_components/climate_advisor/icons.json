@@ -1,0 +1,46 @@
+{
+  "entity": {
+    "sensor": {
+      "day_type": { "default": "mdi:weather-partly-cloudy" },
+      "trend_direction": {
+        "default": "mdi:trending-neutral",
+        "state": { "warming": "mdi:trending-up", "cooling": "mdi:trending-down" }
+      },
+      "next_human_action": { "default": "mdi:human-greeting" },
+      "daily_briefing": { "default": "mdi:email-outline" },
+      "compliance_score": { "default": "mdi:check-circle" },
+      "automation_status": { "default": "mdi:home-thermometer" },
+      "next_automation_action": { "default": "mdi:robot" },
+      "next_automation_time": { "default": "mdi:clock-outline" },
+      "occupancy_mode": {
+        "default": "mdi:home-account",
+        "state": { "away": "mdi:home-export-outline", "vacation": "mdi:airplane", "guest": "mdi:account-multiple" }
+      },
+      "last_action_time": { "default": "mdi:clock-check-outline" },
+      "last_action_reason": { "default": "mdi:text-box-outline" },
+      "fan_status": { "default": "mdi:fan" },
+      "contact_status": { "default": "mdi:door-closed" },
+      "ai_status": { "default": "mdi:robot" },
+      "indoor_temp": { "default": "mdi:thermometer" },
+      "outdoor_temp": { "default": "mdi:thermometer-lines" },
+      "forecast_high": { "default": "mdi:thermometer-chevron-up" },
+      "forecast_low": { "default": "mdi:thermometer-chevron-down" },
+      "effective_target_temp": { "default": "mdi:thermostat" },
+      "heat_threshold": { "default": "mdi:thermometer-low" },
+      "cool_threshold": { "default": "mdi:thermometer-high" }
+    },
+    "switch": {
+      "automation_enabled": {
+        "default": "mdi:robot",
+        "state": { "off": "mdi:robot-off" }
+      }
+    }
+  },
+  "services": {
+    "respond_to_suggestion": { "service": "mdi:lightbulb-question-outline" },
+    "force_reclassify": { "service": "mdi:refresh" },
+    "resend_briefing": { "service": "mdi:email-fast-outline" },
+    "dump_diagnostics": { "service": "mdi:stethoscope" },
+    "reset_learning_data": { "service": "mdi:restore-alert" }
+  }
+}

@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "Climate Advisor इस ज़ोन को अपडेट नहीं कर सका: {error}"
+    },
+    "unknown_suggestion": {
+      "message": "अज्ञात सुझाव कुंजी {suggestion_key}। मान्य कुंजियाँ: {valid}।"
+    },
+    "service_failed": {
+      "message": "Climate Advisor {service} पूरा नहीं कर सका: {error}"
     }
   }
 }

@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "Pauze opgeheven. Automatisering staat uit (alleen waarnemen): er is geen opdracht naar de thermostaat gestuurd.",
   "errors.resume_pending": "Pauze opgeheven. De thermostaat heeft {mode, select, none {het herstel} heat {de modus verwarmen} cool {de modus koelen} off {de modus uit} auto {de modus automatisch} heat_cool {de modus verwarmen/koelen} fan_only {de modus alleen ventilator} other {de modus {mode}}} nog niet overgenomen; Climate Advisor stuurt het opnieuw. De pauzeperiode begint zodra het is overgenomen.",
   "errors.suggestion_key_required": "Vereist: suggestion_key",
+  "errors.suggestion_key_unknown": "Onbekende suggestion_key: {suggestion_key}",
   "errors.timeline_not_ready": "De tijdlijn van de bewerkingen is nog niet klaar.",
   "errors.zone_selection_required": "Er zijn meerdere Climate Advisor-zones geconfigureerd — voeg {hint} toe (een van de entry_id-waarden in 'zones') zodat het verzoek precies één zone aanwijst."
 }

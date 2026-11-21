@@ -54,7 +54,16 @@ from .const import (
     ATTR_THERMAL_HEATING_RATE,
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
+    DAY_TYPE_COLD,
+    DAY_TYPE_COOL,
+    DAY_TYPE_HOT,
+    DAY_TYPE_MILD,
+    DAY_TYPE_WARM,
     DOMAIN,
+    OCCUPANCY_AWAY,
+    OCCUPANCY_GUEST,
+    OCCUPANCY_HOME,
+    OCCUPANCY_VACATION,
 )
 from .coordinator import ClimateAdvisorCoordinator
 from .entity import ClimateAdvisorEntity
@@ -107,17 +116,16 @@ class ClimateAdvisorBaseSensor(ClimateAdvisorEntity, SensorEntity):
 
     _empty_data_warned: bool = False
     _truncation_warned: bool = False
+    _off_list_warned: bool = False
 
     def __init__(
         self,
         coordinator: ClimateAdvisorCoordinator,
         entry: ConfigEntry,
         key: str,
-        icon: str,
     ) -> None:
         """Initialize the sensor (unique id, translated name and zone device come from ClimateAdvisorEntity)."""
         super().__init__(coordinator, entry, key)
-        self._attr_icon = icon
         self._key = key
 
     def _lang(self) -> str:
@@ -161,7 +169,18 @@ class ClimateAdvisorBaseSensor(ClimateAdvisorEntity, SensorEntity):
     def native_value(self) -> Any:
         """Return the sensor value."""
         if self.coordinator.data:
-            return self._prose(self.coordinator.data.get(self._key))
+            value = self._prose(self.coordinator.data.get(self._key))
+            # ENUM sensors (#1637): Home Assistant rejects a state outside ``options``, which would break the
+            # entity. A value outside the list (it should never happen) reads as unknown instead, logged once.
+            options = getattr(self, "_attr_options", None)
+            if options is not None and value is not None and value not in options:
+                if not self._off_list_warned:
+                    _LOGGER.warning(
+                        "Sensor %s: value %r is not one of %s; reporting unknown", self._key, value, options
+                    )
+                    self._off_list_warned = True
+                return None
+            return value
         if not self._empty_data_warned:
             _LOGGER.debug(
                 "Coordinator data empty for sensor %s — returning None",
@@ -206,8 +225,12 @@ class _ProseSensor(ClimateAdvisorBaseSensor):
 class ClimateAdvisorDayTypeSensor(ClimateAdvisorBaseSensor):
     """Sensor showing today's day type classification."""
 
+    # Quality scale entity-device-class (#1637): a fixed set of values (the state names are in strings.json).
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [DAY_TYPE_HOT, DAY_TYPE_WARM, DAY_TYPE_MILD, DAY_TYPE_COOL, DAY_TYPE_COLD, "unknown"]
+
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_DAY_TYPE, "mdi:weather-partly-cloudy")
+        super().__init__(coordinator, entry, ATTR_DAY_TYPE)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -230,25 +253,19 @@ class ClimateAdvisorTrendSensor(ClimateAdvisorBaseSensor):
 
     _attr_entity_registry_enabled_default = False
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_TREND, "mdi:trending-up")
+    # Quality scale entity-device-class (#1637): a fixed set of values. The icon per state is in icons.json.
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["warming", "cooling", "stable", "unknown"]
 
-    @property
-    def icon(self) -> str:
-        """Dynamic icon based on trend direction."""
-        value = self.native_value
-        if value == "warming":
-            return "mdi:trending-up"
-        elif value == "cooling":
-            return "mdi:trending-down"
-        return "mdi:trending-neutral"
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, ATTR_TREND)
 
 
 class ClimateAdvisorNextActionSensor(_ProseSensor):
     """Sensor showing the next recommended human action."""
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_NEXT_ACTION, "mdi:human-greeting")
+        super().__init__(coordinator, entry, ATTR_NEXT_ACTION)
 
 
 class ClimateAdvisorNextAutomationSensor(_ProseSensor):
@@ -259,7 +276,6 @@ class ClimateAdvisorNextAutomationSensor(_ProseSensor):
             coordinator,
             entry,
             ATTR_NEXT_AUTOMATION_ACTION,
-            "mdi:robot",
         )
 
 
@@ -271,7 +287,6 @@ class ClimateAdvisorNextAutomationTimeSensor(ClimateAdvisorBaseSensor):
             coordinator,
             entry,
             ATTR_NEXT_AUTOMATION_TIME,
-            "mdi:clock-outline",
         )
 
 
@@ -279,7 +294,7 @@ class ClimateAdvisorBriefingSensor(ClimateAdvisorBaseSensor):
     """Sensor holding the full daily briefing text."""
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_BRIEFING, "mdi:email-outline")
+        super().__init__(coordinator, entry, ATTR_BRIEFING)
 
     @property
     def native_value(self) -> str | None:
@@ -309,7 +324,7 @@ class ClimateAdvisorComplianceSensor(ClimateAdvisorBaseSensor):
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_COMPLIANCE_SCORE, "mdi:check-circle")
+        super().__init__(coordinator, entry, ATTR_COMPLIANCE_SCORE)
 
     @property
     def native_value(self) -> float | None:
@@ -382,15 +397,19 @@ class ClimateAdvisorStatusSensor(_ProseSensor):
     """Sensor showing the overall automation status."""
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_AUTOMATION_STATUS, "mdi:home-thermometer")
+        super().__init__(coordinator, entry, ATTR_AUTOMATION_STATUS)
 
 
 class ClimateAdvisorOccupancySensor(ClimateAdvisorBaseSensor):
     """Sensor showing the current occupancy mode."""
 
+    # Quality scale entity-device-class (#1637): a fixed set of values (the state names are in strings.json).
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [OCCUPANCY_HOME, OCCUPANCY_AWAY, OCCUPANCY_VACATION, OCCUPANCY_GUEST]
+
     def __init__(self, coordinator, entry):
         """Initialize the occupancy mode sensor."""
-        super().__init__(coordinator, entry, ATTR_OCCUPANCY_MODE, "mdi:home-account")
+        super().__init__(coordinator, entry, ATTR_OCCUPANCY_MODE)
 
 
 class ClimateAdvisorLastActionTimeSensor(ClimateAdvisorBaseSensor):
@@ -399,7 +418,7 @@ class ClimateAdvisorLastActionTimeSensor(ClimateAdvisorBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_LAST_ACTION_TIME, "mdi:clock-check-outline")
+        super().__init__(coordinator, entry, ATTR_LAST_ACTION_TIME)
 
 
 class ClimateAdvisorLastActionReasonSensor(ClimateAdvisorBaseSensor):
@@ -408,7 +427,7 @@ class ClimateAdvisorLastActionReasonSensor(ClimateAdvisorBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_LAST_ACTION_REASON, "mdi:text-box-outline")
+        super().__init__(coordinator, entry, ATTR_LAST_ACTION_REASON)
 
     @property
     def native_value(self) -> str | None:
@@ -435,7 +454,7 @@ class ClimateAdvisorFanStatusSensor(_ProseSensor):
     """
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_FAN_STATUS, "mdi:fan")
+        super().__init__(coordinator, entry, ATTR_FAN_STATUS)
 
     @property
     def native_value(self) -> Any:
@@ -460,7 +479,7 @@ class ClimateAdvisorContactStatusSensor(_ProseSensor):
     """Sensor showing the current door/window contact sensor status."""
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_CONTACT_STATUS, "mdi:door-open")
+        super().__init__(coordinator, entry, ATTR_CONTACT_STATUS)
 
     @property
     def icon(self) -> str:
@@ -494,7 +513,7 @@ class ClimateAdvisorAIStatusSensor(ClimateAdvisorBaseSensor):
 
     def __init__(self, coordinator, entry):
         """Initialize the AI status sensor."""
-        super().__init__(coordinator, entry, ATTR_AI_STATUS, "mdi:robot")
+        super().__init__(coordinator, entry, ATTR_AI_STATUS)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -529,7 +548,7 @@ class ClimateAdvisorIndoorTempSensor(ClimateAdvisorBaseSensor):
 
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the indoor temperature sensor."""
-        super().__init__(coordinator, entry, ATTR_INDOOR_TEMP, "mdi:thermometer")
+        super().__init__(coordinator, entry, ATTR_INDOOR_TEMP)
 
 
 class ClimateAdvisorOutdoorTempSensor(ClimateAdvisorBaseSensor):
@@ -541,7 +560,7 @@ class ClimateAdvisorOutdoorTempSensor(ClimateAdvisorBaseSensor):
 
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the outdoor temperature sensor."""
-        super().__init__(coordinator, entry, ATTR_OUTDOOR_TEMP, "mdi:thermometer-lines")
+        super().__init__(coordinator, entry, ATTR_OUTDOOR_TEMP)
 
 
 class ClimateAdvisorEffectiveTargetTempSensor(ClimateAdvisorBaseSensor):
@@ -563,7 +582,6 @@ class ClimateAdvisorEffectiveTargetTempSensor(ClimateAdvisorBaseSensor):
             coordinator,
             entry,
             ATTR_EFFECTIVE_TARGET_TEMP,
-            "mdi:thermostat",
         )
 
 
@@ -624,7 +642,7 @@ class ClimateAdvisorHeatThresholdSensor(_ClimateAdvisorThresholdSensor):
 
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the heat threshold sensor."""
-        super().__init__(coordinator, entry, ATTR_HEAT_THRESHOLD, "mdi:thermometer-low")
+        super().__init__(coordinator, entry, ATTR_HEAT_THRESHOLD)
 
 
 class ClimateAdvisorCoolThresholdSensor(_ClimateAdvisorThresholdSensor):
@@ -634,7 +652,7 @@ class ClimateAdvisorCoolThresholdSensor(_ClimateAdvisorThresholdSensor):
 
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the cool threshold sensor."""
-        super().__init__(coordinator, entry, ATTR_COOL_THRESHOLD, "mdi:thermometer-high")
+        super().__init__(coordinator, entry, ATTR_COOL_THRESHOLD)
 
 
 class ClimateAdvisorForecastHighSensor(ClimateAdvisorBaseSensor):
@@ -646,7 +664,7 @@ class ClimateAdvisorForecastHighSensor(ClimateAdvisorBaseSensor):
 
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the forecast high temperature sensor."""
-        super().__init__(coordinator, entry, ATTR_FORECAST_HIGH, "mdi:thermometer-chevron-up")
+        super().__init__(coordinator, entry, ATTR_FORECAST_HIGH)
 
 
 class ClimateAdvisorForecastLowSensor(ClimateAdvisorBaseSensor):
@@ -658,4 +676,4 @@ class ClimateAdvisorForecastLowSensor(ClimateAdvisorBaseSensor):
 
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the forecast low temperature sensor."""
-        super().__init__(coordinator, entry, ATTR_FORECAST_LOW, "mdi:thermometer-chevron-down")
+        super().__init__(coordinator, entry, ATTR_FORECAST_LOW)

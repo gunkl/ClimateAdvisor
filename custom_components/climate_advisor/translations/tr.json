@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "Climate Advisor bu bölgeyi güncelleyemedi: {error}"
+    },
+    "unknown_suggestion": {
+      "message": "Bilinmeyen öneri anahtarı {suggestion_key}. Geçerli anahtarlar: {valid}."
+    },
+    "service_failed": {
+      "message": "Climate Advisor {service} işlemini tamamlayamadı: {error}"
     }
   }
 }

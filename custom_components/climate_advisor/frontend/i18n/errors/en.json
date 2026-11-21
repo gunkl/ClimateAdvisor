@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "Pause cleared. Automation is off (observe-only): no thermostat command was sent.",
   "errors.resume_pending": "Pause cleared. The thermostat did not take {mode, select, none {the restore} heat {heat} cool {cool} off {off} auto {auto} heat_cool {heat_cool} fan_only {fan_only} other {{mode}}} yet; Climate Advisor is re-sending it. The grace period starts once it lands.",
   "errors.suggestion_key_required": "Required: suggestion_key",
+  "errors.suggestion_key_unknown": "Unknown suggestion_key: {suggestion_key}",
   "errors.timeline_not_ready": "The operation timeline is not ready yet.",
   "errors.zone_selection_required": "Multiple Climate Advisor zones are configured — add {hint} (one of the entry_id values in 'zones') so the request names exactly one zone."
 }

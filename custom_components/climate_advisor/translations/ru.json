@@ -863,6 +863,12 @@
     },
     "update_failed": {
       "message": "Climate Advisor не удалось обновить эту зону: {error}"
+    },
+    "unknown_suggestion": {
+      "message": "Неизвестный ключ предложения {suggestion_key}. Допустимые ключи: {valid}."
+    },
+    "service_failed": {
+      "message": "Climate Advisor не удалось выполнить {service}: {error}"
     }
   }
 }

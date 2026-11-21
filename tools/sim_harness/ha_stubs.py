@@ -641,6 +641,8 @@ class _SensorDeviceClass(_enum.StrEnum):
     PRESSURE = "pressure"
     POWER = "power"
     ENERGY = "energy"
+    ENUM = "enum"  # #1637: Day Type, Trend and Occupancy Mode
+    TIMESTAMP = "timestamp"
 
 
 class _UnitOfTemperature(_enum.StrEnum):

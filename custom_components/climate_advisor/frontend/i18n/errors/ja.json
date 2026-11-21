@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "一時停止を解除しました。自動制御はオフ（監視のみ）のため、サーモスタットにはコマンドを送信していません。",
   "errors.resume_pending": "一時停止を解除しました。サーモスタットがまだ{mode, select, none {復元} heat {暖房} cool {冷房} off {オフ} auto {自動} heat_cool {冷暖房} fan_only {ファンのみ} other {{mode}}}に切り替わっていないため、Climate Advisor が再送信しています。切り替わると一時停止期間が始まります。",
   "errors.suggestion_key_required": "必須：suggestion_key",
+  "errors.suggestion_key_unknown": "不明な suggestion_key: {suggestion_key}",
   "errors.timeline_not_ready": "動作タイムラインはまだ準備できていません。",
   "errors.zone_selection_required": "複数の Climate Advisor ゾーンが設定されています — リクエストでゾーンを1つだけ指定するため、{hint}（'zones' 内の entry_id の値のいずれか）を追加してください。"
 }

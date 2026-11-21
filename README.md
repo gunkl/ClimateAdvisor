@@ -150,6 +150,11 @@ Climate Advisor is the scheduler and the thermostat is the executor. Set the the
 - **Set holds to last until changed.** On an Ecobee: Hold Action → Until I change it.
 - **Single-mode systems:** heat-only and cool-only thermostats work, with Climate Advisor using the one mode the device has. These setups are less tested than heat-and-cool systems.
 
+### Supported devices
+
+- **Tested:** Ecobee thermostats, through Home Assistant's Ecobee integration.
+- **Not tested:** everything else. Climate Advisor works with Home Assistant entities, not with brands, so any `climate` entity that supports heat and/or cool modes and setting a target temperature should work. The same goes for any `weather` entity with a forecast, and any `fan` or `switch` entity for a whole-house fan. None of these has been tested yet. If you run Climate Advisor with something else, an issue saying whether it worked helps the next person.
+
 ### AI Investigator
 
 The optional AI Investigator reads what Climate Advisor did and why, and writes a report in your Home Assistant language. It uses the AI provider you set up in Home Assistant, so Climate Advisor keeps no key of its own. With a local model such as Ollama, your house data stays at home.
@@ -190,6 +195,8 @@ See [multi-zone-spec](docs/multi-zone-spec.md).
 - **At the briefing time** you set, the daily briefing is built and sent.
 
 If an update fails, the zone's sensors show as unavailable until the next good update. The error is logged once, and so is the recovery.
+
+**At startup a zone doesn't wait for its thermostat.** If the thermostat's own integration is still loading after a restart (a cloud thermostat, for example), the zone starts anyway and runs on fallbacks until the thermostat appears, rather than sitting in "retrying setup" (a deliberate choice, #1640).
 
 ### Known limitations
 

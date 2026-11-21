@@ -3,6 +3,19 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.56] — 2026-11-21
+
+### Fixed
+- Fix #1650: the AI Investigator now sees the project's known GitHub issues again, so a report can say "this is already tracked as #N". It read them through a Home Assistant call that was removed before 2026.3, Climate Advisor's minimum version. The error was swallowed, so every report since then went out without that context. The tests had mocked the removed call, which hid the problem; they now use the real one.
+
+### Changed
+- #1637 (Home Assistant quality scale, second batch). Nothing changes in what Climate Advisor does in your house.
+  - **Services are always there** (#1638). The five `climate_advisor.*` services are registered when Home Assistant starts, not by the first zone. Calling one for a zone that isn't loaded, or with no zone set up, now gives a clear "unknown or unloaded zone" error instead of "service not found".
+  - **Services say when they fail.** `respond_to_suggestion` with a key that doesn't exist is now an error that lists the valid keys. Before, it logged a warning and reported success. The dashboard's suggestion endpoint rejects unknown keys the same way (#1652). If a service's work fails (saving, resetting, sending the briefing), you get a translated error with the cause, not a raw exception.
+  - **Icons follow Home Assistant's icon system** (#1647). Every entity, state and service has its icon in `icons.json`. Services get icons in Developer Tools. Trend keeps its arrows per state. Occupancy Mode now shows a different icon for away, vacation and guest, and the Automation switch shows a crossed-out robot when it's off. Other icons are unchanged.
+  - **Day Type, Trend and Occupancy Mode are enumeration sensors** (part of #1648). Home Assistant now knows their possible values, so the automation editor can offer them. The states themselves are unchanged.
+  - **Docs:** the README lists the tested hardware (Ecobee; nothing else has been tested yet). It also explains that a zone starts on fallbacks rather than waiting for a slow thermostat at startup (a deliberate choice, #1640).
+
 ## [0.9.55] — 2026-11-20
 
 ### Changed

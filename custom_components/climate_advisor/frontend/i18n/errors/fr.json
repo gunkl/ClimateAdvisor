@@ -32,6 +32,7 @@
   "errors.resume_observe_only": "Pause levée. L’automatisation est désactivée (observation seule) : aucune commande n’a été envoyée au thermostat.",
   "errors.resume_pending": "Pause levée. Le thermostat n’a pas encore pris en compte {mode, select, none {la restauration} heat {le mode chauffage} cool {le mode climatisation} off {le mode éteint} auto {le mode auto} heat_cool {le mode chauffage/climatisation} fan_only {le mode ventilation uniquement} other {{mode}}} ; Climate Advisor renvoie la commande. La pause démarre dès que la commande est prise en compte.",
   "errors.suggestion_key_required": "Requis : suggestion_key",
+  "errors.suggestion_key_unknown": "suggestion_key inconnue : {suggestion_key}",
   "errors.timeline_not_ready": "La chronologie des opérations n’est pas encore prête.",
   "errors.zone_selection_required": "Plusieurs zones Climate Advisor sont configurées — ajoutez {hint} (l’une des valeurs entry_id de « zones ») pour que la requête désigne exactement une zone."
 }

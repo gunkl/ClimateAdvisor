@@ -1612,16 +1612,18 @@
 
   window.respondSuggestion = async function(key, action) {
     try {
-      await apiFetch('respond_suggestion', {
+      const resp = await apiFetch('respond_suggestion', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: action, suggestion_key: key }),
       });
       const actionsEl = document.getElementById(`suggestion-actions-${key}`);
       if (actionsEl) {
-        const label = action === 'accept' ? '✓ Accepted' : '✓ Dismissed';
+        const changed = (resp && resp.changes_text) || [];
+        const label = action === 'dismiss' ? '✓ Dismissed' : (changed.length ? '✓ Accepted' : '✓ Noted');
+        const changedHtml = action === 'accept' ? changed.map(t => `<div style="font-size:0.85em">${escapeHtml(t)}</div>`).join('') : '';
         actionsEl.innerHTML = `
-          <span class="action-result show ok">${label}</span>
+          <span class="action-result show ok">${label}</span>${changedHtml}
           <div style="margin-top:8px;font-size:0.85em;color:#666;">
             Was this diagnosis accurate?
             <button class="btn success" style="padding:2px 8px;font-size:0.8em;margin-left:6px;" onclick="submitFeedback('${escapeHtml(key)}','correct')">✓ Correct</button>
@@ -1862,6 +1864,24 @@
     `;
   }
 
+  // Issue #1652: an actionable suggestion lists what Accept changes; advice offers "Got it" (records that it was seen).
+  function suggestionCardHtml(item) {
+    const k = escapeHtml(item.key);
+    const lines = (item.changes_text || []).map(t => `<div style="font-size:0.85em">${escapeHtml(t)}</div>`).join('');
+    const plan = item.actionable && lines ? `<div style="font-size:0.85em;margin-bottom:6px">If you accept:${lines}</div>` : '';
+    const primary = item.actionable
+      ? `<button class="btn success" onclick="respondSuggestion('${k}','accept')">Accept</button>`
+      : `<button class="btn success" onclick="respondSuggestion('${k}','accept')">Got it</button>`;
+    return `
+        <div class="suggestion-card" id="suggestion-${k}">
+          <p>${escapeHtml(item.text)}</p>${plan}
+          <div class="btn-group" id="suggestion-actions-${k}">
+            ${primary}
+            <button class="btn secondary" onclick="respondSuggestion('${k}','dismiss')">Dismiss</button>
+          </div>
+        </div>`;
+  }
+
   async function loadSuggestions() {
     try {
       const data = await apiFetch('learning');
@@ -1872,17 +1892,7 @@
         container.innerHTML = '<p>No pending suggestions.</p>';
         return;
       }
-      container.innerHTML = suggestions.map(item => {
-        const k = escapeHtml(item.key);
-        return `
-        <div class="suggestion-card" id="suggestion-${k}">
-          <p>${escapeHtml(item.text)}</p>
-          <div class="btn-group" id="suggestion-actions-${k}">
-            <button class="btn success" onclick="respondSuggestion('${k}','accept')">Accept</button>
-            <button class="btn secondary" onclick="respondSuggestion('${k}','dismiss')">Dismiss</button>
-          </div>
-        </div>`;
-      }).join('');
+      container.innerHTML = suggestions.map(suggestionCardHtml).join('');
     } catch (e) {
       const container = document.getElementById('suggestions-container');
       if (container) {
@@ -1903,17 +1913,7 @@
         if (suggestions.length === 0) {
           sugEl.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem">No pending suggestions.</p>';
         } else {
-          sugEl.innerHTML = suggestions.map(item => {
-            const k = escapeHtml(item.key);
-            return `
-            <div class="suggestion-card" id="suggestion-${k}">
-              <p>${escapeHtml(item.text)}</p>
-              <div class="btn-group" id="suggestion-actions-${k}">
-                <button class="btn success" onclick="respondSuggestion('${k}','accept')">Accept</button>
-                <button class="btn secondary" onclick="respondSuggestion('${k}','dismiss')">Dismiss</button>
-              </div>
-            </div>`;
-          }).join('');
+          sugEl.innerHTML = suggestions.map(suggestionCardHtml).join('');
         }
       }
 

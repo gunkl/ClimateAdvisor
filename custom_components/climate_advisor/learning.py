@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -63,6 +64,7 @@ from .const import (
 from .cycle_model import CYCLE_INFO_MAX, CYCLE_MAX_CYCLES, HELD_MIN_KEEP
 from .cycle_model import MODEL_VERSION as CYCLE_MODEL_VERSION
 from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
+from .suggestion_actions import suggestion_setting_changes
 from .swing import (
     SWING_DEFINITION_TEXT,
     apply_coast_samples,
@@ -2822,35 +2824,16 @@ class LearningEngine:
             self._state.settings_history = self._state.settings_history[-200:]
         _LOGGER.info("Suggestion feedback recorded — key=%s verdict=%s", suggestion_key, verdict)
 
-    def accept_suggestion(self, suggestion_key: str) -> dict[str, Any]:
-        """Accept a suggestion and return the config changes to apply.
+    def accept_suggestion(self, suggestion_key: str, config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Accept a suggestion and return the real settings to change (``CONFIG_METADATA`` keys).
 
-        Returns:
-            Dict of configuration changes the coordinator should apply.
+        Issue #1652: the changes are computed from the zone's current ``config`` by
+        ``suggestion_actions.suggestion_setting_changes()`` (a step, inside bounds, never the wrong way). An
+        advice-only suggestion, or one already at its bound, returns ``{}``: accepting it only records that it was
+        seen. Before #1652 every key mapped to a setting no code reads, so Accept changed nothing in the house.
         """
-        # This is a placeholder — in a full implementation, each suggestion key
-        # maps to a specific set of config changes.
-        changes: dict[str, Any] = {}
-        # Issue #874: tracked separately from `changes` so informational-only keys
-        # (below) don't fall through to the "not recognized" WARNING — they ARE
-        # recognized, they just have no config change to apply.
-        recognized = True
-
-        if suggestion_key == "low_window_compliance":
-            changes["disable_window_recommendations"] = True
-        elif suggestion_key == "frequent_overrides":
-            changes["request_setpoint_analysis"] = True
-        elif suggestion_key == "short_departures":
-            changes["occupancy_setback_minutes"] = 5
-        elif suggestion_key == "comfort_violations":
-            changes["setback_modifier"] = 2  # Less aggressive setback
-            changes["morning_preheat_offset_minutes"] = 15  # Start earlier
-        elif suggestion_key == "frequent_door_pauses":
-            changes["door_pause_seconds"] = 300  # Extend to 5 minutes
-        elif suggestion_key in ("thermal_model_ready", "forecast_bias_significant", "high_runtime_mild_days"):
-            pass  # informational-only / no single deterministic config change
-        else:
-            recognized = False
+        recognized = suggestion_key in SUGGESTION_KEYS
+        changes: dict[str, Any] = suggestion_setting_changes(suggestion_key, config) if recognized else {}
 
         if changes:
             _LOGGER.info(
@@ -2860,7 +2843,7 @@ class LearningEngine:
             )
         elif recognized:
             _LOGGER.info(
-                "Learning suggestion accepted — key=%s, no automatic config change available",
+                "Learning suggestion accepted — key=%s, no setting to change (advice only, or already at its limit)",
                 suggestion_key,
             )
         else:
@@ -2869,13 +2852,15 @@ class LearningEngine:
                 suggestion_key,
             )
 
-        self._state.settings_history.append(
-            {
-                "timestamp": datetime.now().isoformat(),
-                "suggestion": suggestion_key,
-                "changes": changes,
-            }
-        )
+        entry: dict[str, Any] = {
+            "timestamp": datetime.now().isoformat(),
+            "suggestion": suggestion_key,
+            "changes": changes,
+        }
+        if changes:
+            # What each setting was before, so the history shows the step taken (and a person can put it back).
+            entry["previous"] = {k: (config or {}).get(k) for k in changes}
+        self._state.settings_history.append(entry)
         # Cap to prevent unbounded growth
         if len(self._state.settings_history) > 200:
             self._state.settings_history = self._state.settings_history[-200:]

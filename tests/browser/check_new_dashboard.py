@@ -455,7 +455,17 @@ def banner_cases(browser):
 
 def behaviour(browser):
     learning = json.loads(json.dumps(FX["learning"]))
-    learning["suggestions"] = [{"key": "k1", "text": "Raise the sleep setpoint"}]
+    # Issue #1652: Accept is offered only for an actionable suggestion (advice gets "Got it")
+    learning["suggestions"] = [
+        {
+            "key": "k1",
+            "text": "Raise the sleep setpoint",
+            "actionable": True,
+            "changes": {"sensor_debounce_seconds": 900},
+            "changes_msg": [{"key": "learning.change.sensor_debounce_seconds", "params": {"before": 10, "after": 15}}],
+            "changes_text": ["Sensor Debounce Delay: 10 min → 15 min"],
+        }
+    ]
     ctx, pg = new_page(browser, {"width": 1280, "height": 900}, "light", {"learning": learning}, name="behaviour")
     pg.goto(BASE)
     pg.wait_for_timeout(800)

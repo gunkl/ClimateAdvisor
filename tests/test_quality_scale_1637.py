@@ -299,9 +299,9 @@ class TestServiceErrors:
 
 
 def test_service_accept_persists_settings_like_the_dashboard():
-    """Issue #1652: the service saves an accepted change into the zone's entry through the same helper as the
-    dashboard (before, only the dashboard path had this step). Today no suggestion maps to a stored setting
-    (#1652 tracks that), so the test drives the helper with a real one.
+    """Issue #1652: the service saves an accepted change into the zone's entry through the same step as the
+    dashboard (before, only the dashboard path had it), and the change is a real setting: "door pauses are
+    frequent" lengthens the door/window debounce from the zone's 10 minutes to 15, live and in the entry.
     """
     from tools.sim_harness._loop import run_coro
     from tools.sim_harness.build_coordinator import build_headless_multi_zone
@@ -309,10 +309,8 @@ def test_service_accept_persists_settings_like_the_dashboard():
     zones, hass, _scheduler = build_headless_multi_zone(zone_count=1)
     zone = zones["zone_0"]
     entry = zone["entry"]
-    zone["coordinator"].learning.accept_suggestion = lambda key: {
-        "comfort_heat": 69.0,
-        "request_setpoint_analysis": True,
-    }
+    coordinator = zone["coordinator"]
+    coordinator.config["sensor_debounce_seconds"] = 600
     run_coro(
         hass.services.async_call(
             DOMAIN,
@@ -321,5 +319,6 @@ def test_service_accept_persists_settings_like_the_dashboard():
         )
     )
     stored = hass.config_entries.async_get_entry(entry.entry_id).data
-    assert stored["comfort_heat"] == 69.0
-    assert "request_setpoint_analysis" not in stored  # not a stored setting: runtime only, as on the dashboard
+    assert stored["sensor_debounce_seconds"] == 900
+    assert coordinator.config["sensor_debounce_seconds"] == 900
+    assert coordinator.automation_engine.config["sensor_debounce_seconds"] == 900  # the engine reads the same dict

@@ -3377,7 +3377,9 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `REVISIT_DELAY_SECONDS` | `300` | seconds (5 min) | Follow-up re-evaluation delay after any HVAC action |
 | `OCCUPANCY_SETBACK_MINUTES` | `15` | minutes | Delay before applying away setback temperature after departure |
 | `MAX_CONTINUOUS_RUNTIME_HOURS` | `3` | hours | Reserved — maximum continuous HVAC runtime guard |
-| `SUGGESTION_COOLDOWN_DAYS` | `7` | days | Learning engine: minimum days between repeat suggestions |
+| `SUGGESTION_COOLDOWN_DAYS` | `7` | days | Not read by the code: an accepted suggestion is held back 30 days, a dismissed one stays dismissed (05 §Suggestion Lifecycle) |
+| `DOOR_PAUSE_DEBOUNCE_STEP_SECONDS` / `_CAP_SECONDS` (`suggestion_actions.py`) | `300` / `1200` | seconds | Accepting `frequent_door_pauses`: `sensor_debounce_seconds` + 5 min, never above 20 min, never shortened (Issue #1652) |
+| `SETBACK_STEP_F` / `SETBACK_STEP_C_IN_F` (`suggestion_actions.py`) | `2.0` / `1.8` | °F | Accepting `comfort_violations`: away heat up / away cool down by this (°F zone / °C zone), never past home or sleep, away gap ≥ `MIN_HEAT_COOL_GAP_F` (Issue #1652) |
 | `MIN_DATA_POINTS_FOR_SUGGESTION` | `14` | data points | Learning engine: minimum records before generating suggestions |
 | `COMPLIANCE_THRESHOLD_LOW` | `0.3` | ratio | Learning engine: below 30% compliance triggers a suggestion |
 | `COMPLIANCE_THRESHOLD_HIGH` | `0.8` | ratio | Learning engine: above 80% compliance means advice is working |

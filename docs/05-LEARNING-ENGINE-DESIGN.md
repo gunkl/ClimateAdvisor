@@ -10,7 +10,8 @@
 | How are k_passive and k_active extracted from observations? | `k_active` (heating or cooling per hour) is learned by the **pooled cycle model** (Issues #1512, #1516): every heating or cooling cycle is recorded with the room readings around it (`climate_advisor_cycles.json`), and all recent cycles of a mode are fitted together, so the rate, the leak and the coast after the equipment stops are separated instead of the room's drift after a run being mistaken for the rate. It starts from a prior (typical house, or the home's stored rate weighted by its evidence), counts a cycle only when the room moved at least three sensor steps, grades how sure it is (`none`/`low`/`medium`/`high`; a whole-degree sensor never reaches `high`), and lets old cycles give way only to newer ones (a cycle's weight halves for every 20 newer informative cycles, never with time alone). `k_passive` (the closed-house leak rate) is learned only from closed-house data (passive windows); the cycle model's own leak (`k_p_cycle`) is a diagnostic and never drives a decision. `k_solar` uses the same per-interval-subtraction pattern (`compute_k_solar`, Issue #587 Defect B). | [§Parameter Extraction](05-LEARNING-ENGINE-DESIGN.md#parameter-extraction) |
 | What does `get_thermal_model()` return and how is confidence graded? | Returns k_passive, k_active_heat, k_active_cool, k_vent_window, k_vent_fan, k_solar, plus confidence grades ("none"/"low"/"medium"/"high") graded independently for HVAC (the cycle fit's grade and the evidence behind the heat/cool rates: the pre-upgrade count, which gives way only as new cycles replace or contradict it, never with time alone, Issue #1512) and passive obs (vent/solar counts explicitly excluded from passive confidence, Issue #587). Physics activates when either > "none". | [§get_thermal_model() → dict](05-LEARNING-ENGINE-DESIGN.md#get_thermal_model---dict) |
 | Is there a gate bridge (`k_vent_window` standing in for `k_passive`)? | No. It was removed in Issue #1512: the open-window rate is a different physical quantity from the closed-house rate, so using it as a stand-in mis-sized every heat-rate calculation and the forecast of homes that had only window data. Physics prediction needs a real closed-house `k_passive` (from passive windows); until then the forecast uses the schedule fallback. | [§Gate Bridge (removed)](05-LEARNING-ENGINE-DESIGN.md#gate-bridge-self-healing-issue-126-phase-a--removed-in-issue-1512) |
-| What patterns trigger learning suggestions and how many days of data are required? | Six patterns (low window compliance, frequent overrides, high runtime, short departures, comfort violations, frequent door pauses) are evaluated after 14+ days; suggestions repeat unless dismissed, with a 7-day cooldown. | [§Suggestion Generation](05-LEARNING-ENGINE-DESIGN.md#suggestion-generation) |
+| What patterns trigger learning suggestions and how many days of data are required? | Six patterns (low window compliance, frequent overrides, high runtime, short departures, comfort violations, frequent door pauses) are evaluated after 14+ days; suggestions repeat daily until acted on; an accepted one is held back 30 days, a dismissed one stays dismissed (`SUGGESTION_COOLDOWN_DAYS` is not read). | [§Suggestion Generation](05-LEARNING-ENGINE-DESIGN.md#suggestion-generation) |
+| What does accepting a suggestion change? | Issue #1652: only two suggestions change a real setting, from the zone's current value: `frequent_door_pauses` lengthens `sensor_debounce_seconds` by 5 min (cap 20 min, never shortened); `comfort_violations` moves `setback_heat` up and `setback_cool` down by 2 °F (1 °C on a Celsius zone), never past home or sleep and never to an away band under 4 °F. Every other suggestion is advice: the dashboard offers "Got it", and accepting changes nothing. | [Configuration Changes Applied by Suggestions](#configuration-changes-applied-by-suggestions) |
 | Where is the full Tier 3 spec for the v3 thermal model — pre/post/invariants, OLS contracts, EWMA table? | The Territory spec covers all observation lifecycles, all OLS solvers (including `compute_k_passive_endpoint`/`compute_k_solar`), commit routing, EWMA alpha table, rolling window constraints, the pooled cycle model (Issues #1512/#1516), swing detection, and the Issue #587 vent-split/retirement rationale. | [Thermal Model v3 — Territory Spec](thermal-model-v3-spec.md) |
 
 ## Purpose
@@ -59,16 +60,14 @@ Suggestions are generated when `generate_suggestions()` is called (typically dur
 ### Pattern: Low Window Compliance
 
 **Detection:** Of days where windows were recommended, compliance < 30%.
-**Suggestion:** "Would you like Climate Advisor to stop suggesting window actions and instead rely on HVAC with optimized schedules?"
-**If accepted:** `disable_window_recommendations = True` — the briefing stops suggesting window actions, and the automation engine uses HVAC for those day types instead.
-**Trade-off:** Slightly higher energy use, zero human effort required.
+**Suggestion (advice):** "Opening them is optional: with the windows closed, Climate Advisor keeps the house comfortable with the HVAC, which uses slightly more energy."
+**If accepted ("Got it"):** nothing changes (Issue #1652). Before, accepting set `disable_window_recommendations`, which no code reads: the text promised that window tips would stop and they never did. There is no setting that turns the window tips off.
 
 ### Pattern: Frequent Manual Overrides
 
 **Detection:** More than 10 manual thermostat adjustments in 14 days.
-**Suggestion:** "Would you like Climate Advisor to analyze the override patterns and suggest new setpoints?"
-**If accepted:** System flags for setpoint analysis (future: actually analyze the override direction and magnitude to suggest specific new setpoints).
-**Trade-off:** May result in slightly different comfort baseline.
+**Suggestion (advice):** "If the comfort temperatures don't suit you, change them in Settings and Climate Advisor will hold the new ones." (without override detail: "... you can change them in Settings.")
+**If accepted ("Got it"):** nothing changes (Issue #1652; it used to set `request_setpoint_analysis`, which nothing read). Override pattern analysis is still a future capability (below).
 **Unit handling (Issue #1050):** the suggestion's detail line ("mostly up by about 1°C ...") is worded in the user's unit. `LearningEngine.__init__(storage_path, entry_id="", temp_unit="fahrenheit")` receives the configured `temp_unit` from the coordinator and formats the average override magnitude with `format_temp_delta()`; stored override records are always internal °F (`old_setpoint_f` / `new_setpoint_f` are real °F floats, so a 21 -> 22 °C change is stored as 69.8 -> 71.6 and reads back as "+1°C"). History written before this fix with mixed-unit records is not migrated; the 14-day window ages it out.
 
 ### Pattern: High Runtime on Mild/Warm Days
@@ -80,28 +79,29 @@ Suggestions are generated when `generate_suggestions()` is called (typically dur
 ### Pattern: Short Departures
 
 **Detection:** More than 5 departures of 30–45 minutes in 14 days.
-**Suggestion:** "Would you like to shorten the setback delay from 15 minutes to 5 minutes, or skip setback for departures under 1 hour?"
-**Insight:** The current 15-minute delay means the setback barely takes effect before the person returns, wasting the recovery energy. Options: faster setback (saves more) or skip setback (saves the recovery penalty).
+**Suggestion (advice):** "If coming home to a cooler or warmer house bothers you, set milder away temperatures in Settings."
+**If accepted ("Got it"):** nothing changes (Issue #1652). The 15-minute delay is the constant `OCCUPANCY_SETBACK_MINUTES`, not a setting; the old text offered to shorten it to 5 minutes and accepting set `occupancy_setback_minutes`, which nothing read.
+**Insight:** The 15-minute delay means the setback barely takes effect before the person returns.
 
 ### Pattern: Comfort Violations
 
 **Detection:** Indoor temp outside the target range in effect (see [Comfort Violations](#comfort-violations-comfort_violations_minutes)) for > 30 minutes on 5+ of the last 14 days. Since Issue #1107 a planned sleep/away setback no longer counts, so this pattern fires only when the house misses the band CA was actually holding — it no longer recommends weaker setbacks merely because setbacks happened.
-**Suggestion:** "Would you like to reduce the setback aggressiveness, or start the morning warm-up earlier?"
-**If accepted:** Setback modifier increases by 2°F (less aggressive), and/or morning pre-heat starts 15 minutes earlier.
+**Suggestion:** "Milder away temperatures leave the house less to make up when you come home."
+**If accepted:** `setback_heat` rises and `setback_cool` falls by 2 °F (1 °C = 1.8 °F on a Celsius zone, so the setpoints stay on the Celsius grid), from the zone's current values (Issue #1652). Bounds: away heat never above home heat or sleep heat, away cool never below home cool or sleep cool, never moved the other way; the away band never ends up narrower than `MIN_HEAT_COOL_GAP_F` (4 °F) and a band already narrow or inverted is left alone. At those bounds there is nothing to change and the dashboard offers "Got it". The old "morning warm-up earlier" half is gone: the pre-heat settings are read by no code (#1377), so it could not change anything.
 
 ### Pattern: Frequent Door Pauses
 
 **Detection:** More than 20 HVAC pause events from door/window sensors in 14 days.
-**Suggestion:** "If a specific door is the main culprit, would you like to extend the pause delay for that door, or exclude it from monitoring?"
-**Future enhancement:** Track which specific sensor triggers most pauses and name it in the suggestion.
+**Suggestion:** "A longer sensor debounce delay keeps short openings from pausing it; the delay applies to every door and window. To stop one door from pausing the HVAC, remove its sensor from the door/window sensors in Settings." The most frequent sensor is named when known (`frequent_door_pauses_sensor`).
+**If accepted:** `sensor_debounce_seconds` grows by 5 minutes from the zone's current value, up to 20 minutes (twice the 10-minute default), and is never shortened (Issue #1652; the old mapping set `door_pause_seconds = 300`, no setting at all, and 300 s would have halved the real 600 s default). Owner rule 3 (HVAC off while a window is open) still applies, after the longer debounce. There is no per-door delay.
 
 ## Suggestion Lifecycle
 
 1. **Generated:** During daily briefing generation, based on pattern analysis
 2. **Delivered:** Appended to the daily briefing email/notification
-3. **Response:** User can accept, dismiss, or ignore
-   - **Accept:** Config changes are applied, recorded in settings_history
-   - **Dismiss:** Suggestion key added to dismissed list, won't reappear for SUGGESTION_COOLDOWN_DAYS (7)
+3. **Response:** User can accept (or, for advice, "Got it"), dismiss, or ignore
+   - **Accept:** the real setting changes (actionable suggestions only, see the table below) in the running zone and in its config entry, so it survives a reload or restart; the response lists each change ("Sensor Debounce Delay: 10 min → 15 min"). `settings_history` records the key, `changes` and `previous` (each setting's value before). The suggestion is held back for 30 days. Advice ("Got it") records the same entry with empty `changes`.
+   - **Dismiss:** Suggestion key added to `dismissed_suggestions`; it does not come back until that list (capped at 100) drops it or suggestions are reset. `SUGGESTION_COOLDOWN_DAYS` (7) is not read by the code.
    - **Ignore:** Suggestion reappears next day until acted on or pattern resolves
 
 ## Thermal Model
@@ -798,15 +798,20 @@ With utility rate data, convert runtime minutes to estimated cost and show daily
 
 ## Configuration Changes Applied by Suggestions
 
-| Suggestion Key | Config Changes |
-|---------------|---------------|
-| `low_window_compliance` | `disable_window_recommendations: true` |
-| `frequent_overrides` | `request_setpoint_analysis: true` |
-| `short_departures` | `occupancy_setback_minutes: 5` |
-| `comfort_violations` | `setback_modifier: +2`, `morning_preheat_offset_minutes: 15` |
-| `frequent_door_pauses` | `door_pause_seconds: 300` |
-| `thermal_model_ready` | No config change — informational notification only |
-| `forecast_bias_significant` | No config change — bias is applied internally at runtime |
+Issue #1652. Source: `suggestion_actions.py` (`suggestion_setting_changes(key, config)`, pure), called by `LearningEngine.accept_suggestion(key, config)`. Both accept paths (the `respond_to_suggestion` service and the dashboard's `respond_suggestion` REST view) go through `services.async_accept_suggestion()`: change the coordinator's config (the engine reads the same dict), write the entry, return the change messages. Before #1652 every key here mapped to a name no code reads (`disable_window_recommendations`, `request_setpoint_analysis`, `occupancy_setback_minutes`, `setback_modifier`, `morning_preheat_offset_minutes`, `door_pause_seconds`), from the first import (design gap, not a regression).
+
+| Suggestion Key | Setting | Change on Accept | Bounds |
+|---------------|---------|------------------|--------|
+| `frequent_door_pauses` | `sensor_debounce_seconds` | +300 s | at most 1200 s; at or above 1200 s nothing changes (never shortened) |
+| `comfort_violations` | `setback_heat`, `setback_cool` | heat +2 °F, cool −2 °F (1 °C on a Celsius zone) | heat ≤ min(home heat, sleep heat), cool ≥ max(home cool, sleep cool), never the other way; away gap stays ≥ 4 °F; a narrow or inverted away band is left alone |
+| `low_window_compliance` | none (advice) | — | — |
+| `frequent_overrides` | none (advice) | — | — |
+| `short_departures` | none (advice; the 15-min delay is a constant) | — | — |
+| `high_runtime_mild_days` | none (advice) | — | — |
+| `thermal_model_ready` | none — informational | — | — |
+| `forecast_bias_significant` | none — the bias is applied internally at runtime | — | — |
+
+The dashboard (`GET /api/climate_advisor/learning`) marks each suggestion `actionable` (Accept changes something now) and lists the planned change lines; a suggestion that is not actionable gets "Got it" instead of Accept.
 
 ## Compliance Summary API
 

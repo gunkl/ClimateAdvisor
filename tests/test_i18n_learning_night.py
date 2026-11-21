@@ -103,10 +103,11 @@ def test_low_window_compliance_english_is_unchanged_and_the_wire_round_trips(tmp
     e = _engine(tmp_path)
     _seed_window_compliance_records(e, 14)
     (text,) = e.generate_suggestions()
+    # Issue #1652: the text no longer offers to stop window tips (no setting does that); it is advice now.
     assert text == (
         "Over the past 14 days where opening windows was recommended, they were opened only 0% of the time. "
-        "Would you like Climate Advisor to stop suggesting window actions and instead rely on HVAC with optimized "
-        "schedules? This uses slightly more energy but requires no manual action."
+        "Opening them is optional: with the windows closed, Climate Advisor keeps the house comfortable with the "
+        "HVAC, which uses slightly more energy."
     )
     (msg,) = e.get_last_suggestion_msgs()
     assert e.get_last_suggestion_keys() == ["low_window_compliance"]
@@ -136,8 +137,8 @@ def test_frequent_overrides_detail_with_and_without_peak_hour(tmp_path: Path) ->
     (text,) = e.generate_suggestions()
     assert text == (
         "You've manually adjusted the thermostat 11 times in the past two weeks "
-        "(mostly up by about 2°F, often around 7:00). Would you like Climate Advisor to adjust the comfort "
-        "setpoints, or add a scheduled temperature bump?"
+        "(mostly up by about 2°F, often around 7:00). If the comfort temperatures don't suit you, change them in "
+        "Settings and Climate Advisor will hold the new ones."
     )
     # celsius engine: the delta is a scale-only TempDelta in the engine's unit
     e._temp_unit = "celsius"
@@ -147,9 +148,8 @@ def test_frequent_overrides_detail_with_and_without_peak_hour(tmp_path: Path) ->
     e._state.records[0]["override_details"] = []
     (bare,) = e.generate_suggestions()
     assert bare == (
-        "You've manually adjusted the thermostat 11 times in the past two weeks. This may indicate the comfort "
-        "setpoints don't match your preferences. Would you like Climate Advisor to analyze the override patterns "
-        "and suggest new setpoints?"
+        "You've manually adjusted the thermostat 11 times in the past two weeks. This may mean the comfort "
+        "temperatures don't match your preferences; you can change them in Settings."
     )
 
 
@@ -172,12 +172,13 @@ def test_pause_and_runtime_and_static_suggestions_english(tmp_path: Path) -> Non
     )
     assert got["frequent_door_pauses"] == (
         "HVAC has been paused 42 times due to open doors/windows in the past two weeks. Front Door was the most "
-        "frequent trigger (28 times). Would you like to extend the pause delay for that sensor, or exclude it "
-        "from monitoring?"
+        "frequent trigger (28 times). A longer sensor debounce delay keeps short openings from pausing it; the "
+        "delay applies to every door and window. To stop Front Door from pausing the HVAC, remove it from the "
+        "door/window sensors in Settings."
     )
     assert got["comfort_violations"] == (
         "The house has been outside your comfort range for more than 30 minutes on 14 of the last 14 days. "
-        "Would you like to reduce the setback aggressiveness, or start the morning warm-up earlier?"
+        "Milder away temperatures leave the house less to make up when you come home."
     )
     assert got["short_departures"].startswith("You frequently leave for 30–45 minute periods")
 

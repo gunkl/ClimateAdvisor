@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.61] — 2026-11-21
+
+### Added
+- README: a nightly **quality scale (self-assessed)** badge with the highest Home Assistant quality-scale tier Climate Advisor reaches (Bronze today, 50 of 54 rules), and a **strict typing** badge (#1668). The self-assessment now lives in `custom_components/climate_advisor/quality_scale.yaml`.
+- The `brands` rule is met: the integration ships its own brand images, which Home Assistant 2026.3+ reads directly. That completes Bronze (#1668).
+
 ## [0.9.60] — 2026-11-21
 
 > **Template warning:** **Last Action Time** and **Next Automation Time** are now timestamp sensors (#1648). Cards show them as "5 minutes ago" or "in 2 hours" in your language, and automations can trigger on them. Their state text changes: Last Action Time is now in UTC (`2026-11-20T14:00:00+00:00`), and Next Automation Time was a clock label like `6:30 AM` and is now a timestamp, or `unknown` when nothing is scheduled. A template that prints or compares the old text needs updating, for example `{{ as_timestamp(states('sensor.climate_advisor_next_automation_time')) | timestamp_custom('%-I:%M %p') }}`.

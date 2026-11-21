@@ -380,7 +380,7 @@ class TestActivitySummaryParsing:
     def test_drift_check_skipped_for_a_non_english_output_language(self, caplog):
         """Issue #1341 N3: the drift check (English sentinel + AM/PM regex) only runs for English output."""
         raw = "## ACTIVITY SUMMARY\nAutomation restarted after an update.\n"
-        for lang in ("de", "ar", "ko"):
+        for lang in ("de", "ar", "ko", "sv", "zh-TW"):
             caplog.clear()
             with caplog.at_level("WARNING"):
                 parse_investigation_response(raw, language=lang)
@@ -412,6 +412,10 @@ class TestActivitySummaryParsing:
         hass.config.language = "de"
         _parse_response(skill, "raw", hass)
         assert seen["lang"] == "de"
+        # Issue #1657: an unshipped language reaches the parser as given, so its drift check stays off
+        hass.config.language = "sv"
+        _parse_response(skill, "raw", hass)
+        assert seen["lang"] == "sv"
 
 
 # ---------------------------------------------------------------------------
@@ -1923,16 +1927,22 @@ class TestOutputLanguageInstruction:
         return asyncio.run(async_build_investigator_context(hass, coord))
 
     def test_english_adds_no_instruction_so_the_context_is_unchanged(self):
-        for language in ("en", "en-GB", None, "xx"):
+        for language in ("en", "en-GB", "en_US", None, "", "not a language!"):
             assert "OUTPUT LANGUAGE" not in self._context(language)
 
     def test_other_languages_get_the_instruction_with_the_language_name(self):
         ctx = self._context("de")
         assert "=== OUTPUT LANGUAGE ===" in ctx
         assert "in German" in ctx
-        # regional codes map like the rest of the integration (pt-BR -> pt, zh-CN -> zh-Hans)
-        assert "in Portuguese" in self._context("pt-BR")
-        assert "in Simplified Chinese" in self._context("zh-CN")
+        assert "in German (language code de)" in ctx
+
+    def test_any_home_assistant_language_is_passed_through_as_its_code(self):
+        """Issue #1657: languages Climate Advisor does not ship, and regional variants, reach the model as given."""
+        for code in ("sv", "zh-TW", "pt-BR", "nb", "he"):
+            ctx = self._context(code)
+            assert "=== OUTPUT LANGUAGE ===" in ctx, code
+            assert f"in the language with code {code}." in ctx, code
+        assert "in the language with code pt-BR." in self._context("pt_BR")  # HA-style underscore normalised
 
     def test_instruction_keeps_the_english_section_headers_and_citations(self):
         ctx = self._context("ja")

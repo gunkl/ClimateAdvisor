@@ -74,7 +74,7 @@ issues context and built-in Claude still call the cloud).
 
 **What changes inside Climate Advisor: very little.** Without a `structure`, AI Task returns
 plain text, which is what the `## SECTION` parser expects. The system prompt, the
-16-language output instruction, the parser, the fallback, the circuit breaker, the daily
+output-language instruction, the parser, the fallback, the circuit breaker, the daily
 limits and request history are reused unchanged. Only the transport inside
 `ClaudeAPIClient` differs ([AI Task transport](claude-api-spec.md#ai-task-transport-issue-1336)):
 

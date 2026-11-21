@@ -41,10 +41,11 @@ def async_request_reauth(hass: HomeAssistant, entry: ConfigEntry | None, credent
     if entry is None or credential not in REAUTH_STEPS:
         return False
     if any(entry.async_get_active_flows(hass, {SOURCE_REAUTH})):
-        _LOGGER.debug("Credential rejected; reauthentication already pending: credential=%s", credential)
+        _LOGGER.debug("Credential rejected; reauthentication already pending: step=%s", REAUTH_STEPS[credential])
         return False
+    # Logs only which form opens (never the credential's value or field), so a log export carries nothing secret.
     _LOGGER.warning(
-        "Credential rejected — asking the owner for a new one: credential=%s zone=%s", credential, entry.title
+        "Credential rejected — asking the owner for a new one: step=%s zone=%s", REAUTH_STEPS[credential], entry.title
     )
     entry.async_start_reauth(hass, data={REAUTH_CREDENTIAL: credential})
     return True
@@ -68,5 +69,5 @@ def async_dismiss_reauth(hass: HomeAssistant, entries: list[ConfigEntry], creden
                 hass.config_entries.flow.async_abort(flow["flow_id"])
                 closed += 1
     if closed:
-        _LOGGER.info("Reauthentication closed — credential saved in settings: credential=%s", credential)
+        _LOGGER.info("Reauthentication closed — credential saved in settings: step=%s", step)
     return closed

@@ -512,3 +512,21 @@ class TestAmbiguousCardSaysWhatAndWhy:
             # hassfest rejects anything that reads as HTML in a translation string (CI "validate", #1427)
             assert "<" not in text and ">" not in text, name
             assert "/api/climate_advisor/status" in text, name
+
+
+class TestOwnershipAndTitleEdges:
+    """No entity named means nothing to own; an unknown zone's title falls back to its id (Issues #1144, #1646)."""
+
+    def test_no_fan_entity_is_never_owned(self) -> None:
+        hass = _make_hass({"a": MagicMock()})
+        assert zone_registry.fan_entity_owned_by_other_zone(hass, None) is False
+        assert zone_registry.fan_entity_owned_by_other_zone(hass, "") is False
+
+    def test_no_thermostat_is_never_owned(self) -> None:
+        hass = _make_hass({"a": MagicMock()})
+        assert zone_registry.thermostat_owned_by_other_zone(hass, None, None) is False
+        assert zone_registry.thermostat_owned_by_other_zone(hass, "", "a") is False
+
+    def test_title_of_an_unknown_zone_is_its_entry_id(self) -> None:
+        hass = _make_hass({"a": MagicMock()})
+        assert zone_registry._zone_title(hass, "missing") == "missing"

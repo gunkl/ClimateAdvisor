@@ -1,13 +1,7 @@
 {
-  "learning.change.sensor_debounce_seconds": "感測器狀態穩定延遲：{before} min → {after} min",
-  "learning.change.setback_cool": "離家冷氣溫度：{before} → {after}",
-  "learning.change.setback_heat": "離家暖氣溫度：{before} → {after}",
   "learning.override_detail": "大多是調{direction, select, up {高} other {低}}約 {delta}",
   "learning.override_detail_peak": "大多是調{direction, select, up {高} other {低}}約 {delta}，常在 {hour}:00 前後",
-  "learning.suggestion.comfort_violations": "最近 14 天中有 {days} 天，室內溫度超出您的舒適溫度範圍達 30 分鐘以上。把離家溫度設得溫和一些，回家時室內需要追回的溫差就比較小。",
   "learning.suggestion.forecast_bias_significant": "我注意到，您的天氣服務預報的最高溫，一直比您所在地的實際溫度{direction, select, higher {高} other {低}}約 {delta}。我現在會自動校正，以提升預報準確度，讓預熱與預冷的判斷更符合您當地的實際情況。",
-  "learning.suggestion.frequent_door_pauses": "過去兩週，空調系統因門窗開啟而暫停了 {count, plural, other {# 次}}。延長感測器狀態穩定延遲，可避免短暫開關門窗讓空調系統暫停；這個延遲適用於所有門窗。若不想讓某一扇門再造成暫停，請在設定中將它的感測器從門窗感測器移除。",
-  "learning.suggestion.frequent_door_pauses_sensor": "過去兩週，空調系統因門窗開啟而暫停了 {count, plural, other {# 次}}。最常觸發的是 {sensor}（{top_count, plural, other {# 次}}）。延長感測器狀態穩定延遲，可避免短暫開關門窗讓空調系統暫停；這個延遲適用於所有門窗。若不想讓 {sensor} 再造成暫停，請在設定中將它從門窗感測器移除。",
   "learning.suggestion.frequent_overrides": "過去兩週，您手動調整了溫控器 {count, plural, other {# 次}}（{detail}）。如果舒適設定溫度不合適，請在設定中修改，Climate Advisor 會維持新的溫度。",
   "learning.suggestion.frequent_overrides_no_detail": "過去兩週，您手動調整了溫控器 {count, plural, other {# 次}}。這可能表示舒適設定溫度不符合您的喜好。您可以在設定中修改。",
   "learning.suggestion.high_runtime_mild_days": "在溫和與溫暖的日子，空調系統平均運轉了 {minutes, plural, other {# 分鐘}}，比預期還長。可能有未裝感測器的門窗開著，或舒適溫度範圍比房屋所需的更窄。加裝門窗感測器，或在設定中放寬舒適溫度範圍，可能會有幫助。",

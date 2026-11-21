@@ -894,7 +894,7 @@ def test_analysis_data_calls_and_writes_match_classic():
         assert in_catalog(opt), opt
     for v in ("[6, 'h6']", "[168, 'd7']", "[720, 'd30']"):
         assert v in js
-    for h in ("Accept", "Dismiss", "Correct", "Incorrect"):
+    for h in ("Got it", "Dismiss", "Correct", "Incorrect"):  # Issue #1652: suggestions are advice ("Got it")
         assert in_catalog(h), h
 
 

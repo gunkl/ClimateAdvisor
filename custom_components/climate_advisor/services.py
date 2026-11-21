@@ -24,11 +24,10 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
-from . import i18n, log_capture, zone_registry
-from .const import CONFIG_METADATA, DOMAIN
+from . import log_capture, zone_registry
+from .const import DOMAIN
 from .coordinator import ClimateAdvisorCoordinator
 from .learning import SUGGESTION_KEYS
-from .suggestion_actions import suggestion_change_msgs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,39 +80,17 @@ def _resolve_zone_coordinator(hass: HomeAssistant, call: ServiceCall) -> Climate
     return coordinator
 
 
-def persist_accepted_changes(hass: HomeAssistant, coordinator: ClimateAdvisorCoordinator, changes: dict) -> None:
-    """Write an accepted suggestion's setting changes into the zone's config entry, so they survive a restart.
-
-    Issue #1652: the dashboard's REST handler did this and the service did not, so a suggestion accepted through
-    the service quietly reverted at the next restart or settings save. Both paths call this (through
-    ``async_accept_suggestion``). Only real settings (``CONFIG_METADATA`` keys) are written.
-    """
-    entry_changes = {k: v for k, v in changes.items() if k in CONFIG_METADATA}
-    if not entry_changes:
-        return
-    entry_id = next((eid for eid, c in hass.data.get(DOMAIN, {}).items() if c is coordinator), None)
-    config_entry = hass.config_entries.async_get_entry(entry_id) if entry_id else None
-    if config_entry:
-        hass.config_entries.async_update_entry(config_entry, data={**config_entry.data, **entry_changes})
-
-
 async def async_accept_suggestion(
     hass: HomeAssistant, coordinator: ClimateAdvisorCoordinator, suggestion_key: str
-) -> tuple[dict[str, Any], list[i18n.Msg]]:
-    """Accept a suggestion for one zone: change its real settings now and in its entry (Issue #1652).
+) -> None:
+    """Acknowledge a suggestion for one zone (the one accept path of the service and the dashboard's REST view).
 
-    The one accept path shared by the ``respond_to_suggestion`` service and the dashboard's REST handler. The
-    changes are computed from the zone's current settings (``suggestion_actions``), applied to the running
-    coordinator's config (the engine reads the same dict, so the next decision uses them) and written to the config
-    entry, so they survive a reload or restart. Returns the changes and one message per changed setting
-    ("<setting>: <before> → <after>"); both are empty for an advice-only suggestion.
+    Issue #1652 (owner decision): every suggestion is advice, so accepting it changes no setting. It records the
+    acknowledgement (the learner holds the suggestion back for 30 days) and saves the learning state. ``accept``
+    stays a valid action so existing automations keep working.
     """
-    before = dict(coordinator.config)
-    changes = coordinator.learning.accept_suggestion(suggestion_key, before)
+    coordinator.learning.accept_suggestion(suggestion_key)
     await hass.async_add_executor_job(log_capture.bind_zone_for_executor(coordinator.learning.save_state))
-    coordinator.config.update(changes)
-    persist_accepted_changes(hass, coordinator, changes)
-    return changes, suggestion_change_msgs(changes, before)
 
 
 def _failed(service: str, err: Exception) -> HomeAssistantError:
@@ -149,9 +126,9 @@ def async_setup_services(hass: HomeAssistant) -> None:
         with log_capture.zone_scope(zone_coordinator.zone_label):
             try:
                 if action == "accept":
-                    # Changes the real settings now and keeps them across a restart (#1652, shared with REST)
-                    changes, _msgs = await async_accept_suggestion(hass, zone_coordinator, suggestion_key)
-                    _LOGGER.info("Suggestion accepted: %s → changes: %s", suggestion_key, changes)
+                    # An acknowledgement: no suggestion changes a setting (#1652, shared with the REST view)
+                    await async_accept_suggestion(hass, zone_coordinator, suggestion_key)
+                    _LOGGER.info("Suggestion acknowledged: %s", suggestion_key)
                 elif action == "dismiss":
                     zone_coordinator.learning.dismiss_suggestion(suggestion_key)
                     await hass.async_add_executor_job(

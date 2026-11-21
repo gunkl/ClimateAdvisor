@@ -1,13 +1,7 @@
 {
-  "learning.change.sensor_debounce_seconds": "传感器防抖延迟：{before} min → {after} min",
-  "learning.change.setback_cool": "离家制冷温度：{before} → {after}",
-  "learning.change.setback_heat": "离家制热温度：{before} → {after}",
   "learning.override_detail": "多为{direction, select, up {上调} other {下调}}，幅度约 {delta}",
   "learning.override_detail_peak": "多为{direction, select, up {上调} other {下调}}，幅度约 {delta}，通常在 {hour}:00 前后",
-  "learning.suggestion.comfort_violations": "在最近 14 天中的 {days} 天里，室内温度有超过 30 分钟超出了您的舒适范围。把离家温度设得温和一些，回家时室内需要追回的温差就更小。",
   "learning.suggestion.forecast_bias_significant": "我注意到，您的天气服务预报的最高气温持续比您所在位置的实际情况{direction, select, higher {高} other {低}}约 {delta}。我现在会应用一项修正来提高预报准确度，这有助于预热和预冷的决策考虑您所在地的实际情况。",
-  "learning.suggestion.frequent_door_pauses": "过去两周里，因门窗敞开，暖通空调已暂停 {count, plural, other {#次}}。延长传感器防抖延迟可避免短暂开门开窗导致暖通空调暂停；该延迟适用于所有门窗。如不想让某扇门再导致暂停，请在设置中将其传感器从门窗传感器中移除。",
-  "learning.suggestion.frequent_door_pauses_sensor": "过去两周里，因门窗敞开，暖通空调已暂停 {count, plural, other {#次}}。触发最频繁的是 {sensor}（{top_count, plural, other {#次}}）。延长传感器防抖延迟可避免短暂开门开窗导致暖通空调暂停；该延迟适用于所有门窗。如不想让 {sensor} 再导致暂停，请在设置中将其从门窗传感器中移除。",
   "learning.suggestion.frequent_overrides": "过去两周里，您手动调整了 {count, plural, other {#次}}恒温器（{detail}）。如果舒适设定温度不合适，请在设置中修改，Climate Advisor 会保持新的温度。",
   "learning.suggestion.frequent_overrides_no_detail": "过去两周里，您手动调整了 {count, plural, other {#次}}恒温器。这可能说明舒适设定温度不符合您的偏好。您可以在设置中修改。",
   "learning.suggestion.high_runtime_mild_days": "在温和和温暖的日子里，暖通空调平均运行了 {minutes, plural, other {#分钟}}，比预期更长。可能有未装传感器的门窗开着，或舒适范围比房屋所需的更窄。增加门窗传感器，或在设置中放宽舒适范围，可能会有帮助。",

@@ -1,13 +1,7 @@
 {
-  "learning.change.sensor_debounce_seconds": "센서 디바운스 지연: {before} min → {after} min",
-  "learning.change.setback_cool": "외출 냉방 온도: {before} → {after}",
-  "learning.change.setback_heat": "외출 난방 온도: {before} → {after}",
   "learning.override_detail": "주로 {direction, select, up {올리는} other {내리는}} 방향으로 약 {delta}",
   "learning.override_detail_peak": "주로 {direction, select, up {올리는} other {내리는}} 방향으로 약 {delta}, 대개 {hour}:00경",
-  "learning.suggestion.comfort_violations": "최근 14일 중 {days}일 동안 집이 쾌적 온도 범위를 30분 넘게 벗어났습니다. 외출 온도를 완화하면 귀가할 때 집이 회복해야 할 온도 차이가 줄어듭니다.",
   "learning.suggestion.forecast_bias_significant": "사용 중인 날씨 서비스가 이 지역의 최고 기온을 실제보다 꾸준히 약 {delta} {direction, select, higher {높게} other {낮게}} 예보하는 것을 확인했습니다. 예보 정확도를 높이기 위해 보정을 적용하고 있으며, 덕분에 예열과 사전 냉방이 지역 조건을 반영합니다.",
-  "learning.suggestion.frequent_door_pauses": "최근 2주 동안 문이나 창문이 열려 있어 냉난방이 {count, plural, other {#회}} 일시 정지되었습니다. 센서 디바운스 지연을 늘리면 잠깐 열었다 닫는 것으로는 냉난방이 일시 정지되지 않습니다. 이 지연은 모든 문과 창문에 적용됩니다. 특정 문 때문에 일시 정지되지 않게 하려면 설정에서 해당 센서를 문/창문 센서에서 제거하세요.",
-  "learning.suggestion.frequent_door_pauses_sensor": "최근 2주 동안 문이나 창문이 열려 있어 냉난방이 {count, plural, other {#회}} 일시 정지되었습니다. {sensor}이(가) 가장 자주 원인이었습니다({top_count, plural, other {#회}}). 센서 디바운스 지연을 늘리면 잠깐 열었다 닫는 것으로는 냉난방이 일시 정지되지 않습니다. 이 지연은 모든 문과 창문에 적용됩니다. {sensor} 때문에 일시 정지되지 않게 하려면 설정에서 문/창문 센서에서 제거하세요.",
   "learning.suggestion.frequent_overrides": "최근 2주 동안 온도 조절기를 {count, plural, other {#회}} 수동으로 변경하셨습니다({detail}). 쾌적 온도가 맞지 않으시면 설정에서 변경하세요. Climate Advisor가 새 온도를 유지합니다.",
   "learning.suggestion.frequent_overrides_no_detail": "최근 2주 동안 온도 조절기를 {count, plural, other {#회}} 수동으로 변경하셨습니다. 쾌적 온도 설정이 선호와 맞지 않을 수 있습니다. 설정에서 변경할 수 있습니다.",
   "learning.suggestion.high_runtime_mild_days": "온화하고 따뜻한 날에 냉난방이 평균 {minutes, plural, other {#분}} 동작하여 예상보다 길었습니다. 센서가 없는 문이나 창문이 열려 있거나, 쾌적 온도 범위가 집에 필요한 것보다 좁을 수 있습니다. 문/창문 센서를 추가하거나 설정에서 쾌적 온도 범위를 넓히면 도움이 될 수 있습니다.",

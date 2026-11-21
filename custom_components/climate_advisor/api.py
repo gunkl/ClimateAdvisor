@@ -83,7 +83,6 @@ from .engine_inputs import decide, decide_sync
 from .learning import SUGGESTION_KEYS
 from .remote_offset import remote_offset_view_for
 from .status_text import code_of
-from .suggestion_actions import suggestion_change_msgs, suggestion_setting_changes
 from .temperature import FAHRENHEIT, UNIT_SYMBOL, display_delta, display_temp
 
 _LOGGER = logging.getLogger(__name__)
@@ -758,25 +757,10 @@ class ClimateAdvisorLearningView(HomeAssistantView):
             suggestion_texts = coordinator.learning.generate_suggestions(lang=i18n.hass_language(hass))
             suggestion_keys = coordinator.learning.get_last_suggestion_keys()
             suggestion_msgs = coordinator.learning.get_last_suggestion_msgs()
-            # Issue #1652: ``actionable`` = Accept changes a setting (shown under the text as ``changes_msg`` /
-            # ``changes_text``, from this zone's current settings); otherwise it is advice and the dashboard offers
-            # "Got it" instead of Accept.
-            lang = i18n.hass_language(hass)
-            suggestions = []
-            for k, t, m in zip(suggestion_keys, suggestion_texts, suggestion_msgs, strict=False):
-                planned = suggestion_setting_changes(k, coordinator.config)
-                planned_msgs = suggestion_change_msgs(planned, coordinator.config)
-                suggestions.append(
-                    {
-                        "key": k,
-                        "text": t,
-                        "text_msg": m.to_wire(),
-                        "actionable": bool(planned),
-                        "changes": planned,
-                        "changes_msg": [pm.to_wire() for pm in planned_msgs],
-                        "changes_text": [i18n.render(pm, lang) for pm in planned_msgs],
-                    }
-                )
+            suggestions = [
+                {"key": k, "text": t, "text_msg": m.to_wire()}
+                for k, t, m in zip(suggestion_keys, suggestion_texts, suggestion_msgs, strict=False)
+            ]
 
             unit = coordinator.config.get("temp_unit", "fahrenheit")
 
@@ -932,21 +916,12 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
 
             # Handle accept/dismiss action
             if action == "accept":
-                # Issue #1652: changes the zone's real settings now and in its config entry (so they survive a
-                # reload), through the one accept path shared with the respond_to_suggestion service. ``changes_msg``
-                # / ``changes_text`` say what changed ("Door/window delay: 10 min → 15 min"); empty = advice only.
+                # Issue #1652: an acknowledgement (every suggestion is advice; no setting changes), through the one
+                # accept path shared with the respond_to_suggestion service.
                 from .services import async_accept_suggestion
 
-                changes, change_msgs = await async_accept_suggestion(hass, coordinator, suggestion_key)
-                lang = i18n.hass_language(hass)
-                return self.json(
-                    {
-                        "status": "ok",
-                        "changes": changes,
-                        "changes_msg": [m.to_wire() for m in change_msgs],
-                        "changes_text": [i18n.render(m, lang) for m in change_msgs],
-                    }
-                )
+                await async_accept_suggestion(hass, coordinator, suggestion_key)
+                return self.json({"status": "ok", "acknowledged": suggestion_key})
             elif action == "dismiss":
                 coordinator.learning.dismiss_suggestion(suggestion_key)
                 await hass.async_add_executor_job(coordinator.learning.save_state)

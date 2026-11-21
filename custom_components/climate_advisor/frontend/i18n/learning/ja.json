@@ -1,13 +1,7 @@
 {
-  "learning.change.sensor_debounce_seconds": "センサーのデバウンス遅延：{before} min → {after} min",
-  "learning.change.setback_cool": "外出時の冷房温度：{before} → {after}",
-  "learning.change.setback_heat": "外出時の暖房温度：{before} → {after}",
   "learning.override_detail": "主に{direction, select, up {上げる} other {下げる}}方向に約{delta}",
   "learning.override_detail_peak": "主に{direction, select, up {上げる} other {下げる}}方向に約{delta}、{hour}:00頃が多め",
-  "learning.suggestion.comfort_violations": "過去14日のうち{days}日で、家の温度が快適温度範囲から30分以上外れていました。外出時の温度を穏やかにすると、帰宅時に家が取り戻す温度差が小さくなります。",
   "learning.suggestion.forecast_bias_significant": "お使いの天気サービスは、お住まいの場所での最高気温を実際より常に約{delta}{direction, select, higher {高く} other {低く}}予報していることに気付きました。予報の精度を高めるため、補正を適用しています。これにより、予熱や予冷の判断にお住まいの地域の状況が反映されます。",
-  "learning.suggestion.frequent_door_pauses": "過去2週間に、ドアや窓の開放により空調が{count, plural, other {#回}}一時停止しました。センサーのデバウンス遅延を長くすると、短い開閉で空調が一時停止しにくくなります。この遅延はすべてのドアと窓に適用されます。特定のドアで一時停止させたくない場合は、設定でそのセンサーをドア/窓センサーから外してください。",
-  "learning.suggestion.frequent_door_pauses_sensor": "過去2週間に、ドアや窓の開放により空調が{count, plural, other {#回}}一時停止しました。最も多い原因は{sensor}です（{top_count, plural, other {#回}}）。センサーのデバウンス遅延を長くすると、短い開閉で空調が一時停止しにくくなります。この遅延はすべてのドアと窓に適用されます。{sensor}で一時停止させたくない場合は、設定でドア/窓センサーから外してください。",
   "learning.suggestion.frequent_overrides": "過去2週間に、サーモスタットを{count, plural, other {#回}}手動で変更しました（{detail}）。快適温度が合わない場合は、設定で変更してください。Climate Advisorは新しい温度を保ちます。",
   "learning.suggestion.frequent_overrides_no_detail": "過去2週間に、サーモスタットを{count, plural, other {#回}}手動で変更しました。快適温度の設定がお好みに合っていない可能性があります。設定で変更できます。",
   "learning.suggestion.high_runtime_mild_days": "穏やかな日や暖かい日に、空調の平均運転時間が{minutes, plural, other {#分}}で、想定より長くなっています。センサーのないドアや窓が開いているか、快適温度範囲が家に必要な幅より狭い可能性があります。ドア/窓センサーを追加するか、設定で快適温度範囲を広げると改善する場合があります。",

@@ -130,7 +130,7 @@ If the occupants ignore the briefing, nothing uncomfortable happens. The armed c
 
 - **Thermal model v3:** parallel observation types (heating, cooling, passive decay, fan-only, ventilated and solar gain) learn the home's physics. The model feeds pre-heat timing, bedtime depth, TOU lead times and predictions. See [Thermal Model v3 Spec](thermal-model-v3-spec.md).
 - **Learned thermostat swing:** CA learns the thermostat's own hysteresis, as the median of recent heat-on or cool-on samples (#1234). See [Computation Reference §5e-vii](08-COMPUTATION-REFERENCE.md#5e-vii-thermostat-swing---the-thermostats-own-hysteresis-issue-102-redefined-by-issue-1234).
-- **Suggestions:** these start after 14 days of data, and a dismissed suggestion waits 7 days before it can return. The patterns are low window compliance, frequent overrides, high runtime on mild or warm days, short departures, comfort violations and frequent door pauses. See [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md).
+- **Suggestions:** these start after 14 days of data, and every suggestion is advice ("Got it" or Dismiss; neither changes a setting). An acknowledged suggestion is held back 30 days, a dismissed one stays dismissed. The patterns are low window compliance, frequent overrides, high runtime on mild or warm days and short departures (Issue #1652 removed comfort violations and frequent door pauses). See [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md).
 
 ---
 

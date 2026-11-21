@@ -455,17 +455,7 @@ def banner_cases(browser):
 
 def behaviour(browser):
     learning = json.loads(json.dumps(FX["learning"]))
-    # Issue #1652: Accept is offered only for an actionable suggestion (advice gets "Got it")
-    learning["suggestions"] = [
-        {
-            "key": "k1",
-            "text": "Raise the sleep setpoint",
-            "actionable": True,
-            "changes": {"sensor_debounce_seconds": 900},
-            "changes_msg": [{"key": "learning.change.sensor_debounce_seconds", "params": {"before": 10, "after": 15}}],
-            "changes_text": ["Sensor Debounce Delay: 10 min → 15 min"],
-        }
-    ]
+    learning["suggestions"] = [{"key": "k1", "text": "Raise the sleep setpoint"}]
     ctx, pg = new_page(browser, {"width": 1280, "height": 900}, "light", {"learning": learning}, name="behaviour")
     pg.goto(BASE)
     pg.wait_for_timeout(800)
@@ -537,7 +527,7 @@ def behaviour(browser):
     pg.reload()
     pg.wait_for_timeout(1500)
     before = len(requests)
-    pg.get_by_role("button", name="Accept").click()
+    pg.get_by_role("button", name="Got it").click()  # Issue #1652: every suggestion is advice
     pg.wait_for_timeout(300)
     posts = [
         (e, json.loads(b)) for m, e, q, b in requests[before:] if m == "POST" and e.startswith("respond_suggestion")

@@ -58,7 +58,6 @@ custom_components/climate_advisor/
 ├── briefing.py          # Daily email/notification text generation
 ├── automation.py        # HVAC service calls, door/window pause, occupancy
 ├── learning.py          # Pattern tracking, suggestion generation, persistence
-├── suggestion_actions.py # What accepting a learning suggestion changes: real settings from current values, bounded (pure, #1652)
 ├── entity.py            # Shared base entity and zone device (service device) for sensor.py and switch.py (#1637)
 ├── services.py          # The five zone-scoped services, registered once from async_setup; translated errors (#1637)
 ├── icons.json           # Entity, state and service icons (HA icon translations, #1647)

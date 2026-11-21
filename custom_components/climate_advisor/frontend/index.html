@@ -1612,18 +1612,16 @@
 
   window.respondSuggestion = async function(key, action) {
     try {
-      const resp = await apiFetch('respond_suggestion', {
+      await apiFetch('respond_suggestion', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: action, suggestion_key: key }),
       });
       const actionsEl = document.getElementById(`suggestion-actions-${key}`);
       if (actionsEl) {
-        const changed = (resp && resp.changes_text) || [];
-        const label = action === 'dismiss' ? '✓ Dismissed' : (changed.length ? '✓ Accepted' : '✓ Noted');
-        const changedHtml = action === 'accept' ? changed.map(t => `<div style="font-size:0.85em">${escapeHtml(t)}</div>`).join('') : '';
+        const label = action === 'accept' ? '✓ Noted' : '✓ Dismissed';
         actionsEl.innerHTML = `
-          <span class="action-result show ok">${label}</span>${changedHtml}
+          <span class="action-result show ok">${label}</span>
           <div style="margin-top:8px;font-size:0.85em;color:#666;">
             Was this diagnosis accurate?
             <button class="btn success" style="padding:2px 8px;font-size:0.8em;margin-left:6px;" onclick="submitFeedback('${escapeHtml(key)}','correct')">✓ Correct</button>
@@ -1864,19 +1862,14 @@
     `;
   }
 
-  // Issue #1652: an actionable suggestion lists what Accept changes; advice offers "Got it" (records that it was seen).
+  // Issue #1652: every suggestion is advice. "Got it" sends accept (an acknowledgement: no setting changes).
   function suggestionCardHtml(item) {
     const k = escapeHtml(item.key);
-    const lines = (item.changes_text || []).map(t => `<div style="font-size:0.85em">${escapeHtml(t)}</div>`).join('');
-    const plan = item.actionable && lines ? `<div style="font-size:0.85em;margin-bottom:6px">If you accept:${lines}</div>` : '';
-    const primary = item.actionable
-      ? `<button class="btn success" onclick="respondSuggestion('${k}','accept')">Accept</button>`
-      : `<button class="btn success" onclick="respondSuggestion('${k}','accept')">Got it</button>`;
     return `
         <div class="suggestion-card" id="suggestion-${k}">
-          <p>${escapeHtml(item.text)}</p>${plan}
+          <p>${escapeHtml(item.text)}</p>
           <div class="btn-group" id="suggestion-actions-${k}">
-            ${primary}
+            <button class="btn success" onclick="respondSuggestion('${k}','accept')">Got it</button>
             <button class="btn secondary" onclick="respondSuggestion('${k}','dismiss')">Dismiss</button>
           </div>
         </div>`;

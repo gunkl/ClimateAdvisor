@@ -19,6 +19,8 @@ Home Assistant is covered in [SSH Setup](SSH-SETUP.md).
 | How do I run the simulator and its goldens? | `python tools/simulate.py` drives the real `AutomationEngine` (single-engine harness, #236). Goldens are locked by `MANIFEST.json`, and only `--sign` after human review changes them. | [§Simulator](DEVELOPMENT.md#simulator) |
 | What does the nightly run, and how do I hear about a failure? | It runs fresh-seed generated days (P1-P7, then P8) and the full real-HA tier. Each seed prints its timing and `peak_rss`. When any job fails, `report-failure` files an issue for that failure (label `nightly-failure`; a repeat of the same failure comments on it), and `nightly-autofix.yml` has Claude diagnose it and, when it can show a fix, open a draft PR for review. | [§Nightly](DEVELOPMENT.md#nightly) |
 | Where do the README's test badges come from? | `badges.yml` runs both tiers with coverage and JUnit XML once a day (07:37 UTC) and by hand; `tools/badges.py` turns the reports and the real-HA ledger into shields.io endpoint JSON on the `badges` branch. The nightly badge is GitHub's workflow status. Issue #1343. | [§Test badges](DEVELOPMENT.md#test-badges) |
+| How do I keep a module's coverage from failing the coverage ratchet? | CI job `coverage` combines both tiers' coverage and fails when a module drops below its floor in `tools/coverage_floors.json` (or a new module is under 95 %). Raise floors with `python tools/coverage_ratchet.py update reports/coverage.json`. Issue #1644. | [§Coverage and typing ratchets](DEVELOPMENT.md#coverage-and-typing-ratchets) |
+| How do I pass the strict-typing check? | CI job `typing` runs strict mypy (Home Assistant's settings, `[tool.mypy]`); modules in `.strict-typing` must stay clean, newly clean and new modules must be listed. Run `uv run --locked --only-group test-ha python tools/typing_ratchet.py [--update]`. Issue #1645. | [§Coverage and typing ratchets](DEVELOPMENT.md#coverage-and-typing-ratchets) |
 | What must a PR carry besides code? | A version bump in `const.py` and `manifest.json`, a `CHANGELOG.md` entry and a `fix_history.jsonl` entry added with `tools/add_fix_entry.py`. `tests/test_version_sync.py` checks that the two versions match. | [§Before Submitting Changes](DEVELOPMENT.md#before-submitting-changes) |
 | What is the correct sequence for adding a new module? | Create the module in `custom_components/climate_advisor/` and a matching `tests/test_<module>.py`. Add any new HA submodule to `_HA_MODULES` in `tools/sim_harness/ha_stubs.py`, then run the full unit tier. | [§Adding a New Module](DEVELOPMENT.md#adding-a-new-module) |
 
@@ -182,12 +184,14 @@ re-staging files are in [claude.md, Pre-commit Hooks](../claude.md#pre-commit-ho
 
 | Workflow | Job | What it runs | Required on `main` |
 |---|---|---|---|
-| `validate.yml` | `validate-and-test` | The gate: passes only when `lint`, all eight `unit` slices and `isolated` pass | yes |
+| `validate.yml` | `validate-and-test` | The gate: passes only when `lint`, all eight `unit` slices, `isolated`, `coverage` and `typing` pass | yes |
 | `validate.yml` | `lint` | `tools/validate.py`, `ruff check .`, `ruff format --check .` | via the gate |
-| `validate.yml` | `unit (K/8)` | One round-robin eighth of the unit tier each (`CA_UNIT_SHARD=K/8`, `CA_UNIT_WORKERS=4`), in parallel | via the gate |
+| `validate.yml` | `unit (K/8)` | One round-robin eighth of the unit tier each (`CA_UNIT_SHARD=K/8`, `CA_UNIT_WORKERS=4`), in parallel, with coverage | via the gate |
+| `validate.yml` | `coverage` | Combines every unit and real-HA slice's coverage and runs the per-module ratchet (`tools/coverage_ratchet.py check`); table in the job summary | via the gate |
+| `validate.yml` | `typing` | Strict mypy ratchet (`tools/typing_ratchet.py --base <base branch>`) in the real-HA environment; table in the job summary | via the gate |
 | `validate.yml` | `isolated` | Changed unit test files, each alone (`CA_UNIT_WORKERS=4`) | via the gate |
 | `validate.yml` | `ha-real` | The gate: passes only when all four `ha-real (K/4)` slices pass | yes |
-| `validate.yml` | `ha-real (K/4)` | One round-robin quarter of the real-HA tier each (`CA_HA_SHARD=K/4`, `CA_HA_WORKERS=4`, `--durations=15`, 8-minute cap), in parallel | via the gate |
+| `validate.yml` | `ha-real (K/4)` | One round-robin quarter of the real-HA tier each (`CA_HA_SHARD=K/4`, `CA_HA_WORKERS=4`, `--durations=15`, 8-minute cap), in parallel, with coverage | via the gate |
 | `hassfest.yml` | `validate` | Home Assistant's Hassfest | yes |
 | `hacs.yml` | `hacs` | HACS validation | no |
 | `nightly.yml` | see [§Nightly](DEVELOPMENT.md#nightly) | Scheduled runs | no |
@@ -258,7 +262,8 @@ Claude workflows. On failure, the job summary says why (`autodiag_failure.py`).
 
 The README's second badge row (Issue #1343) shows every test layer, in the same `flat-square` style as the version
 badges. `badges.yml` builds them once a day at 07:37 UTC (after the nightly) and by hand, not on every push to `main`: it re-runs both tiers with coverage (about 13 min), and the badges change little between merges. It is
-not a required check and never runs on PRs, so coverage does not slow the PR jobs or their time caps.
+not a required check and never runs on PRs. (The PR jobs collect coverage too since Issue #1644, for the
+[coverage ratchet](DEVELOPMENT.md#coverage-and-typing-ratchets).)
 
 | Badge | Source | Example |
 |---|---|---|
@@ -282,6 +287,52 @@ not a required check and never runs on PRs, so coverage does not slow the PR job
   --cov-branch --cov-report= --junitxml=reports/unit.xml` (and the same for `ha`), then `coverage json` per data file
   and `python tools/badges.py --out badges`. `reports/` and `badges/` are git-ignored.
 - shields.io and `raw.githubusercontent.com` cache for a few minutes, so a new run shows up shortly after it finishes.
+
+## Coverage and typing ratchets
+
+Two Home Assistant quality-scale rules are enforced as ratchets: each module may get better, never worse, and the
+recorded state is raised as modules improve. Both run on every PR and push (`validate.yml`) and are part of the
+`validate-and-test` gate.
+
+**Coverage (Silver `test-coverage`, Issue #1644).** Every `unit (K/8)` and `ha-real (K/4)` slice runs with
+`--cov=custom_components/climate_advisor --cov-branch` and uploads its data file. Job `coverage` combines them (line
+and branch coverage, both tiers, the same measure as the README badge), writes `reports/coverage.json` and runs
+`python tools/coverage_ratchet.py check reports/coverage.json`:
+
+- a module below its floor in `tools/coverage_floors.json` (less its `tolerance`) fails: cover the new code;
+- a new module without a floor below the 95 % target fails: test it, or record its floor deliberately with `update`;
+- a floor for a module that no longer exists fails: `update` drops it;
+- a module well above its floor is a note: `python tools/coverage_ratchet.py update reports/coverage.json` raises
+  the floors (it never lowers one; lowering a floor is a hand edit a reviewer sees).
+
+The per-module table (modules under 95 % first, largest gap first) is in the `coverage` job summary and in each
+`badges.yml` run's summary (`report`). To reproduce locally, run both tiers with coverage and combine:
+
+```bash
+COVERAGE_FILE=reports/coverage.unit CA_UNIT_SHARDS=4 CA_UNIT_WORKERS=2 python scripts/test.py unit --cov=custom_components/climate_advisor --cov-branch --cov-report=
+COVERAGE_FILE=reports/coverage.ha CA_HA_SHARDS=4 CA_HA_WORKERS=2 python scripts/test.py ha --cov=custom_components/climate_advisor --cov-branch --cov-report=
+uv run --locked --only-group test coverage combine --data-file=reports/coverage.all reports/coverage.unit reports/coverage.ha
+uv run --locked --only-group test coverage json --data-file=reports/coverage.all -o reports/coverage.json
+python tools/coverage_ratchet.py check reports/coverage.json
+```
+
+With `CA_UNIT_SHARDS` / `CA_HA_SHARDS`, `scripts/test.py` gives each slice its own `$COVERAGE_FILE.K` and combines
+them into `$COVERAGE_FILE` at the end. Simpler: download the `coverage-*` artifacts of the PR's CI run.
+
+**Strict typing (Platinum `strict-typing`, Issue #1645).** `[tool.mypy]` in `pyproject.toml` holds Home Assistant
+core's general mypy settings plus the strict set it applies to the modules in its own `.strict-typing`; the package
+ships `py.typed`. Our `.strict-typing` (repo root) lists the modules that pass. Job `typing` runs
+`uv run --locked --only-group test-ha python tools/typing_ratchet.py --base origin/<base branch>`, in the real-HA
+environment because mypy has to see the real Home Assistant (in `test` it is a stub). It fails when:
+
+- a listed module has a mypy error;
+- a module passes but is not listed (`--update` adds it, so the list only grows);
+- a listed module no longer exists (`--update` drops it);
+- a module listed on the base branch was taken off the list;
+- a module that is new since the base branch has an error (new modules are strict from day one).
+
+Modules not yet listed may have errors; the job summary lists them by error count. When you touch one, try to make
+it clean and run `--update`.
 
 ## Common Workflows
 
@@ -307,6 +358,10 @@ not a required check and never runs on PRs, so coverage does not slow the PR job
 3. If the module imports a new HA submodule, add it to `_HA_MODULES` in `tools/sim_harness/ha_stubs.py`, the single
    stub source for both the unit tier and the harness.
 4. Run the full unit tier.
+5. New modules must pass strict mypy and reach 95 % coverage from day one (see
+   [§Coverage and typing ratchets](DEVELOPMENT.md#coverage-and-typing-ratchets)): run
+   `uv run --locked --only-group test-ha python tools/typing_ratchet.py --update` to list it in `.strict-typing`, and
+   record its coverage floor with `python tools/coverage_ratchet.py update reports/coverage.json`.
 
 ## Troubleshooting
 

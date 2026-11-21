@@ -130,6 +130,40 @@
           "briefing_time": "Quando enviar a notificação do resumo climático diário com a previsão do dia e o plano do AVAC.",
           "briefing_notifications_enabled": "Enviar o resumo diário agendado como notificação push para esta zona. Só a primeira zona vem ativada por predefinição, para que uma casa com várias zonas não envie uma cópia por zona. Pode alterar isto mais tarde em Notificações."
         }
+      },
+      "reconfigure": {
+        "title": "Alterar a zona",
+        "description": "Altere o termóstato, o serviço meteorológico ou o serviço de notificações de {zone}. A zona mantém a aprendizagem, o histórico e as definições. Após uma troca de termóstato, as novas leituras atualizam aos poucos o que ela aprendeu.",
+        "data": {
+          "weather_entity": "Serviço meteorológico",
+          "climate_entity": "Termóstato",
+          "notify_service": "Serviço de notificações"
+        },
+        "data_description": {
+          "weather_entity": "A integração meteorológica que o Climate Advisor usa para previsões e condições exteriores.",
+          "climate_entity": "O termóstato que o Climate Advisor vai monitorizar e controlar.",
+          "notify_service": "O serviço notify do Home Assistant para alertas e resumos diários (por exemplo, notify.mobile_app_yourphone)."
+        }
+      },
+      "reauth_ai_key": {
+        "title": "Nova chave de API do Claude",
+        "description": "A Anthropic recusou a chave de API do Claude integrado, por isso as funções de IA pararam. Introduza uma chave nova. Primeiro é testada e depois guardada para todas as zonas.",
+        "data": {
+          "ai_api_key": "Chave de API do Claude"
+        },
+        "data_description": {
+          "ai_api_key": "Da sua conta Anthropic. É testada antes de ser guardada."
+        }
+      },
+      "reauth_github_token": {
+        "title": "Novo token do GitHub",
+        "description": "O GitHub recusou o token desta zona, por isso os relatórios já não podem ser enviados como issues para {repo}. Introduza um token novo. Primeiro é testado e depois guardado.",
+        "data": {
+          "github_token": "Token de acesso pessoal do GitHub"
+        },
+        "data_description": {
+          "github_token": "Token com o âmbito issues:write. É testado antes de ser guardado."
+        }
       }
     },
     "error": {
@@ -147,10 +181,15 @@
       "sleep_cool_above_away_warning": "O arrefecimento de sono é mais quente do que o arrefecimento em ausência, pelo que durante a noite a casa pode ficar mais quente do que quando não está ninguém. Envie novamente para manter.",
       "vacation_heat_above_away_warning": "O aquecimento de férias é mais quente do que o aquecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
       "vacation_cool_below_away_warning": "O arrefecimento de férias é mais frio do que o arrefecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
-      "vacation_freeze_warning": "Com esta definição, o aquecimento de férias fica abaixo de 45 °F (7 °C). Os canos podem congelar durante uma viagem longa. Envie novamente para manter."
+      "vacation_freeze_warning": "Com esta definição, o aquecimento de férias fica abaixo de 45 °F (7 °C). Os canos podem congelar durante uma viagem longa. Envie novamente para manter.",
+      "ai_connection_failed": "Não foi possível ligar à API do Claude. Verifique a chave de API e tente novamente.",
+      "github_token_invalid": "O GitHub recusou este token. Verifique se não expirou e se tem o âmbito issues:write.",
+      "github_unreachable": "Não foi possível contactar o GitHub para testar o token. Verifique a ligação e tente novamente."
     },
     "abort": {
-      "already_configured": "Este termóstato já tem uma zona do Climate Advisor configurada."
+      "already_configured": "Este termóstato já tem uma zona do Climate Advisor configurada.",
+      "reauth_successful": "A nova credencial foi guardada e a zona foi recarregada.",
+      "reconfigure_successful": "A configuração da zona foi alterada e a zona foi recarregada. A aprendizagem e o histórico são mantidos."
     }
   },
   "options": {
@@ -530,7 +569,8 @@
       "sleep_cool_above_away_warning": "O arrefecimento de sono é mais quente do que o arrefecimento em ausência, pelo que durante a noite a casa pode ficar mais quente do que quando não está ninguém. Envie novamente para manter.",
       "vacation_heat_above_away_warning": "O aquecimento de férias é mais quente do que o aquecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
       "vacation_cool_below_away_warning": "O arrefecimento de férias é mais frio do que o arrefecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
-      "vacation_freeze_warning": "Com esta definição, o aquecimento de férias fica abaixo de 45 °F (7 °C). Os canos podem congelar durante uma viagem longa. Envie novamente para manter."
+      "vacation_freeze_warning": "Com esta definição, o aquecimento de férias fica abaixo de 45 °F (7 °C). Os canos podem congelar durante uma viagem longa. Envie novamente para manter.",
+      "thermostat_shared_zone": "Outra zona do Climate Advisor já usa este termóstato. Escolha outro termóstato."
     }
   },
   "issues": {

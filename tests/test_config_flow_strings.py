@@ -54,10 +54,14 @@ _HELPER_BUILT_KEYS = {
     },
     "config": {
         "setpoints": {"comfort_heat", "comfort_cool", "setback_heat", "setback_cool", "sleep_heat", "sleep_cool"},
+        # Issues #1641/#1646: the setup's first step and the reconfigure step share _core_entities_schema().
+        "user": {"weather_entity", "climate_entity", "notify_service"},
+        "reconfigure": {"weather_entity", "climate_entity", "notify_service"},
     },
 }
-# Steps whose strings block exists for HA but whose handler builds no schema of its own.
-_MENU_STEPS = {"options": {"init"}}
+# Steps whose strings block exists for HA but whose handler builds no schema of its own, and (config) steps that
+# only route to another step and so need no strings block (Issue #1643: reauth routes to the credential's step).
+_MENU_STEPS = {"options": {"init"}, "config": {"reauth"}}
 
 
 def _const_value(name: str):

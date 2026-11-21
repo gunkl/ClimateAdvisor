@@ -105,9 +105,12 @@ def _make_options_flow(entry_data: dict):
 
     captured: dict = {}
 
-    def _update_entry(entry, data):
-        captured["data"] = data
-        entry.data = data  # mirror real HA: async_update_entry mutates entry.data
+    def _update_entry(entry, data=None, **changes):
+        if data is not None:
+            captured["data"] = data
+            entry.data = data  # mirror real HA: async_update_entry mutates entry.data
+        for key, value in changes.items():  # title, unique_id (Issue #1646), as real HA sets them
+            setattr(entry, key, value)
 
     hass = MagicMock()
     hass.config_entries.async_update_entry = MagicMock(side_effect=_update_entry)

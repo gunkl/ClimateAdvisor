@@ -78,7 +78,7 @@ def test_every_key_the_js_names_is_in_the_catalog():
 # keys the JS picks by a computed suffix (a code word from the payload), so a literal scan cannot see their use
 DYNAMIC = re.compile(
     r"^dashboard\.status\.(day_type_|occupancy_|treated_|role_|act_|fan_(off|running|unmanaged)$)|"
-    r"^dashboard\.night\.act_|^dashboard\.core\.unit_|^dashboard\.banner\.(status_|treated_)"
+    r"^dashboard\.night\.(act_|level\.)|^dashboard\.status\.fan_speed_|^dashboard\.core\.unit_|^dashboard\.banner\.(status_|treated_)"
 )
 
 

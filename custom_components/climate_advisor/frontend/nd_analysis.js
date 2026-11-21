@@ -139,7 +139,7 @@
       return pair(rec, 'forecast_high_f', 'observed_high_f') + ' / ' + pair(rec, 'forecast_low_f', 'observed_low_f');
     }
     function rec(fn) { return function (r) { return r ? fn(r) : '—'; }; }
-    function fixedTimes(r) { return T('days.fixed_times', { open: hm(r.window_open_time), close: hm(r.window_close_time), day_type: r.day_type || '?' }); }
+    function fixedTimes(r) { return T('days.fixed_times', { open: hm(r.window_open_time), close: hm(r.window_close_time), day_type: r.day_type ? CAI18N.word('dashboard.analysis.day_type.', r.day_type) : '?' }); }
     // Issue #1475: a record's flag means "recommended at any point that day" (compliance credit); today also says
     // what holds now, and names the plan's own periods instead of the day type's fixed times
     function advised(r) {
@@ -161,9 +161,9 @@
       return h + c >= tot - 1 ? T('days.runtime_split', { tot: Math.round(tot), heat: Math.round(h), cool: Math.round(c) }) : T('days.runtime_nosplit', { tot: Math.round(tot) });
     }
     var rows = [
-      [T('days.row.day_type'), rec(function (r) { return (r.day_type || '—') + ' · ' + (r.trend_direction || '—'); }),
-        function (p) { return p ? (p.day_type || '—') : ''; }],
-      [T('days.row.hvac_mode'), rec(function (r) { return r.hvac_mode_recommended || '—'; }), function (p) { return p ? (p.hvac_mode || '—') : ''; },
+      [T('days.row.day_type'), rec(function (r) { return CAI18N.word('dashboard.analysis.day_type.', r.day_type || '—') + ' · ' + CAI18N.word('dashboard.analysis.trend.', r.trend_direction || '—'); }),
+        function (p) { return p ? CAI18N.word('dashboard.analysis.day_type.', p.day_type || '—') : ''; }],
+      [T('days.row.hvac_mode'), rec(function (r) { return CAI18N.word('common.hvac_mode_word.', r.hvac_mode_recommended || '—'); }), function (p) { return p ? CAI18N.word('common.hvac_mode_word.', p.hvac_mode || '—') : ''; },
         T('days.tip.hvac_mode')],
       [T('days.row.high_low'), rec(hl),
         function (p) { return p && (p.expected_high != null || p.expected_low != null) ? T('days.expected', { hi: nf(p.expected_high, 0) + u, lo: nf(p.expected_low, 0) + u }) : ''; }],
@@ -181,7 +181,7 @@
       }), function () { return ''; }, tip],
       [T('days.row.night_setback'), rec(function (r) {
         if (r.setback_depth_f) return T('days.setback', { depth: nf(ND.dFToDisp(r.setback_depth_f), 1) + u, adaptive: r.setback_was_adaptive ? 'yes' : 'no' });
-        if (r.setback_skipped_reason) return T('days.setback_skipped', { reason: String(r.setback_skipped_reason).replace(/_/g, ' ') });
+        if (r.setback_skipped_reason) return T('days.setback_skipped', { reason: CAI18N.word('dashboard.analysis.days.skip_reason.', r.setback_skipped_reason, String(r.setback_skipped_reason).replace(/_/g, ' ')) });
         // Issue #1474: bedtime results were not recorded before 0.9.16
         return r === t ? T('days.after_bedtime') : T('days.not_recorded');
       }), function () { return ''; }],
@@ -242,7 +242,7 @@
       var kp = E.k_passive && E.k_passive.active ? E.k_passive : null, hv = E.k_active_hvac && E.k_active_hvac.active ? E.k_active_hvac : null;
       var ks = E.k_solar && E.k_solar.active ? E.k_solar : null, kw = E.k_vent_window && E.k_vent_window.active ? E.k_vent_window : null, kf = E.k_vent_fan && E.k_vent_fan.active ? E.k_vent_fan : null;
       // The raw column ("k_passive 0.0123 /h ...") names model fields, so it stays English like Debug's field names.
-      var calib = function (c) { return T('model.calibration', { value: iso(c || 'n/a') }); };
+      var calib = function (c) { return T('model.calibration', { value: iso(CAI18N.word('dashboard.analysis.level.', c || 'na')) }); };
       if (kp) row(T('model.holds_heat', { how: Math.abs(kp.value) < 0.05 ? 'well' : 'moderately', hours: Math.round(Math.log(2) / Math.abs(kp.value)) }),
         'k_passive ' + Number(kp.value).toFixed(4) + ' /h · time constant ' + Math.round(1 / Math.abs(kp.value)) + ' h', calib(kp.confidence));
       if (hv && hv.value) row(T('model.hvac_rates', { heat: nf(hv.value.heat, 1) + eu, cool: nf(Math.abs(hv.value.cool), 1) + eu }),
@@ -262,7 +262,7 @@
           coast: hasCoast ? (c.coast_area_f * c.q > 0 ? 'keeps' : 'gives_back') : 'none', amount: hasCoast ? nf(Math.abs(ND.dFToDisp(c.coast_area_f)), 1) + eu : '',
           v4: onV4 ? 'yes' : 'no', source: onV4 ? iso(cd.source) : '', used: onV4 ? nf(Math.abs(cd.value), 1) + eu : '' });
         row(line, 'cycle q ' + Number(c.q).toFixed(2) + (typeof c.sd_q === 'number' ? ' \u00b1 ' + Number(c.sd_q).toFixed(2) : '') + ' ' + eu + '/h \u00b7 coast ' +
-          (typeof c.coast_area_f === 'number' ? Number(ND.dFToDisp(c.coast_area_f)).toFixed(2) : '\u2014') + ' ' + eu + ' \u00b7 ' + (c.ne != null ? c.ne : 0) + ' informative cycles', T('model.sure', { grade: iso(c.grade || 'none') }));
+          (typeof c.coast_area_f === 'number' ? Number(ND.dFToDisp(c.coast_area_f)).toFixed(2) : '\u2014') + ' ' + eu + ' \u00b7 ' + (c.ne != null ? c.ne : 0) + ' informative cycles', T('model.sure', { grade: iso(CAI18N.word('dashboard.analysis.level.', c.grade || 'none')) }));
         // Issue #1512 reopened: a whole- or half-degree sensor cannot learn the rate from normal cycles; say so plainly.
         if (c.coarse_sensor && c.coarse_sensor.text) row(c.coarse_sensor.text, 'sensor reports ' + (c.coarse_sensor.label || 'coarse steps') + ' \u00b7 rate in use: ' + (c.coarse_sensor.rate_in_use || 'n/a'), '');
       });
@@ -299,7 +299,7 @@
       var hvN = (tm.observation_count_heat || 0) + (tm.observation_count_cool || 0);
       // Issue #1512: hvN is the evidence behind the heating/cooling rates (older measurements give way to new cycles,
       // never to time alone), not a running total
-      row(T('model.kept', { house: envN, hvac: hvN }), T('model.calibration_split', { house: iso(tm.confidence_k_passive || 'none'), hvac: iso(tm.confidence || 'none') }),
+      row(T('model.kept', { house: envN, hvac: hvN }), T('model.calibration_split', { house: iso(CAI18N.word('dashboard.analysis.level.', tm.confidence_k_passive || 'none')), hvac: iso(CAI18N.word('dashboard.analysis.level.', tm.confidence || 'none')) }),
         tm.last_observation_date ? T('model.last_obs', { date: CAI18N.fmt.dateYear(new Date(tm.last_observation_date)) }) : T('model.none_yet'));
     }
     if (!rows.length) rows.push('<div class="empty">' + esc(T('model.nothing')) + '</div>');
@@ -390,10 +390,10 @@
     if (!a) { el.textContent = D.errs[4] ? T('ai.unavailable', { error: D.errs[4] }) : ''; return; }
     aiDisabled = a.status === 'disabled' || !a.status;
     // a.status / a.model / the breaker state are backend codes and names: shown as they are, isolated for RTL
-    el.textContent = T('ai.line', { status: iso(a.status || 'unknown'), has_model: a.model ? 'yes' : 'no', model: iso(a.model || ''),
+    el.textContent = T('ai.line', { status: iso(a.status ? CAI18N.word('settings.ai.status.', a.status) : CAI18N.t('common.unknown')), has_model: a.model ? 'yes' : 'no', model: iso(a.model || ''),
       has_limit: a.investigator_requests_limit != null ? 'yes' : 'no', today: a.investigator_requests_today || 0, limit: a.investigator_requests_limit == null ? 0 : a.investigator_requests_limit,
       cost: CAI18N.fmt.number(a.monthly_cost_estimate || 0, { style: 'currency', currency: 'USD' }), errors: a.error_count || 0,
-      has_circuit: a.circuit_breaker_state && a.circuit_breaker_state !== 'closed' ? 'yes' : 'no', circuit: iso(a.circuit_breaker_state || '') });
+      has_circuit: a.circuit_breaker_state && a.circuit_breaker_state !== 'closed' ? 'yes' : 'no', circuit: iso(CAI18N.word('settings.ai.breaker.', a.circuit_breaker_state || '')) });
     applyAiState();
   }
   function applyAiState() {
@@ -430,7 +430,7 @@
     if (!rows.length) return h + '<div class="empty">' + esc(resp.no_events_msg ? CAI18N.tw(resp.no_events_msg) : T('rep.no_events')) + '</div>';
     h += '<table><thead><tr>' + ['time', 'event', 'settings', 'source', 'indoor', 'outdoor'].map(function (c) { return '<th scope="col">' + esc(T('rep.act_col_' + c)) + '</th>'; }).join('') + '</tr></thead><tbody>' +
       rows.map(function (r) {
-        return '<tr><td><bdi>' + esc(r.time) + '</bdi></td><td>' + bold(CAI18N.text(r, 'event')) + '</td><td>' + bold(CAI18N.text(r, 'settings')) + '</td><td>' + esc(r.source) + '</td><td><bdi>' + esc(r.indoor) + '</bdi></td><td><bdi>' + esc(r.outdoor) + '</bdi></td></tr>';
+        return '<tr><td><bdi>' + esc(r.time) + '</bdi></td><td>' + bold(CAI18N.text(r, 'event')) + '</td><td>' + bold(CAI18N.text(r, 'settings')) + '</td><td>' + esc(CAI18N.word('dashboard.analysis.source.', r.source)) + '</td><td><bdi>' + esc(r.indoor) + '</bdi></td><td><bdi>' + esc(r.outdoor) + '</bdi></td></tr>';
       }).join('') + '</tbody></table>';
     var lines = String(resp.table || '').split('\n'), last = -1;
     lines.forEach(function (l, i) { if (l.trim().charAt(0) === '|') last = i; });
@@ -551,7 +551,7 @@
             renderReport(currentReport);
             status.textContent = result.truncated_empty ? T('rep.truncated_empty_status')
               : result.truncated ? T('rep.truncated_status')
-              : T('rep.completed', { time: CAI18N.fmt.time(new Date()), source: iso(result.source) });
+              : T('rep.completed', { time: CAI18N.fmt.time(new Date()), source: iso(CAI18N.word('dashboard.analysis.source.', result.source)) });
             loadHistory();
           } else if (ev.type === 'error') throw new Error(ev.message || T('rep.failed'), { cause: ev });
         }
@@ -572,7 +572,7 @@
     var content = $('report-content'), res = entry.result || {}, ts = entry.timestamp ? CAI18N.fmt.dateTime(new Date(entry.timestamp)) : '';
     if (!res.success) {
       var fn = aiNotice(res.error_code);
-      content.innerHTML = (fn ? '<div class="banner warn" role="alert"><div class="b-text">' + esc(fn) + '</div></div>' : '') + '<div class="err">' + esc(T('rep.failed_report', { source: iso(res.source || 'error'), error: res.error || T('rep.unknown_error') })) + '</div>';
+      content.innerHTML = (fn ? '<div class="banner warn" role="alert"><div class="b-text">' + esc(fn) + '</div></div>' : '') + '<div class="err">' + esc(T('rep.failed_report', { source: iso(CAI18N.word('dashboard.analysis.source.', res.source || 'error')), error: res.error || T('rep.unknown_error') })) + '</div>';
       $('report-actions').hidden = true; return;
     }
     var data = res.data || {}, h = (ts ? '<div class="sub">' + esc(ts) + (res.is_refined ? ' <span class="badge">' + esc(T('rep.refined')) + '</span>' : '') + '</div>' : '');
@@ -672,7 +672,7 @@
       if (sum.length > 110) sum = sum.slice(0, 110) + '...';
       return '<div class="hist-row"><div class="body"><div class="row" style="gap:6px"><strong style="font-size:13px">' + esc(e.timestamp ? CAI18N.fmt.dateTime(new Date(e.timestamp)) : T('hist.unknown_time')) + '</strong>' +
         '<span class="badge">' + esc(T(e.report_type === 'investigation' ? 'hist.investigation' : 'hist.activity')) + '</span>' + (res.truncated_empty ? '<span class="badge changed">' + esc(T('hist.no_output')) + '</span>' : res.truncated ? '<span class="badge changed">' + esc(T('hist.truncated')) + '</span>' : '') +
-        '<span class="sub">' + esc(res.source || 'unknown') + '</span></div>' + (sum ? '<div class="small">' + esc(sum) + '</div>' : '') + '</div>' +
+        '<span class="sub">' + esc(CAI18N.word('dashboard.analysis.source.', res.source || 'unknown')) + '</span></div>' + (sum ? '<div class="small">' + esc(sum) + '</div>' : '') + '</div>' +
         '<div class="acts"><button type="button" class="btn small" data-h="open" data-i="' + i + '">' + esc(T('hist.open')) + '</button><button type="button" class="btn small" data-h="copy" data-i="' + i + '">' + esc(T('hist.copy')) + '</button>' +
         '<button type="button" class="btn small" data-h="issue" data-i="' + i + '">' + esc(T('hist.issue')) + '</button><button type="button" class="btn small danger" data-h="del" data-i="' + i + '" aria-label="' + esc(T('hist.delete_aria')) + '">' + esc(T('hist.delete')) + '</button></div></div>';
     }).join('') + (filtered.length > shown ? '<button type="button" class="btn small" id="hist-more" style="margin-top:8px">' + esc(T('hist.more', { n: filtered.length - shown })) + '</button>' : '');

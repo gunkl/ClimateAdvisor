@@ -199,6 +199,11 @@
     "draw.now": "NOW",
     "draw.classify": "Classify",
     "draw.override": "Override",
+    "event.classification_change": "classification change",
+    "event.override": "override",
+    "event.hvac_action_change": "hvac action change",
+    "event.occupancy_change": "occupancy change",
+    "event.occupancy_setback": "occupancy setback",
     "readout.now": "Now · {time}",
     "readout.end_week": "{weekday} {time} (end of view)",
     "readout.end_date": "{date}, {time} (end of view)",
@@ -1930,7 +1935,12 @@
       const hv = _hvacOf(closest);
       if (hvacColors[hv]) stateHtml += '<div class="chp-item"><span class="chp-state" style="background:' + hvacColors[hv] + '">' + hvacText[hv] + '</span></div>';
       if (closest.fan && hv !== 'fan') stateHtml += '<div class="chp-item"><span class="chp-state" style="background:#66bb6a">' + escapeHtml(_t('readout.state_sched_fan')) + '</span></div>';
-      if (closest.event) stateHtml += '<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">' + escapeHtml(String(closest.event).replace(/_/g, ' ')) + '</div>';
+      // Issue #1665: each event code (a bucketed row carries a list) as its word; an unknown code is shown spaced out
+      if (closest.event) {
+        const evWords = [...new Set([].concat(closest.event).map(String))].map(ev => EN['event.' + ev] !== undefined ? _t('event.' + ev) : ev.replace(/_/g, ' '));
+        const evText = _lang() !== 'en' && window.CAI18N && window.CAI18N.fmt ? window.CAI18N.fmt.list(evWords) : evWords.join(', ');
+        stateHtml += '<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">' + escapeHtml(evText) + '</div>';
+      }
     }
     const when = restLabel ? escapeHtml(restLabel)
       : _fmtT(ms, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });

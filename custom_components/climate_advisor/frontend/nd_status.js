@@ -138,7 +138,7 @@
         ? t('fan_timer_ends', { hours: num(d.fan_remote_timer_hours, 1), time: ND.fmtTime(d.fan_remote_timer_ends) })
         : t('fan_timer', { hours: num(d.fan_remote_timer_hours, 1) })) + '</div>';
     }
-    if (d.fan_remote_speed != null) out += '<div class="n">' + ND.iso(t('fan_remote_speed', { speed: d.fan_remote_speed })) + '</div>';
+    if (d.fan_remote_speed != null) out += '<div class="n">' + ND.iso(t('fan_remote_speed', { speed: word('fan_speed', d.fan_remote_speed) })) + '</div>';
     return out;
   }
   ND.statusWords = { saysVs: saysVs, trendWords: trendWords, automationPhrase: automationPhrase, fanSentence: fanSentence, hvacSentence: hvacSentence };

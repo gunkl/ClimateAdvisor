@@ -541,7 +541,7 @@
    {
     "key": "weather_entity",
     "value": "weather.forecast_home",
-    "label": "Weather Entity",
+    "label": "Weather Service",
     "description": "The weather integration used for forecast data. Determines day type classification and all downstream automation decisions.",
     "category": "core",
     "label_msg": {
@@ -556,7 +556,7 @@
    {
     "key": "climate_entity",
     "value": "climate.hallway",
-    "label": "Thermostat Entity",
+    "label": "Thermostat",
     "description": "The climate entity Climate Advisor controls. All HVAC mode and temperature commands go to this entity.",
     "category": "core",
     "label_msg": {
@@ -571,7 +571,7 @@
    {
     "key": "comfort_heat",
     "value": 68.0,
-    "label": "Comfort Heat",
+    "label": "Comfortable Heating Temperature",
     "description": "Target temperature when heating is active. Lowering saves energy but may feel cooler. Used for morning wake-up and occupancy-home restores.",
     "category": "setpoints",
     "unit": "\u00b0F",
@@ -587,7 +587,7 @@
    {
     "key": "comfort_cool",
     "value": 74.0,
-    "label": "Comfort Cool",
+    "label": "Comfortable Cooling Temperature",
     "description": "Target temperature when cooling is active. Raising saves energy but may feel warmer. The economizer uses this as the threshold for window cooling decisions.",
     "category": "setpoints",
     "unit": "\u00b0F",
@@ -603,7 +603,7 @@
    {
     "key": "setback_heat",
     "value": 63.0,
-    "label": "Setback Heat",
+    "label": "Away Heating Temperature",
     "description": "Temperature when heating and away from home. Lower values save more energy but take longer to recover when you return.",
     "category": "setpoints",
     "unit": "\u00b0F",
@@ -619,7 +619,7 @@
    {
     "key": "setback_cool",
     "value": 79.0,
-    "label": "Setback Cool",
+    "label": "Away Cooling Temperature",
     "description": "Temperature when cooling and away from home. Higher values save more energy but take longer to cool down when you return.",
     "category": "setpoints",
     "unit": "\u00b0F",
@@ -669,7 +669,7 @@
    {
     "key": "outdoor_temp_source",
     "value": "Dedicated sensor \u2014 sensor.outside_temp_temperature",
-    "label": "Outdoor Temp Source",
+    "label": "Outdoor Temperature Source",
     "description": "Where outdoor temperature is read from: the weather service, a dedicated sensor, or an input_number helper. The Settings value also names the selected sensor, and says so when it has failed and the weather service is in use instead.",
     "category": "sensors",
     "label_msg": {
@@ -694,7 +694,7 @@
    {
     "key": "indoor_temp_source",
     "value": "Thermostat's built-in sensor",
-    "label": "Indoor Temp Source",
+    "label": "Indoor Temperature Source",
     "description": "Where indoor temperature is read from: the thermostat's built-in sensor, a dedicated sensor, or an input_number helper.",
     "category": "sensors",
     "label_msg": {
@@ -749,7 +749,7 @@
    {
     "key": "sensor_polarity_inverted",
     "value": false,
-    "label": "Sensor Polarity Inverted",
+    "label": "Invert Sensor Polarity",
     "description": "Enable if your sensors report 'off' when open (some reed switches work this way). Incorrect polarity means HVAC pauses when doors are closed.",
     "category": "sensors",
     "label_msg": {
@@ -764,7 +764,7 @@
    {
     "key": "sensor_debounce_seconds",
     "value": 10,
-    "label": "Sensor Debounce (minutes)",
+    "label": "Sensor Debounce Delay",
     "description": "How long a door/window sensor's state must hold steady before Climate Advisor acts on it \u2014 pausing/resuming HVAC, or engaging/exiting natural-ventilation fan control (whole-house fan or HVAC fan). Applies to every controlled device, not just HVAC. Short values react faster but are more exposed to quick trips through a door or a flaky sensor bounce; longer values are steadier but slower to respond to a genuine change.",
     "category": "sensors",
     "label_msg": {
@@ -780,7 +780,7 @@
    {
     "key": "manual_grace_seconds",
     "value": 180,
-    "label": "Manual Grace Period (minutes)",
+    "label": "Manual Change Pause",
     "description": "After you manually change the thermostat \u2014 either the HVAC mode or the target temperature \u2014 CA waits this many minutes before resuming automated setpoint control. Also prevents re-pausing if a door/window opens during this window. Default: 30 minutes.",
     "category": "sensors",
     "label_msg": {
@@ -811,7 +811,7 @@
    {
     "key": "automation_grace_seconds",
     "value": 5,
-    "label": "Automation Grace Period (minutes)",
+    "label": "Automated Change Cooldown",
     "description": "After Climate Advisor resumes HVAC (all doors/windows closed), this grace window prevents immediate re-pausing if a door opens briefly.",
     "category": "sensors",
     "label_msg": {
@@ -842,7 +842,7 @@
    {
     "key": "override_confirm_seconds",
     "value": 10,
-    "label": "Override Confirmation Delay (minutes)",
+    "label": "Override Confirmation Delay",
     "description": "Time between system changes and confirmation of manual override. When a change looks like a manual override, Climate Advisor waits this long before formally accepting it. Transient events (thermostat restart, fan cycle) that resolve within the window are ignored. Set to 0 to confirm overrides immediately.",
     "category": "sensors",
     "label_msg": {
@@ -873,7 +873,7 @@
    {
     "key": "hvac_fan_restrict_mode",
     "value": "both",
-    "label": "HVAC Fan Mode Restriction",
+    "label": "HVAC Fan Restriction",
     "description": "Restricts when the HVAC fan (thermostat blower circulation) is allowed to run, based on which HVAC mode last ran. Does not affect the whole-house fan. 'Heat only' blocks the HVAC fan while the thermostat is in cool mode, or off within 2 hours of a cooling cycle \u2014 avoids raising humidity by re-evaporating condensate off wet coils, useful in humid climates. 'Cool only' is the symmetric restriction. 'Both' (default) applies no restriction \u2014 current behavior.",
     "category": "fan",
     "label_msg": {
@@ -888,7 +888,7 @@
    {
     "key": "nat_vent_soft_start_enabled",
     "value": true,
-    "label": "Nat-Vent Soft-Start (Purge Mode)",
+    "label": "Nat-Vent Soft-Start",
     "description": "When enabled, the whole-house fan may start at outdoor/indoor temperature parity (not waiting for outdoor to be measurably cooler) once today's outdoor temperature is confirmed past its peak and declining \u2014 for air movement and attic/thermal-mass purge, not bulk cooling. On by default; disable if you only want the fan to run once outdoor is measurably cooler than indoor. No humidity/dew-point sensor guards this today.",
     "category": "fan",
     "label_msg": {
@@ -948,7 +948,7 @@
    {
     "key": "fan_state_feedback",
     "value": true,
-    "label": "Fan state feedback reliable",
+    "label": "Fan State Feedback Reliable",
     "description": "Turn ON if your fan entity or state sensor reports actual motor state (not just the last command sent). Leave OFF if you're not sure \u2014 CA will command the fan to the desired state on every cycle without reading back the entity state. Physical wall-switch overrides are undetectable when OFF.",
     "category": "fan",
     "label_msg": {
@@ -1068,7 +1068,7 @@
    {
     "key": "welcome_home_debounce_seconds",
     "value": 60,
-    "label": "Welcome Home Quiet Period (minutes)",
+    "label": "Welcome Home Quiet Period",
     "description": "Minimum time between welcome home notifications. If someone leaves and returns within this window, the notification is suppressed. Set to 0 to always notify.",
     "category": "occupancy",
     "label_msg": {
@@ -1084,7 +1084,7 @@
    {
     "key": "wake_time",
     "value": "06:30",
-    "label": "Wake Time",
+    "label": "Wake-up Time",
     "description": "When morning comfort temperatures are restored. Earlier times mean the house is comfortable when you get up but use more energy overnight.",
     "category": "schedule",
     "label_msg": {
@@ -1099,7 +1099,7 @@
    {
     "key": "sleep_time",
     "value": "20:30",
-    "label": "Sleep Time",
+    "label": "Bedtime",
     "description": "When bedtime temperatures take effect. The system transitions to your sleep temperatures at this time.",
     "category": "schedule",
     "label_msg": {
@@ -1114,7 +1114,7 @@
    {
     "key": "sleep_heat",
     "value": 66.0,
-    "label": "Sleep Temperature (Heat)",
+    "label": "Sleep Heating Temperature",
     "description": "Target temperature during sleep hours when you are home. Independent from your away setback \u2014 use this to stay warmer at night than when you leave the house.",
     "category": "setpoints",
     "unit": "\u00b0F",
@@ -1130,7 +1130,7 @@
    {
     "key": "sleep_cool",
     "value": 72.0,
-    "label": "Sleep Temperature (Cool)",
+    "label": "Sleep Cooling Temperature",
     "description": "Target temperature during sleep hours when you are home. Independent from your away setback \u2014 use this to stay cooler at night than when you leave the house.",
     "category": "setpoints",
     "unit": "\u00b0F",
@@ -1146,7 +1146,7 @@
    {
     "key": "briefing_time",
     "value": "06:00",
-    "label": "Briefing Time",
+    "label": "Daily Briefing Time",
     "description": "When the daily climate briefing is generated and sent. Should be before wake_time so you see it when you get up.",
     "category": "schedule",
     "label_msg": {
@@ -1161,7 +1161,7 @@
    {
     "key": "learning_enabled",
     "value": true,
-    "label": "Learning Engine",
+    "label": "Enable Learning & Suggestions",
     "description": "When enabled, Climate Advisor tracks patterns (manual overrides, window compliance, runtime) and generates adaptive suggestions over time.",
     "category": "advanced",
     "label_msg": {
@@ -1221,7 +1221,7 @@
    {
     "key": "min_preheat_minutes",
     "value": 30,
-    "label": "Minimum Pre-heat Time (min)",
+    "label": "Minimum Pre-heat Time",
     "description": "Shortest pre-heat window the system will ever schedule.",
     "category": "advanced",
     "label_msg": {
@@ -1237,7 +1237,7 @@
    {
     "key": "max_preheat_minutes",
     "value": 240,
-    "label": "Maximum Pre-heat Time (min)",
+    "label": "Maximum Pre-heat Time",
     "description": "Longest pre-heat window the system will ever schedule.",
     "category": "advanced",
     "label_msg": {
@@ -1253,7 +1253,7 @@
    {
     "key": "default_preheat_minutes",
     "value": 120,
-    "label": "Default Pre-heat Time (min)",
+    "label": "Default Pre-heat Time",
     "description": "Pre-heat duration used before enough observations are collected.",
     "category": "advanced",
     "label_msg": {
@@ -1269,7 +1269,7 @@
    {
     "key": "default_tou_lead_minutes",
     "value": 45,
-    "label": "Default TOU Pre-conditioning Lead Time (min)",
+    "label": "TOU Pre-conditioning Lead Time",
     "description": "How long before a scheduled high-cost period the system starts pre-conditioning, used until enough heat/cool cycles are observed to compute your home's actual rate.",
     "category": "advanced",
     "label_msg": {
@@ -1316,7 +1316,7 @@
    {
     "key": "comfort_mode_switch_min_interval_s",
     "value": null,
-    "label": "Minimum Time Between Heat/Cool Switches (sec)",
+    "label": "Heat/Cool Switch Interval",
     "description": "Minimum wait between routine heat/cool switches, to prevent rapid back-and-forth. A real breach (indoor temp actually past a comfort edge) ignores this wait and switches immediately.",
     "category": "advanced",
     "label_msg": {
@@ -1332,7 +1332,7 @@
    {
     "key": "comfort_deadband_hot_f",
     "value": null,
-    "label": "Comfort Edge Overshoot Tolerance \u2014 Hot Days",
+    "label": "Hot Day Overshoot Tolerance",
     "description": "On a hot day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a hot day this applies to switching to heating (the cooling side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
     "category": "advanced",
     "label_msg": {
@@ -1347,7 +1347,7 @@
    {
     "key": "comfort_deadband_warm_f",
     "value": null,
-    "label": "Comfort Edge Overshoot Tolerance \u2014 Warm Days",
+    "label": "Warm Day Overshoot Tolerance",
     "description": "On a warm day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a warm day this applies to switching to heating (the cooling side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
     "category": "advanced",
     "label_msg": {
@@ -1362,7 +1362,7 @@
    {
     "key": "comfort_deadband_mild_f",
     "value": null,
-    "label": "Comfort Edge Overshoot Tolerance \u2014 Mild Days",
+    "label": "Mild Day Overshoot Tolerance",
     "description": "On a mild or off-classified day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. Mild days have no favored side, so this applies to both heat and cool. Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
     "category": "advanced",
     "label_msg": {
@@ -1377,7 +1377,7 @@
    {
     "key": "comfort_deadband_cool_f",
     "value": null,
-    "label": "Comfort Edge Overshoot Tolerance \u2014 Cool Days",
+    "label": "Cool Day Overshoot Tolerance",
     "description": "On a cool day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a cool day this applies to switching to cooling (the heating side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
     "category": "advanced",
     "label_msg": {
@@ -1392,7 +1392,7 @@
    {
     "key": "comfort_deadband_cold_f",
     "value": null,
-    "label": "Comfort Edge Overshoot Tolerance \u2014 Cold Days",
+    "label": "Cold Day Overshoot Tolerance",
     "description": "On a cold day: how many degrees past a comfort edge the house may go, right after the opposite mode ran (within the Recent Run Window), before the opposite mode is switched on. On a cold day this applies to switching to cooling (the heating side is never delayed). Going further than this switches at once. This is a tolerance, not the distance at which an edge is pre-armed (that is fixed at 2 degrees, or a third of your comfort range if smaller).",
     "category": "advanced",
     "label_msg": {
@@ -1407,7 +1407,7 @@
    {
     "key": "comfort_family_recency_window_min",
     "value": null,
-    "label": "Recent Run Window (min)",
+    "label": "Recent Run Window",
     "description": "How long the heat or cool side counts as having \"recently run\" (equipment that actually ran, or a time-of-use, predicted-ceiling or you-initiated mode change; not every Climate Advisor write). Used by the overshoot tolerance above (a small overshoot inside this window does not flip the thermostat to the opposite mode) and by the predicted-temperature ceiling guard (which waits instead of acting on a predicted overshoot).",
     "category": "advanced",
     "label_msg": {
@@ -1423,7 +1423,7 @@
    {
     "key": "aggressive_savings",
     "value": false,
-    "label": "Prefer Savings Over Comfort",
+    "label": "Prefer savings over comfort",
     "description": "When enabled, favors energy savings: the economizer skips AC-assisted cooling (ventilation only when windows open), and setbacks may be more aggressive. When disabled, AC actively cools to comfort when outdoor temps drop.",
     "category": "advanced",
     "label_msg": {
@@ -1438,7 +1438,7 @@
    {
     "key": "threshold_hot",
     "value": 85.0,
-    "label": "Hot Day Threshold",
+    "label": "Hot day threshold",
     "description": "Days whose forecast high is at or above this temperature are classified as Hot. Default: 85\u00b0F / 29\u00b0C.",
     "category": "advanced",
     "unit": "\u00b0F",
@@ -1454,7 +1454,7 @@
    {
     "key": "threshold_warm",
     "value": 75.0,
-    "label": "Warm Day Threshold",
+    "label": "Warm day threshold",
     "description": "Days whose forecast high is at or above this temperature (but below Hot) are classified as Warm. Default: 75\u00b0F / 24\u00b0C.",
     "category": "advanced",
     "unit": "\u00b0F",
@@ -1470,7 +1470,7 @@
    {
     "key": "threshold_mild",
     "value": 60.0,
-    "label": "Mild Day Threshold",
+    "label": "Mild day threshold",
     "description": "Days whose forecast high is at or above this temperature (but below Warm) are classified as Mild. Default: 60\u00b0F / 16\u00b0C.",
     "category": "advanced",
     "unit": "\u00b0F",
@@ -1486,7 +1486,7 @@
    {
     "key": "threshold_cool",
     "value": 45.0,
-    "label": "Cool Day Threshold",
+    "label": "Cool day threshold",
     "description": "Days whose forecast high is at or above this temperature (but below Mild) are classified as Cool; below is Cold. Default: 45\u00b0F / 7\u00b0C.",
     "category": "advanced",
     "unit": "\u00b0F",
@@ -1502,7 +1502,7 @@
    {
     "key": "briefing_notifications_enabled",
     "value": true,
-    "label": "Send Daily Briefing Notifications (This Zone)",
+    "label": "Daily Briefing Notifications",
     "description": "On a multi-zone install, only one zone should send the scheduled daily briefing push/email \u2014 otherwise you get one copy per zone. Turn this ON for exactly one zone. Manually clicking Send Briefing on the debug tab always sends, even when this is off.",
     "category": "notifications",
     "label_msg": {
@@ -1577,7 +1577,7 @@
    {
     "key": "email_briefing",
     "value": true,
-    "label": "Email: Full Daily Briefing",
+    "label": "Email: Daily Briefing",
     "description": "Send the full daily briefing via email with complete forecast and plan details.",
     "category": "notifications",
     "label_msg": {
@@ -1607,7 +1607,7 @@
    {
     "key": "email_grace_expired",
     "value": false,
-    "label": "Email: Grace Period Expired",
+    "label": "Email: Grace Expired",
     "description": "Send an email when a grace period expires and normal sensor behavior resumes.",
     "category": "notifications",
     "label_msg": {
@@ -1622,7 +1622,7 @@
    {
     "key": "email_grace_repause",
     "value": false,
-    "label": "Email: Re-paused",
+    "label": "Email: HVAC Re-paused",
     "description": "Email when HVAC is re-paused because a door/window is still open after grace.",
     "category": "notifications",
     "label_msg": {
@@ -1731,7 +1731,7 @@
    {
     "key": "ai_max_tokens",
     "value": 8192,
-    "label": "Max Response Length (tokens)",
+    "label": "Maximum Response Length",
     "description": "Maximum length of AI responses in tokens. Higher values allow more detailed analysis but cost more.",
     "category": "ai_settings",
     "label_msg": {
@@ -1746,7 +1746,7 @@
    {
     "key": "ai_temperature",
     "value": 0.3,
-    "label": "Creativity (temperature)",
+    "label": "Creativity",
     "description": "Controls randomness in AI responses. 0 = deterministic, 1.0 = most creative. 0.3 recommended for analysis.",
     "category": "ai_settings",
     "label_msg": {
@@ -1761,7 +1761,7 @@
    {
     "key": "ai_monthly_budget",
     "value": 5,
-    "label": "Monthly Budget Cap ($)",
+    "label": "Monthly Budget Cap",
     "description": "Maximum estimated monthly spend in USD. Set to 0 for no limit. AI features pause when budget is reached.",
     "category": "ai_settings",
     "label_msg": {

@@ -1,5 +1,7 @@
 {
   "ai.limits.advice": "Raise it in that integration's settings in Home Assistant. If you run anyway, the report may be cut short or fail.",
+  "ai.limits.builtin_place": "Climate Advisor's AI settings",
+  "ai.limits.builtin_setting": "Maximum Response Length",
   "ai.limits.cancel": "Cancel",
   "ai.limits.cancelled": "Investigation cancelled.",
   "ai.limits.check": "{kind, select, output {Output limit} context {Context window} other {Combined context window (input and output)}}: {setting} in {integration} is {value}; it needs at least {required}.",

@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "把暖意留在屋內",
   "briefing.reopen_evening": "大約 {time} 傍晚空氣轉涼後，請重新打開窗戶{ac_off, select, yes {，我會關掉冷氣。} other {。}}",
   "briefing.steps": "📋 今日步驟\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 根據近期使用模式的建議\n----------------------------------------\n{items}\n\n如要回應這些建議，請開啟 Climate Advisor 儀表板，前往「AI」分頁。",
+  "briefing.suggestions": "💡 根據近期使用模式的建議\n----------------------------------------\n{items}\n\n如要回應這些建議，請開啟 Climate Advisor 儀表板，前往「分析」分頁。",
   "briefing.title": "🏠 今日居家溫度計畫",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  就寢節能調溫：維持離家節能溫度",

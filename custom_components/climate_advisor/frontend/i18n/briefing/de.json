@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "um die Wärme drinnen zu halten",
   "briefing.reopen_evening": "Öffne die Fenster gegen {time} wieder, wenn sich die Abendluft abgekühlt hat{ac_off, select, yes { – ich schalte dann die Klimaanlage aus.} other {.}}",
   "briefing.steps": "📋 Heutige Schritte\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 Vorschläge auf Basis der letzten Muster\n----------------------------------------\n{items}\n\nUm auf diese Vorschläge zu antworten, öffne das Climate-Advisor-Dashboard und wechsle zum Tab „KI“.",
+  "briefing.suggestions": "💡 Vorschläge auf Basis der letzten Muster\n----------------------------------------\n{items}\n\nUm auf diese Vorschläge zu antworten, öffne das Climate-Advisor-Dashboard und wechsle zum Tab „Analyse“.",
   "briefing.title": "🏠 Dein Klimaplan für dein Zuhause heute",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  Schlafenszeit-Absenkung: Abwesenheitsabsenkung bleibt",

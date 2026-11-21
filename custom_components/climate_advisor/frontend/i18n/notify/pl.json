@@ -80,7 +80,7 @@
   "notify.whf_oscillation": "Wentylator całego domu włączono {count, plural, one {# raz} few {# razy} many {# razy} other {# razy}} w ciągu 10 minut, a Climate Advisor za każdym razem go zatrzymywał. Sprawdź, co go ciągle włącza (pilot, automatyzacja HomeKit, harmonogram).",
   "notify.whf_reason_backstop_confirming": "zabezpieczenie stanu reguły 2: wentylator i ogrzewanie/chłodzenie włączone jednocześnie — potwierdzanie przed działaniem",
   "notify.whf_reason_backstop_stop_fan": "zabezpieczenie stanu reguły 2: termostat przełączył się na {mode} po włączeniu wentylatora i pracuje ({action}) obok niego ({seconds} s) — zatrzymanie wentylatora (wygrywa najnowsze działanie)",
-  "notify.whf_reason_backstop_suppress_hvac": "zabezpieczenie stanu reguły 2: termostat {action} ({mode}) obok działającego wentylatora ({seconds} s) — wstrzymanie ogrzewania/chłodzenia (wentylator jest nowszym działaniem)",
+  "notify.whf_reason_backstop_suppress_hvac": "zabezpieczenie stanu reguły 2: termostat pracuje ({action}, {mode}) obok działającego wentylatora ({seconds} s) — wstrzymanie ogrzewania/chłodzenia (wentylator jest nowszym działaniem)",
   "notify.whf_reason_fan_not_running": "wentylator nie działa",
   "notify.whf_reason_no_conflict": "brak konfliktu",
   "notify.whf_reason_not_a_whf": "to nie jest instalacja wentylatora całego domu",

@@ -129,13 +129,19 @@ class TestRespondSuggestionFeedback:
         coord.learning.dismiss_suggestion.assert_not_called()
         coord.learning.accept_suggestion.assert_not_called()
 
-    def test_accept_action_applies_changes_to_config(self):
+    def test_accept_is_an_acknowledgement_and_changes_no_setting(self):
+        """Issue #1652: every suggestion is advice; accept records it and touches no setting or entry."""
         coord = _coord()
-        coord.learning.accept_suggestion = MagicMock(return_value={"comfort_heat": 68})
-        resp = _post({"suggestion_key": "low_window_compliance", "action": "accept"}, coord)
+        coord.config = {"comfort_heat": 68}
+        view = ClimateAdvisorRespondSuggestionView()
+        request = _make_request({"suggestion_key": "low_window_compliance", "action": "accept"}, coord)
+        hass = request.app["hass"]
+        resp = asyncio.run(view.post(request))
         assert resp.status == 200
-        assert resp.json_data["changes"] == {"comfort_heat": 68}
-        assert coord.config["comfort_heat"] == 68
+        assert resp.json_data == {"status": "ok", "acknowledged": "low_window_compliance", "changes": {}}
+        coord.learning.accept_suggestion.assert_called_once_with("low_window_compliance")
+        assert coord.config == {"comfort_heat": 68}
+        hass.config_entries.async_update_entry.assert_not_called()
 
 
 class TestRespondSuggestionUnknownKey:
@@ -150,19 +156,11 @@ class TestRespondSuggestionUnknownKey:
         coord.learning.accept_suggestion.assert_not_called()
         coord.learning.record_feedback.assert_not_called()
 
-    def test_accept_persists_real_settings_to_the_config_entry(self):
-        """The shared helper keeps the REST path's behavior: real settings are written to the zone's entry."""
-        coord = _coord()
-        coord.learning.accept_suggestion = MagicMock(
-            return_value={"comfort_heat": 69, "request_setpoint_analysis": True}
-        )
-        view = ClimateAdvisorRespondSuggestionView()
-        request = _make_request({"suggestion_key": "frequent_door_pauses", "action": "accept"}, coord)
-        hass = request.app["hass"]
-        entry = MagicMock()
-        entry.data = {"comfort_heat": 68}  # only real settings (CONFIG_METADATA) are written
-        hass.config_entries.async_get_entry = MagicMock(return_value=entry)
-        resp = asyncio.run(view.post(request))
-        assert resp.status == 200
-        hass.config_entries.async_get_entry.assert_called_once_with("entry1")
-        hass.config_entries.async_update_entry.assert_called_once_with(entry, data={"comfort_heat": 69})
+    def test_removed_suggestion_keys_are_unknown(self):
+        """Issue #1652 (owner decision): frequent_door_pauses and comfort_violations were removed."""
+        for key in ("frequent_door_pauses", "comfort_violations"):
+            coord = _coord()
+            resp = _post({"suggestion_key": key, "action": "accept"}, coord)
+            assert resp.status == 400
+            assert resp.json_data["error_code"] == "suggestion_key_unknown"
+            coord.learning.accept_suggestion.assert_not_called()

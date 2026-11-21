@@ -64,7 +64,7 @@
       var steps = o.n_actions || 0;
       var tags = [steps === 0 ? t('tag_nothing_to_do') : t('tag_steps', { n: steps })];
       if (o.runs === false) tags.push(t('tag_would_not_run'));
-      tags.push(o.confidence === 'low' ? t('may_help') : t('tag_confidence', { level: o.confidence || 'medium' }));
+      tags.push(o.confidence === 'low' ? t('may_help') : t('tag_confidence', { level: I.word(N + 'level.', o.confidence || 'medium') }));
       return {
         key: o.key, label: I.text(o, 'label'), bed: grid.length ? resample(o.path, grid).map(F) : [], // figures are null while the gate has not passed: never 0
         bed_min: F(o.bedroom_low_f), bed_max: F(o.bedroom_high_f), bed_wake: F(o.bedroom_wake_f),

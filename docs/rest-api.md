@@ -14,7 +14,7 @@
 | What did Issue #1336 add to the `ai_investigate` stream? | `key` (+ `params`) on every status event, `error_code` on error events, `cut_short` / `cut_short_code` on the done event; the non-streaming JSON result gets the same three. The protocol is otherwise unchanged. | [AI investigate stream fields](#ai-investigate-stream-fields-issue-1336) |
 | Why does every zone show the same `ai_status`? | AI settings are install-wide and one client serves every zone (Issue #1336), so `ai_status?zone=<any>` returns the same shared status: counters, circuit breaker and recent requests across all zones. Expected, not a zone-scoping bug. | [Endpoints](#get-endpoints) |
 | How does api.py read coordinator state and why does it sometimes bypass the coordinator cache? | Primary reads use `coordinator.data.get(...)` with safe defaults. Live HVAC state is read via `hass.states.get(climate_entity_id)` to guarantee freshness past the 30-minute update cycle. | [Coordinator Access Pattern](#coordinator-access-pattern) |
-| What security guardrails prevent sensitive data from leaking through the config or AI status endpoints? | `ClimateAdvisorConfigView` applies the two-case redaction rule. `ClimateAdvisorAIStatusView` calls `status.pop("api_key", None)` before serialising. Unknown suggestion-accept keys are applied in-memory only and never persisted to the HA config entry. | [Security Notes](#security-notes) |
+| What security guardrails prevent sensitive data from leaking through the config or AI status endpoints? | `ClimateAdvisorConfigView` applies the two-case redaction rule. `ClimateAdvisorAIStatusView` calls `status.pop("api_key", None)` before serialising. Suggestion accept writes no config at all (Issue #1652); unknown keys are rejected. | [Security Notes](#security-notes) |
 | How does a caller know an `event_log`/`activity_record` response doesn't cover the full requested window? | Both endpoints return `is_truncated` (bool) and `oldest_available` (ISO timestamp or null) alongside their normal payload, computed by comparing the oldest stored event against the requested window's cutoff. | [Event Log Truncation Signal](#event-log-truncation-signal) |
 | What is `hvac_control_issues` in the status response? | A list of `{issue, detail}` entries (same shape as `invariant_violations`) present only while the thermostat is not following Climate Advisor: `mode_not_obeyed` (requested mode vs live mode, minutes), `command_failing` (last attempted mode, minutes; since Issue #1121 shown only once the failure episode is at least `HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN` = 5 min old, and hidden — like `mode_not_obeyed` — while the user owns the thermostat (manual override or its pending confirmation) or the thermostat already reports the failed mode) or, since Issue #1050, `output_stall` (house outside the comfort band for hours with no heating/cooling running; diagnostic text in the user's unit; hidden while a `mode_not_obeyed` entry is open). Empty list when fine; Status-tab only (Issues #1049, #1050). | [Endpoints](#endpoints) |
 | What does `GET /api/climate_advisor/prediction_accuracy` return and where does its data come from? | Prediction engine v4's archived predictions scored against what the room then read, beside v3 and a "no change" baseline, for the "Prediction accuracy (preview)" page. Live v4 archive first, the published backtest file for older history; the DP-8 "How each model has scored" rows are computed live over the last 30 days (Issue #1492); read-only, information only (the rows switch nothing), no decision reads it. | [Prediction accuracy endpoint](#get-apiclimate_advisorprediction_accuracy-issue-1230-r1) |
@@ -180,7 +180,7 @@ Errors: 400 several zones loaded and no `zone`/`entry_id` given (body `{message,
 |---|---|---|
 | `/api/climate_advisor/force_reclassify` | Force immediate day reclassification | `status`, `message` |
 | `/api/climate_advisor/send_briefing` | Send today's briefing via notify service | `status`, `message` |
-| `/api/climate_advisor/respond_suggestion` | Accept, dismiss, or feedback a learning suggestion | accept: `status`, `changes`; dismiss: `status`, `dismissed`; feedback-only: `status` |
+| `/api/climate_advisor/respond_suggestion` | Accept, dismiss, or feedback a learning suggestion | accept (an acknowledgement; Issue #1652: no setting changes): `status`, `acknowledged` (the key), `changes` (always `{}`, kept so older clients that read it still work); dismiss: `status`, `dismissed`; feedback-only: `status` |
 | `/api/climate_advisor/cancel_override` | Cancel active manual temperature override | `status`, `message` |
 | `/api/climate_advisor/resume_from_pause` | Resume automation from door/window pause | `status`, `message`, `restored_mode` |
 | `/api/climate_advisor/cancel_fan_override` | Cancel active fan override | `status`, `message` |
@@ -329,7 +329,7 @@ Every occupant-facing prose field keeps its name and its meaning. It is rendered
 ## Security Notes
 
 - **AI status endpoint**: `status.pop("api_key", None)` is called explicitly before serialising the AI client status dict, regardless of whether the key is present.
-- **Suggestion accept**: When a suggestion is accepted, only keys that appear in `CONFIG_METADATA.keys()` are persisted to the HA config entry. Unknown keys are applied to the in-memory config only and are not written to HA storage.
+- **Suggestion accept**: Accepting a suggestion writes nothing to the HA config entry and changes no setting (Issue #1652: every suggestion is advice). Unknown keys are rejected with a 400.
 - **Config endpoint**: See [Sensitive Field Redaction](#sensitive-field-redaction) — no raw sensitive value is ever returned.
 - **`current_setpoint`**: Returned as `null` when HVAC mode is off — withheld for UX clarity, not security.
 
@@ -338,7 +338,7 @@ Every occupant-facing prose field keeps its name and its meaning. It is rendered
 1. Every view class sets `requires_auth = True` — no endpoint is reachable without a valid HA long-lived access token.
 2. `ai_api_key` is never present in any API response — removed at the redaction layer before serialisation, not conditionally.
 3. `notify_service` is never returned as a raw value — redacted by hard-coded name check independent of its metadata flags.
-4. Unknown config keys submitted via suggestion-accept are never persisted to the HA config entry — the allowlist is `CONFIG_METADATA.keys()`.
+4. Suggestion accept writes nothing to the HA config entry (Issue #1652); an unknown suggestion key is rejected.
 5. All numeric range parameters are clamped, not rejected — no 400 is issued for an out-of-range numeric param.
 6. `ai_limits` never blocks anything and writes nothing; it only reads the chosen entity's registry entry and subentry options (Issue #1336, [boundary exception §3](HA-BOUNDARY-EXCEPTIONS.md#3-ai-task-generate-data-and-the-limit-lookup-issue-1336)).
 7. `ai_status` is install-wide: the same response for every zone (Issue #1336).

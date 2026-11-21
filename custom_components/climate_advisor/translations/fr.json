@@ -403,7 +403,7 @@
           "email_entity_health": "E-mail : entité introuvable"
         },
         "data_description": {
-          "briefing_notifications_enabled": "Dans une installation multizone, une seule zone doit envoyer le bilan quotidien programmé en push/e-mail, sinon vous recevez une copie par zone. Activez cette option pour une seule zone. Le bouton Envoyer le bilan de l’onglet de débogage envoie toujours, même si l’option est désactivée.",
+          "briefing_notifications_enabled": "Dans une installation multizone, une seule zone doit envoyer le bilan quotidien programmé en push/e-mail, sinon vous recevez une copie par zone. Activez cette option pour une seule zone. « Envoyer le bilan » dans « Actions » du tableau de bord envoie toujours, même si ceci est désactivé.",
           "push_briefing": "Envoie chaque matin un court bilan résumé sur votre téléphone.",
           "push_door_window_pause": "Envoie une notification push lorsque le chauffage et la climatisation sont suspendus parce qu’une porte ou une fenêtre est ouverte depuis trop longtemps.",
           "push_occupancy_home": "Envoie une notification push lorsque quelqu’un arrive à la maison et que la température de confort est rétablie.",

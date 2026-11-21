@@ -916,15 +916,12 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
 
             # Handle accept/dismiss action
             if action == "accept":
-                changes = coordinator.learning.accept_suggestion(suggestion_key)
-                await hass.async_add_executor_job(coordinator.learning.save_state)
-                coordinator.config.update(changes)
-                # Persist valid config keys to the config entry so changes survive reload (shared with the
-                # respond_to_suggestion service since #1652, which used to skip this).
-                from .services import persist_accepted_changes
+                # Issue #1652: an acknowledgement (every suggestion is advice; no setting changes), through the one
+                # accept path shared with the respond_to_suggestion service.
+                from .services import async_accept_suggestion
 
-                persist_accepted_changes(hass, coordinator, changes)
-                return self.json({"status": "ok", "changes": changes})
+                await async_accept_suggestion(hass, coordinator, suggestion_key)
+                return self.json({"status": "ok", "acknowledged": suggestion_key, "changes": {}})
             elif action == "dismiss":
                 coordinator.learning.dismiss_suggestion(suggestion_key)
                 await hass.async_add_executor_job(coordinator.learning.save_state)
@@ -1009,8 +1006,8 @@ class ClimateAdvisorConfigView(HomeAssistantView):
                 if value_msg is not None:
                     entry["value_msg"] = value_msg.to_wire()
                 # Explicit units (Issue #1341): `unit` stays temperature-only (the symbol, as documented); the
-                # static time unit ("min"/"s") rides in its own `time_unit` field, so a classic page that appends
-                # `unit` to the value shows what it always did.
+                # static time unit ("min"/"s") rides in its own `time_unit` field. Labels carry no unit (Issue #1663:
+                # they are the options-flow labels), so both dashboards show `time_unit` after the value.
                 if setting_unit is not None:
                     entry["unit"] = setting_unit
                 elif meta.get("time_unit"):
@@ -1480,14 +1477,14 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                             # reasoning_effort or a much larger ceiling to answer at all.
                             _LOGGER.warning(
                                 "Investigation report produced zero visible output despite "
-                                "consuming the full response budget — raising Investigator "
-                                "Max Response Length may not fix this; consider trying a "
+                                "consuming the full response budget — raising Maximum "
+                                "Response Length may not fix this; consider trying a "
                                 "different reasoning effort for this model"
                             )
                         elif final_result["truncated"]:
                             _LOGGER.warning(
                                 "Investigation report truncated: hit max_tokens limit; "
-                                "consider raising Investigator Max Response Length"
+                                "consider raising Maximum Response Length (AI settings)"
                             )
                         elif final_result["cut_short"]:
                             _LOGGER.warning("Investigation report cut short: required sections missing")
@@ -1518,14 +1515,14 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 if result.get("truncated_empty"):
                     _LOGGER.warning(
                         "Investigation report produced zero visible output despite "
-                        "consuming the full response budget — raising Investigator "
-                        "Max Response Length may not fix this; consider trying a "
+                        "consuming the full response budget — raising Maximum "
+                        "Response Length may not fix this; consider trying a "
                         "different reasoning effort for this model"
                     )
                 elif result.get("truncated"):
                     _LOGGER.warning(
                         "Investigation report truncated: hit max_tokens limit; "
-                        "consider raising Investigator Max Response Length"
+                        "consider raising Maximum Response Length (AI settings)"
                     )
                 coordinator.claude_client.increment_investigator_counter()
                 await coordinator.async_store_investigation_report(result)

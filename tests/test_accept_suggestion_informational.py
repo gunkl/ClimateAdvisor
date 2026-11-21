@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from custom_components.climate_advisor.learning import LearningEngine
 
 LEARNING_LOGGER = "custom_components.climate_advisor.learning"
@@ -51,10 +53,20 @@ class TestAcceptSuggestionInformationalKeys:
         assert result == {}
         assert any(r.levelno == logging.WARNING and "not recognized" in r.message for r in caplog.records)
 
-    def test_recognized_key_with_changes_still_logs_info_not_warning(self, tmp_path, caplog):
-        """Sanity check: a normal recognized key with real changes is unaffected."""
+    @pytest.mark.parametrize("key", ["frequent_door_pauses", "comfort_violations"])
+    def test_removed_keys_are_unknown(self, tmp_path, caplog, key):
+        """Issue #1652 (owner decision): these two suggestions were removed; accepting one records nothing."""
+        engine = LearningEngine(tmp_path)
+        with caplog.at_level(logging.INFO, logger=LEARNING_LOGGER):
+            result = engine.accept_suggestion(key)
+        assert result == {}
+        assert engine._state.settings_history == []
+        assert any(r.levelno == logging.WARNING and "not recognized" in r.message for r in caplog.records)
+
+    def test_frequent_overrides_is_advice_only(self, tmp_path, caplog):
+        """Issue #1652: it used to return the fake key request_setpoint_analysis, which nothing read."""
         engine = LearningEngine(tmp_path)
         with caplog.at_level(logging.INFO, logger=LEARNING_LOGGER):
             result = engine.accept_suggestion("frequent_overrides")
-        assert result == {"request_setpoint_analysis": True}
+        assert result == {}
         assert not any(r.levelno >= logging.WARNING for r in caplog.records)

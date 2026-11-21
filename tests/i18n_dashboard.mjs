@@ -76,4 +76,57 @@ await check('apply() fills textContent and attributes (never innerHTML); unknown
   assert.equal(e4.textContent, '6h');
 });
 
+await check('word() looks a code up; an unknown or missing code falls back without throwing (Issue #1665)', async () => {
+  const { CAI18N } = loadRuntime({});
+  CAI18N._test.setCatalog('en', { 'p.high': 'high' });
+  assert.equal(CAI18N.word('p.', 'high'), 'high');
+  assert.equal(CAI18N.word('p.', 'brand_new'), 'brand_new');            // unknown: the code as sent
+  assert.equal(CAI18N.word('p.', 'brand_new', 'brand new'), 'brand new');
+  assert.equal(CAI18N.word('p.', null), '');
+  assert.equal(CAI18N.word('p.', '', '—'), '—');
+  assert.equal(CAI18N.word('p.', undefined, '—'), '—');
+  assert.equal(CAI18N.word('p.', 7), '7');
+});
+
+// Issue #1665: each code the dashboard shows inside translated text, rendered from the shipped catalogs in every
+// language. English keeps its text (the word is the code); the other languages show their own word, never the code.
+const CODE_WORDS = [
+  ['dashboard.night.level.', ['high', 'medium']],
+  ['dashboard.analysis.level.', ['none', 'low', 'medium', 'high', 'na']],
+  ['dashboard.analysis.day_type.', ['hot', 'warm', 'mild', 'cool', 'cold']],
+  ['dashboard.analysis.trend.', ['warming', 'cooling', 'stable']],
+  ['dashboard.analysis.days.skip_reason.', ['override_confirm_pending', 'occupancy', 'manual_override', 'paused_by_door', 'no_classification']],
+  ['dashboard.analysis.source.', ['automation', 'manual', 'system', 'sensor', 'ai', 'fallback', 'error', 'unknown']],
+  ['dashboard.chart.event.', ['classification_change', 'override', 'hvac_action_change', 'occupancy_change', 'occupancy_setback']],
+  ['dashboard.status.fan_speed_', ['low', 'medium', 'high']],
+  ['settings.ai.status.', ['active', 'disabled', 'circuit_open', 'budget_exceeded', 'inactive', 'error']],
+  ['settings.ai.breaker.', ['closed', 'open', 'half_open']],
+  ['common.hvac_mode_word.', ['heat', 'cool', 'off', 'auto']],
+];
+await check('every dashboard code word renders in all 17 languages; none is the raw code outside English', async () => {
+  const { CAI18N } = loadRuntime({});
+  const langs = CAI18N.languages;
+  assert.equal(langs.length, 17);
+  const raw = {};
+  for (const lang of langs) {
+    const rt = loadRuntime({ hassLanguage: lang });
+    await rt.CAI18N.init({});
+    assert.equal(rt.CAI18N.lang, lang);
+    for (const [prefix, codes] of CODE_WORDS) {
+      for (const code of codes) {
+        const w = rt.CAI18N.word(prefix, code);
+        assert.ok(w && w !== prefix + code && !w.includes('{'), lang + ' ' + prefix + code + ' -> ' + w);
+        if (lang === 'en' && prefix.startsWith('dashboard.')) assert.equal(w, code === 'na' ? 'n/a' : code.replace(/_/g, ' '), prefix + code);
+        // an underscored code left in another language is a raw code
+        if (lang !== 'en') assert.ok(!/^[a-z]+_[a-z_]+$/.test(w), lang + ' raw ' + prefix + code + ' -> ' + w);
+        if (lang !== 'en' && w === code) (raw[prefix + code] = raw[prefix + code] || []).push(lang);
+      }
+    }
+    assert.equal(rt.CAI18N.word('dashboard.analysis.level.', 'brand_new'), 'brand_new'); // unknown code: as sent
+    assert.equal(rt.warns.length, 0, lang + ': ' + rt.warns.join(' | '));
+  }
+  // a loanword equal to the code ("AI", "sensor") is fine in a few languages, never in most of them
+  for (const [k, ls] of Object.entries(raw)) assert.ok(ls.length <= 4, k + ' untranslated in ' + ls.join(','));
+});
+
 console.log('i18n dashboard additions: ' + n + ' checks OK');

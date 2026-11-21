@@ -527,7 +527,7 @@ def behaviour(browser):
     pg.reload()
     pg.wait_for_timeout(1500)
     before = len(requests)
-    pg.get_by_role("button", name="Accept").click()
+    pg.get_by_role("button", name="Got it").click()  # Issue #1652: every suggestion is advice
     pg.wait_for_timeout(300)
     posts = [
         (e, json.loads(b)) for m, e, q, b in requests[before:] if m == "POST" and e.startswith("respond_suggestion")

@@ -199,6 +199,11 @@
     "draw.now": "NOW",
     "draw.classify": "Classify",
     "draw.override": "Override",
+    "event.classification_change": "classification change",
+    "event.override": "override",
+    "event.hvac_action_change": "hvac action change",
+    "event.occupancy_change": "occupancy change",
+    "event.occupancy_setback": "occupancy setback",
     "readout.now": "Now · {time}",
     "readout.end_week": "{weekday} {time} (end of view)",
     "readout.end_date": "{date}, {time} (end of view)",
@@ -1930,7 +1935,12 @@
       const hv = _hvacOf(closest);
       if (hvacColors[hv]) stateHtml += '<div class="chp-item"><span class="chp-state" style="background:' + hvacColors[hv] + '">' + hvacText[hv] + '</span></div>';
       if (closest.fan && hv !== 'fan') stateHtml += '<div class="chp-item"><span class="chp-state" style="background:#66bb6a">' + escapeHtml(_t('readout.state_sched_fan')) + '</span></div>';
-      if (closest.event) stateHtml += '<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">' + escapeHtml(String(closest.event).replace(/_/g, ' ')) + '</div>';
+      // Issue #1665: each event code (a bucketed row carries a list) as its word; an unknown code is shown spaced out
+      if (closest.event) {
+        const evWords = [...new Set([].concat(closest.event).map(String))].map(ev => EN['event.' + ev] !== undefined ? _t('event.' + ev) : ev.replace(/_/g, ' '));
+        const evText = _lang() !== 'en' && window.CAI18N && window.CAI18N.fmt ? window.CAI18N.fmt.list(evWords) : evWords.join(', ');
+        stateHtml += '<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">' + escapeHtml(evText) + '</div>';
+      }
     }
     const when = restLabel ? escapeHtml(restLabel)
       : _fmtT(ms, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -2215,7 +2225,10 @@
     const sym = _unitSym();
     const fmtT = t => _fmtT(t, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     const head = '<tr><th scope="col">' + escapeHtml(_t('table.time')) + '</th>' + m.cols.map(c => '<th scope="col">' + escapeHtml(_t('table.col', { name: c.short, unit: c.unit || sym })) + '</th>').join('') + '<th scope="col">' + escapeHtml(_t('table.thermostat')) + '</th></tr>';
-    const stateTxt = st => ({ heating: 1, cooling: 1, fan: 1 })[st] ? _t('table.state_' + st) : st;
+    // Issue #1659: any other hvac_action (idle, off, drying, ...) shows its common.hvac_action word, not the code.
+    const stateTxt = st => ({ heating: 1, cooling: 1, fan: 1 })[st] ? _t('table.state_' + st)
+      : (st && _lang() !== 'en' && _catReady && window.CAI18N.has('common.hvac_action.' + st)
+        ? window.CAI18N.t('common.hvac_action.' + st) : st);
     const body = m.rows.map(r => '<tr' + (r.t > Date.now() ? ' class="future"' : '') + '><th scope="row">' + escapeHtml(fmtT(r.t)) + '</th>' +
       r.cells.map(v => '<td>' + (v == null ? '—' : _num(v, 1)) + '</td>').join('') + '<td>' + escapeHtml(stateTxt(r.state || '')) + '</td></tr>').join('');
     wrap.querySelector('table').innerHTML = '<caption>' + escapeHtml(_t(m.cols.some(c => c.unit === '%') ? 'table.caption_hum' : 'table.caption', { unit: sym, n: Math.round(m.step / 60000) })) + '</caption><thead>' + head + '</thead><tbody>' + body + '</tbody>';

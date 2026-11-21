@@ -403,7 +403,7 @@
           "email_entity_health": "Correo: entidad no encontrada"
         },
         "data_description": {
-          "briefing_notifications_enabled": "En una instalación con varias zonas, solo una zona debe enviar el resumen diario programado por push/correo; si no, recibes una copia por zona. Activa esta opción en una sola zona. Pulsar manualmente Enviar resumen en la pestaña de depuración siempre lo envía, aunque esto esté desactivado.",
+          "briefing_notifications_enabled": "En una instalación con varias zonas, solo una zona debe enviar el resumen diario programado por push/correo; si no, recibes una copia por zona. Activa esta opción en una sola zona. Usar «Enviar resumen» en «Acciones» del panel siempre envía, aunque esto esté desactivado.",
           "push_briefing": "Envía cada mañana un breve resumen a tu teléfono.",
           "push_door_window_pause": "Envía una notificación push cuando la climatización se pausa porque una puerta o ventana lleva abierta demasiado tiempo.",
           "push_occupancy_home": "Envía una notificación push cuando alguien llega a casa y se restablece la temperatura de confort.",

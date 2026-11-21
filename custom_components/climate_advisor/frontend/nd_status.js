@@ -138,7 +138,7 @@
         ? t('fan_timer_ends', { hours: num(d.fan_remote_timer_hours, 1), time: ND.fmtTime(d.fan_remote_timer_ends) })
         : t('fan_timer', { hours: num(d.fan_remote_timer_hours, 1) })) + '</div>';
     }
-    if (d.fan_remote_speed != null) out += '<div class="n">' + ND.iso(t('fan_remote_speed', { speed: d.fan_remote_speed })) + '</div>';
+    if (d.fan_remote_speed != null) out += '<div class="n">' + ND.iso(t('fan_remote_speed', { speed: word('fan_speed', d.fan_remote_speed) })) + '</div>';
     return out;
   }
   ND.statusWords = { saysVs: saysVs, trendWords: trendWords, automationPhrase: automationPhrase, fanSentence: fanSentence, hvacSentence: hvacSentence };
@@ -197,7 +197,7 @@
     cards.push(tile('status-card-doors', t('card_doors_fan'),
       hasContacts ? esc(cap(ND.text(d, 'contact_status') || ND.t('common.unknown'))) : esc(t('no_sensors')),
       (hasContacts ? d.contact_sensors.filter(function (c) { return c.unreadable; }).map(function (c) {
-        return '<div class="n">' + ND.th(S + 'contact_not_responding', { name: c.friendly_name, last: c.last_reading || ND.t('dashboard.core.never'), treated: word('treated', c.treated_as, false) }) + '</div>';
+        return '<div class="n">' + ND.th(S + 'contact_not_responding', { name: c.friendly_name, last: c.last_reading ? word('treated', c.last_reading, false) : ND.t('dashboard.core.never'), treated: word('treated', c.treated_as, false) }) + '</div>';
       }).join('') : '') + fanLines(d)));
     // Occupancy with the comfort score
     cards.push(tile('status-card-occupancy', t('card_occupancy'), esc(word('occupancy', d.occupancy_mode || 'home', true)),

@@ -377,6 +377,8 @@ from .humidity_sources import (
     resolve_humidity,
 )
 from .hvac_action import (
+    hvac_action_word,
+    hvac_mode_word,
     is_hvac_action_active,
     is_hvac_compressor_active,
     is_session_running,
@@ -803,6 +805,25 @@ def _ventilation_row_states(entries: list[dict]) -> list[dict[str, bool]]:
             last_running = ts
         prev_open = win_open
     return out
+
+
+# Issue #1659: the sensor-failure reasons the "sleep sensor not usable" line names, each a word in every language.
+_SLEEP_REASON_WORDS = {
+    "entity_missing": "status.indoor_source.why.entity_missing",
+    "implausible": "status.indoor_source.why.implausible",
+    "no_reading": "status.indoor_source.why.no_reading",
+    "non_finite": "status.indoor_source.why.non_finite",
+    "non_numeric": "status.indoor_source.why.non_numeric",
+    "not_configured": "status.indoor_source.why.not_configured",
+    "stale": "status.indoor_source.why.stale",
+    "unavailable": "status.indoor_source.why.unavailable",
+}
+
+
+def _sleep_reason_word(reason: object) -> i18n.Code | str:
+    """The ``why`` param of ``status.indoor_source.reason_sleep_unusable``: a catalog word, or the code as text."""
+    code = str(reason)
+    return i18n.Code(_SLEEP_REASON_WORDS[code]) if code in _SLEEP_REASON_WORDS else code.replace("_", " ")
 
 
 def _run_extremum(obs_type: str, current: float | None, reading: float | None) -> float | None:
@@ -5359,9 +5380,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _t_mode = _cs2.state if _cs2 else "unknown"
             _t_action = str(_cs2.attributes.get("hvac_action", "")) if _cs2 else ""
             _t_fan = str(_cs2.attributes.get("fan_mode", "")) if _cs2 else ""
+            # Issue #1664: ``source_code`` (``blower_during_cycle`` / ``fan_schedule``) is what the Activity Log renders
+            # in the viewer's language; ``source`` keeps the English record (older rows carry only that).
+            _source_code = "blower_during_cycle" if _t_mode in ("cool", "heat", "heat_cool") else "fan_schedule"
             _source = (
                 f"thermostat blower during {_t_mode} cycle"
-                if _t_mode in ("cool", "heat", "heat_cool")
+                if _source_code == "blower_during_cycle"
                 else "thermostat fan schedule/circulation"
             )
             _fan_mode_val = self.automation_engine.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -5381,6 +5405,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "fan_mode": _t_fan,
                     "thermostat_mode": _t_mode,
                     "source": _source,
+                    "source_code": _source_code,
                     "fan_device": _fan_device,
                 },
             )
@@ -6047,7 +6072,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if was_role == "sleep_sensor":
             if reading.sleep_reason:
                 return i18n.Msg(
-                    "status.indoor_source.reason_sleep_unusable", why=str(reading.sleep_reason).replace("_", " ")
+                    "status.indoor_source.reason_sleep_unusable", why=_sleep_reason_word(reading.sleep_reason)
                 )
             return i18n.Msg("status.indoor_source.reason_sleep_ended")
         if using == reading.companion_entity:
@@ -17533,9 +17558,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if isinstance(requested, str) and requested and not _contradicted(requested):
             mins = _minutes_since(getattr(rec, "mismatch_since", None))
             if mins is not None:
-                msg = i18n.Msg("notify.control_mode_not_obeyed_for", requested=requested, live=repr(live), minutes=mins)
+                msg = i18n.Msg(
+                    "notify.control_mode_not_obeyed_for",
+                    requested=hvac_mode_word(requested),
+                    live=hvac_mode_word(live),
+                    minutes=mins,
+                )
             else:
-                msg = i18n.Msg("notify.control_mode_not_obeyed", requested=requested, live=repr(live))
+                msg = i18n.Msg(
+                    "notify.control_mode_not_obeyed", requested=hvac_mode_word(requested), live=hvac_mode_word(live)
+                )
             issues.append(_entry("mode_not_obeyed", msg))
         failed_mode = getattr(ae, "_hvac_cmd_fail_mode", None)
         if getattr(ae, "_hvac_cmd_fail_announced", None) and isinstance(failed_mode, str) and failed_mode:
@@ -17547,7 +17579,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 issues.append(
                     _entry(
                         "command_failing",
-                        i18n.Msg("notify.control_command_failing", mode=failed_mode, minutes=mins),
+                        i18n.Msg("notify.control_command_failing", mode=hvac_mode_word(failed_mode), minutes=mins),
                     )
                 )
         # Issue #1048 change 9: the comfort stall entry. Hidden while a mode-not-obeyed
@@ -17734,7 +17766,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         hours = max(1, round(elapsed_s / 3600))
         gap = i18n.TempDelta(abs(indoor - edge), unit, 1)
         mode_txt = state_str if isinstance(state_str, str) else "unknown"
-        diag = i18n.Msg("notify.stall_diag", mode=mode_txt, action=str(action))
+        diag = i18n.Msg("notify.stall_diag", mode=hvac_mode_word(mode_txt), action=hvac_action_word(action))
         self._stall_status = None
         if any(i["issue"] == "mode_not_obeyed" for i in self._compute_hvac_control_issues()):
             _LOGGER.info(
@@ -17813,7 +17845,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         pre-cool [min(floor, target), target], pre-heat [target, max(ceiling, target)]); the schedule band is the
         home / sleep / Away / Vacation band (``AutomationEngine._resolved_comfort_band()``). Occupant: a pre-cool
         pulling the house from 74 F toward 68 F is inside the 68-76 F comfort range, so the person is comfortable and
-        those minutes must not feed the ``comfort_violations`` suggestion; a house outside both is a real miss. The
+        those minutes must not count against the comfort score; a house outside both is a real miss. The
         cached chart band keeps the #786 shape for a bank (the target on the opposite edge: an Away pre-heat to 63 F
         reads 60-63), which counted a house above an Away pre-heat target as uncomfortable.
 

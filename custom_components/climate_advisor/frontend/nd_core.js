@@ -362,7 +362,7 @@
     (s.contact_sensors || []).filter(function (c) { return c.unreadable; }).forEach(function (c) {
       b.push(banner('warn', H(ND.th(B + 'sensor_problem', { name: c.friendly_name })),
         H(ND.th(B + 'contact_unreadable', {
-          last: c.last_reading || ND.t('dashboard.core.never'), treated: TREATED[c.treated_as] ? ND.t(TREATED[c.treated_as]) : String(c.treated_as)
+          last: TREATED[c.last_reading] ? ND.t(TREATED[c.last_reading]) : (c.last_reading || ND.t('dashboard.core.never')), treated: TREATED[c.treated_as] ? ND.t(TREATED[c.treated_as]) : String(c.treated_as)
         }))));
     });
     (s.invariant_violations || []).concat(s.hvac_control_issues || []).forEach(function (v) {

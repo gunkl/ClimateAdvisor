@@ -21,6 +21,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 - #1641: the config flow and every options section are tested in real Home Assistant, including error-then-fix paths.
 - #1644: CI combines both test tiers' coverage and fails if a module drops below its recorded floor.
 - #1645: strict mypy with a ratchet: 62 modules are listed in `.strict-typing`, and the list only grows. The package ships `py.typed`.
+## [0.9.59] — 2026-11-21
+
+### Changed
+- #1652: **learning suggestions are advice.** Accepting a suggestion used to make the card go away while nothing in the house changed. Every suggestion now shows **Got it** (it is hidden for 30 days) or **Dismiss**, and its text no longer promises an automatic change. The "frequent door/window pauses" and "comfort misses" suggestions are removed: Climate Advisor will not lengthen your door/window pause or move your away temperatures on its own. The `respond_to_suggestion` service and the dashboard still accept `accept`, as an acknowledgement; the two removed keys are now rejected as unknown.
+
+### Fixed
+- In every language other than English, Climate Advisor no longer drops English codes into translated text:
+  - #1659: safety and control notifications (for example the air conditioner and whole-house fan running together) show the HVAC state as a word.
+  - #1664: Activity Log entries show HVAC modes and actions, day types, trends, occupancy, sources and outcomes as words.
+  - #1665: on the dashboard, confidence grades, calibration, day type, trend, recommended mode, the setback-skipped reason, AI status, report and activity sources, chart events and the remote fan speed show as words.
+- #1660: when an AI report is cut short, the dashboard now tells you to raise **Maximum Response Length** in AI settings. Before, it named a setting that no longer exists. Other messages that point to a setting or menu now use its real name in each language.
+- #1662: the AI output-limit warnings name **Maximum Response Length** instead of `max_tokens in climate_advisor`.
+- #1663: every setting has the same name on the dashboard Settings tab as in **Configure**, in every language. On the classic dashboard, time settings now show their unit after the value.
 
 ## [0.9.58] — 2026-11-21
 

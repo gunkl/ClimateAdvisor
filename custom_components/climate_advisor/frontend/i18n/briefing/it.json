@@ -68,7 +68,7 @@
   "briefing.reason.trap_warmth": "per trattenere il calore",
   "briefing.reopen_evening": "Riapri le finestre verso le {time}, quando l’aria della sera si sarà rinfrescata{ac_off, select, yes { — spegnerò il condizionatore.} other {.}}",
   "briefing.steps": "📋 Passaggi di oggi\n----------------------------------------\n{has_now, select, yes {{now}{has_ops, select, yes {\n{ops}} other {}}} other {{ops}}}",
-  "briefing.suggestions": "💡 Suggerimenti in base agli schemi recenti\n----------------------------------------\n{items}\n\nPer rispondere a questi suggerimenti, apri la dashboard di Climate Advisor e vai alla scheda IA.",
+  "briefing.suggestions": "💡 Suggerimenti in base agli schemi recenti\n----------------------------------------\n{items}\n\nPer rispondere a questi suggerimenti, apri la dashboard di Climate Advisor e vai alla scheda Analisi.",
   "briefing.title": "🏠 Il piano climatico di oggi per la tua casa",
   "briefing.tldr": "{day_type}\n{hvac}{has_occupancy, select, yes {\n{occupancy}} other {}}\n{windows}\n{bedtime}\n{tomorrow}",
   "briefing.tldr.bedtime_away": "  Riduzione notturna: resta quella di assenza",

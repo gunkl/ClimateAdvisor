@@ -17,12 +17,12 @@
       },
       "unit": {
         "title": "Jednostka temperatury",
-        "description": "Wybierz jednostkę, której Climate Advisor używa dla każdej wyświetlanej i wprowadzanej temperatury. Możesz ją później zmienić w Ustawieniach podstawowych.",
+        "description": "Wybierz jednostkę, której Climate Advisor używa dla każdej wyświetlanej i wprowadzanej temperatury. Możesz ją później zmienić w sekcji „Ustawienia podstawowe”.",
         "data": {
           "temp_unit": "Jednostka temperatury"
         },
         "data_description": {
-          "temp_unit": "Używana dla każdej temperatury wyświetlanej i wprowadzanej w Climate Advisor. Możesz ją później zmienić w Ustawieniach podstawowych; wtedy wymagane jest ponowne wczytanie, o czym poinformuje Climate Advisor."
+          "temp_unit": "Używana dla każdej temperatury wyświetlanej i wprowadzanej w Climate Advisor. Możesz ją później zmienić w sekcji „Ustawienia podstawowe”; wtedy wymagane jest ponowne wczytanie, o czym poinformuje Climate Advisor."
         }
       },
       "setpoints": {
@@ -309,7 +309,7 @@
           "fan_mode": "Jak sterować wentylatorami do wietrzenia. „Wentylator całego domu” steruje dedykowaną encją wentylatora. „Wentylator HVAC” używa trybu wentylatora termostatu.",
           "hvac_fan_restrict_mode": "W wilgotnym klimacie opcja „Tylko grzanie” wyłącza wentylator HVAC na 2 godziny po chłodzeniu, aby uniknąć wilgoci z mokrego parownika.",
           "fan_entity": "Encja wentylatora lub przełącznika do sterowania (potrzebna tylko w trybie wentylatora całego domu).",
-          "fan_state_entity": "Opcjonalny osobny czujnik do odczytu fizycznego stanu wentylatora (dla wentylatorów całego domu z dwiema encjami). Zostaw puste, aby stan również odczytywać z encji wentylatora.",
+          "fan_state_entity": "Opcjonalny osobny czujnik do odczytu fizycznego stanu wentylatora (dla wentylatorów całego domu z dwiema encjami). Zostaw puste, aby stan również odczytywać z pola „Encja wentylatora”.",
           "fan_state_feedback": "Włącz, jeśli encja wentylatora lub czujnik stanu raportuje rzeczywisty stan silnika (a nie tylko ostatnio wysłane polecenie). Zostaw wyłączone, jeśli nie masz pewności — CA będzie w każdym cyklu wysyłać do wentylatora żądany stan.",
           "fan_remote_entity": "Opcjonalna encja zdarzeń, która uruchamia się po naciśnięciu fizycznego pilota ściennego RF (np. z firmware gunkl/quietcool-house-fan). Wybór timera na pilocie (1/2/4/8/12 godzin) ustawia czas wstrzymania po ręcznej zmianie wentylatora. Zostaw puste, aby wyłączyć.",
           "fan_min_runtime_per_hour": "Minuty pracy wentylatora na godzinę (0 = wyłączone, 60 = zawsze włączony). Cykl nie jest zsynchronizowany z zegarem — przesuwa się naturalnie zależnie od tego, kiedy uruchomił się HA.",
@@ -403,7 +403,7 @@
           "email_entity_health": "E-mail: nie znaleziono encji"
         },
         "data_description": {
-          "briefing_notifications_enabled": "W instalacji z wieloma strefami tylko jedna strefa powinna wysyłać zaplanowane codzienne podsumowanie jako push/e-mail — w przeciwnym razie dostaniesz po jednej kopii na strefę. Włącz to dla dokładnie jednej strefy. Ręczne kliknięcie Wyślij podsumowanie na karcie debugowania zawsze wysyła, nawet gdy to jest wyłączone.",
+          "briefing_notifications_enabled": "W instalacji z wieloma strefami tylko jedna strefa powinna wysyłać zaplanowane codzienne podsumowanie jako push/e-mail — w przeciwnym razie dostaniesz po jednej kopii na strefę. Włącz to dla dokładnie jednej strefy. Ręczne użycie „Wyślij podsumowanie” w menu „Akcje” na panelu zawsze wysyła, nawet gdy ta opcja jest wyłączona.",
           "push_briefing": "Wysyłaj co rano krótkie podsumowanie na telefon.",
           "push_door_window_pause": "Wyślij powiadomienie push, gdy HVAC zostanie wstrzymany, bo drzwi lub okno były otwarte zbyt długo.",
           "push_occupancy_home": "Wyślij powiadomienie push, gdy ktoś wróci do domu i przywrócona zostanie temperatura komfortu.",

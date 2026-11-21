@@ -403,7 +403,7 @@
           "email_entity_health": "Email: entidade não encontrada"
         },
         "data_description": {
-          "briefing_notifications_enabled": "Numa instalação com várias zonas, apenas uma zona deve enviar o push/email do resumo diário agendado — caso contrário recebe uma cópia por zona. Ative isto em exatamente uma zona. Clicar manualmente em Enviar resumo no separador de depuração envia sempre, mesmo com isto desativado.",
+          "briefing_notifications_enabled": "Numa instalação com várias zonas, apenas uma zona deve enviar o push/email do resumo diário agendado — caso contrário recebe uma cópia por zona. Ative isto em exatamente uma zona. Usar «Enviar resumo» em «Ações» no painel envia sempre, mesmo com esta opção desativada.",
           "push_briefing": "Enviar todas as manhãs um resumo curto para o telemóvel.",
           "push_door_window_pause": "Enviar uma notificação push quando o AVAC é pausado porque uma porta ou janela esteve aberta demasiado tempo.",
           "push_occupancy_home": "Enviar uma notificação push quando alguém chega a casa e a temperatura de conforto é reposta.",

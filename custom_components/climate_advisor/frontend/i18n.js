@@ -598,6 +598,14 @@
     th: function (key, params) { return thRender(key, params, CAI18N.lang); },
     apply: apply,
     has: hasKey,
+    // Issue #1665: a backend code shown inside translated text, as its catalog word. `<prefix><code>` when the
+    // language or English has that key; else `fallback` (default: the code as sent, so an unknown code never crashes
+    // and is never blank). A missing code (null / '') gives the fallback, or ''.
+    word: function (prefix, code, fallback) {
+      var c = code == null ? '' : String(code);
+      if (c && hasKey(prefix + c)) return renderKey(prefix + c, {}, CAI18N.lang);
+      return fallback !== undefined ? String(fallback) : c;
+    },
     // The prose of an API field: its `<field>_msg` wire sibling rendered in the viewer's language when the backend sent
     // one (and the catalog has that key), else the plain prose field the API still carries. The one call-site shape.
     text: function (obj, field) {

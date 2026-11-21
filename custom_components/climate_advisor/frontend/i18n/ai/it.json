@@ -1,5 +1,7 @@
 {
   "ai.limits.advice": "Aumentalo nelle impostazioni di quell'integrazione in Home Assistant. Se esegui comunque, il rapporto potrebbe risultare incompleto o fallire.",
+  "ai.limits.builtin_place": "«Impostazioni IA» di Climate Advisor",
+  "ai.limits.builtin_setting": "Lunghezza massima della risposta",
   "ai.limits.cancel": "Annulla",
   "ai.limits.cancelled": "Indagine annullata.",
   "ai.limits.check": "{kind, select, output {Limite di output} context {Finestra di contesto} other {Finestra di contesto combinata (input e output)}}: {setting} in {integration} è {value}; serve almeno {required}.",

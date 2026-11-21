@@ -1,5 +1,7 @@
 {
   "ai.limits.advice": "Verhoog het in de instellingen van die integratie in Home Assistant. Als je toch start, kan het rapport onvolledig zijn of mislukken.",
+  "ai.limits.builtin_place": "de AI-instellingen van Climate Advisor",
+  "ai.limits.builtin_setting": "Maximale antwoordlengte",
   "ai.limits.cancel": "Annuleren",
   "ai.limits.cancelled": "Onderzoek geannuleerd.",
   "ai.limits.check": "{kind, select, output {Uitvoerlimiet} context {Contextvenster} other {Gedeeld contextvenster (invoer en uitvoer)}}: {setting} in {integration} is {value}; nodig is minstens {required}.",

@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "nicht gesendet",
   "status.pre_cool.outcome.superseded": "ersetzt",
   "status.pre_cool.skipped_awake": "übersprungen: Wachzeit",
+  "status.pre_cool.skipped_cool_unavailable": "übersprungen: Kühlung nicht verfügbar",
   "status.pre_cool.skipped_manual_override": "übersprungen: manuelle Änderung",
   "status.pre_cool.skipped_not_eligible": "übersprungen: nicht zulässig",
   "status.pre_cool.skipped_occupancy": "übersprungen: {mode, select, away {abwesend} vacation {Urlaub} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "es verwendet die Aufheiz- und Abkühlraten eines typischen Hauses (Standardwerte)",
   "status.thermostat_notice.use_defaults_learning": "die Entscheidungen verwenden die Aufheiz- und Abkühlraten eines typischen Hauses (Standardwerte), während {engine} lernt",
   "status.thermostat_notice.use_engine": "die Entscheidungen verwenden die eigenen Aufheiz- und Abkühlraten der {engine}-Engine",
-  "status.thermostat_notice.use_learned": "es verwendet weiter die Aufheiz- und Abkühlraten, die es bereits gelernt hatte"
+  "status.thermostat_notice.use_learned": "es verwendet weiter die Aufheiz- und Abkühlraten, die es bereits gelernt hatte",
+  "status.zone_lockout.cool_outdoor": "Kühlung aus: außen {outdoor} (unter {threshold})",
+  "status.zone_lockout.cool_season": "Kühlung aus: Saison auf nur Heizen gestellt",
+  "status.zone_lockout.heat_outdoor": "Heizung aus: außen {outdoor} (über {threshold})",
+  "status.zone_lockout.heat_season": "Heizung aus: Saison auf nur Kühlen gestellt"
 }

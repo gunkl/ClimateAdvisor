@@ -241,7 +241,10 @@
           "sleep_heat": "Temperatura para dormir en calefacción",
           "sleep_cool": "Temperatura para dormir en refrigeración",
           "vacation_heat": "Temperatura de vacaciones en calefacción",
-          "vacation_cool": "Temperatura de vacaciones en refrigeración"
+          "vacation_cool": "Temperatura de vacaciones en refrigeración",
+          "cool_lockout_outdoor_temp": "Sin frío bajo exterior",
+          "heat_lockout_outdoor_temp": "Sin calefacción sobre exterior",
+          "hvac_season": "Temporada de climatización"
         },
         "data_description": {
           "comfort_heat": "Temperatura objetivo en calefacción cuando hay alguien en casa.",
@@ -251,7 +254,10 @@
           "sleep_heat": "Temperatura objetivo en calefacción durante las horas de sueño (cuando estás en casa).",
           "sleep_cool": "Temperatura objetivo en refrigeración durante las horas de sueño (cuando estás en casa).",
           "vacation_heat": "Temperatura de calefacción mientras el interruptor de vacaciones está activado. Déjalo en blanco para usar la calefacción de ausencia menos 3 °F (unos 1,5 °C).",
-          "vacation_cool": "Temperatura de refrigeración mientras el interruptor de vacaciones está activado. Déjalo en blanco para usar la refrigeración de ausencia más 3 °F (unos 1,5 °C)."
+          "vacation_cool": "Temperatura de refrigeración mientras el interruptor de vacaciones está activado. Déjalo en blanco para usar la refrigeración de ausencia más 3 °F (unos 1,5 °C).",
+          "cool_lockout_outdoor_temp": "Climate Advisor no enfría mientras fuera haga más frío que esto, y vuelve a permitirlo 2 °C (3,6 °F) por encima. Una casa más caliente que la temperatura de refrigeración en más de la tolerancia del día se enfría igualmente. Déjalo vacío para no bloquear.",
+          "heat_lockout_outdoor_temp": "Climate Advisor no calienta mientras fuera haga más calor que esto, y vuelve a permitirlo 2 °C (3,6 °F) por debajo. Una casa más fría que la temperatura de calefacción en más de la tolerancia del día se calienta igualmente. Debe estar por encima del bloqueo de refrigeración. Déjalo vacío para no bloquear.",
+          "hvac_season": "Auto calienta y enfría. Solo calefacción o Solo refrigeración quita el otro lado durante la temporada, como si el termostato no pudiera hacerlo; una casa muy pasada del límite de confort de ese lado lo recibe igualmente."
         }
       },
       "temperature_sources": {
@@ -572,7 +578,8 @@
       "vacation_heat_above_away_warning": "La calefacción de vacaciones es más alta que la calefacción en ausencia, así que unas vacaciones consumen más energía que un día normal fuera. Envía de nuevo para conservarla.",
       "vacation_cool_below_away_warning": "La refrigeración de vacaciones es más fría que la refrigeración en ausencia, así que unas vacaciones consumen más energía que un día normal fuera. Envía de nuevo para conservarla.",
       "vacation_freeze_warning": "Con este ajuste, la calefacción de vacaciones queda por debajo de 45 °F (7 °C). Las tuberías pueden congelarse durante un viaje largo. Envía de nuevo para conservarla.",
-      "thermostat_shared_zone": "Otra zona de Climate Advisor ya usa este termostato. Elige otro termostato."
+      "thermostat_shared_zone": "Otra zona de Climate Advisor ya usa este termostato. Elige otro termostato.",
+      "lockout_overlap": "El bloqueo de calefacción debe estar por encima del de refrigeración; si no, hay temperaturas exteriores a las que no se permite ni calentar ni enfriar."
     }
   },
   "issues": {
@@ -840,6 +847,13 @@
         "both": "Refrigeración y calefacción",
         "cool": "Solo refrigeración",
         "heat": "Solo calefacción"
+      }
+    },
+    "hvac_season": {
+      "options": {
+        "auto": "Auto (calefacción y refrigeración)",
+        "heat_only": "Solo calefacción",
+        "cool_only": "Solo refrigeración"
       }
     }
   },

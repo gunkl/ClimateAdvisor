@@ -1300,6 +1300,7 @@
       (data.hvac_control_issues || []).map(v => `<div class="status-alert">⚠ ${escapeHtml(v.detail)}</div>`).join('') +
       (data.entity_health_issues || []).map(i => `<div class="status-alert">⚠ ${escapeHtml(i.friendly_name)} is ${escapeHtml(i.status)}${i.detail ? ' — ' + escapeHtml(i.detail) : ''}<span class="alert-entity">${escapeHtml(i.entity_id)}</span></div>`).join('') +
       (data.pause_suppressed_classification_text ? `<div class="note">${escapeHtml(data.pause_suppressed_classification_text)}</div>` : '') +
+      (data.zone_lockout_status ? `<div class="note">${escapeHtml(data.zone_lockout_status)}</div>` : '') +
       (data.nat_vent_active && data.nat_vent_off_threshold != null && data.nat_vent_on_threshold != null
         ? `<div class="note">${escapeHtml(data.nat_vent_ac_assist ? 'AC assist' : 'savings mode')} · cycling ${Math.round(data.nat_vent_off_threshold)}${unitSym}–${Math.round(data.nat_vent_on_threshold)}${unitSym}</div>` : '') + '</div>');
     grid.innerHTML = cards.join('');

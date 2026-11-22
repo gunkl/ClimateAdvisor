@@ -187,6 +187,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -260,7 +261,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "de": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -450,6 +455,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -523,7 +529,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "es": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -713,6 +723,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -786,7 +797,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "fr": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -976,6 +991,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -1049,7 +1065,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "hi": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -1239,6 +1259,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -1312,7 +1333,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "it": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -1502,6 +1527,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -1575,7 +1601,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "ja": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -1765,6 +1795,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -1838,7 +1869,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "ko": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -2028,6 +2063,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -2101,7 +2137,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "nl": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -2291,6 +2331,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -2364,7 +2405,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "pl": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -2554,6 +2599,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -2627,7 +2673,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "pt": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -2817,6 +2867,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -2890,7 +2941,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "ru": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -3080,6 +3135,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -3153,7 +3209,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "tr": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -3343,6 +3403,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -3416,7 +3477,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "uk": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -3606,6 +3671,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -3679,7 +3745,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "zh-Hans": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -3869,6 +3939,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -3942,7 +4013,11 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   },
   "zh-Hant": {
     "status.action_reason": "9f4e5b3d8a6b",
@@ -4132,6 +4207,7 @@
     "status.pre_cool.outcome.not_sent": "6509fbbcff23",
     "status.pre_cool.outcome.superseded": "0d0ec4475353",
     "status.pre_cool.skipped_awake": "e56e105d13f6",
+    "status.pre_cool.skipped_cool_unavailable": "f3fba0cc5269",
     "status.pre_cool.skipped_manual_override": "c1bf858c0058",
     "status.pre_cool.skipped_not_eligible": "53a8236a4a77",
     "status.pre_cool.skipped_occupancy": "077b3e4debe2",
@@ -4205,6 +4281,10 @@
     "status.thermostat_notice.use_defaults": "438da3de59d7",
     "status.thermostat_notice.use_defaults_learning": "389945ab438e",
     "status.thermostat_notice.use_engine": "87b081fb6fa1",
-    "status.thermostat_notice.use_learned": "839e2d85fe3a"
+    "status.thermostat_notice.use_learned": "839e2d85fe3a",
+    "status.zone_lockout.cool_outdoor": "cb9691751a53",
+    "status.zone_lockout.cool_season": "7aae6c5bab40",
+    "status.zone_lockout.heat_outdoor": "3baa34b04ffb",
+    "status.zone_lockout.heat_season": "eb1a2bcc6a28"
   }
 }

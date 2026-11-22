@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "gönderilmedi",
   "status.pre_cool.outcome.superseded": "değiştirildi",
   "status.pre_cool.skipped_awake": "atlandı: uyanık saatler",
+  "status.pre_cool.skipped_cool_unavailable": "atlandı: soğutma kullanılamıyor",
   "status.pre_cool.skipped_manual_override": "atlandı: manuel değişiklik",
   "status.pre_cool.skipped_not_eligible": "atlandı: uygun değil",
   "status.pre_cool.skipped_occupancy": "atlandı: {mode, select, away {evde yok} vacation {tatil} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "tipik bir evin ısınma ve soğuma hızları (varsayılanlar) kullanılır",
   "status.thermostat_notice.use_defaults_learning": "kararlar, {engine} öğrenirken tipik bir evin ısınma ve soğuma hızlarını (varsayılanlar) kullanır",
   "status.thermostat_notice.use_engine": "kararlar {engine} motorunun kendi ısınma ve soğuma hızlarını kullanır",
-  "status.thermostat_notice.use_learned": "daha önce öğrenilmiş ısınma ve soğuma hızları kullanılmaya devam eder"
+  "status.thermostat_notice.use_learned": "daha önce öğrenilmiş ısınma ve soğuma hızları kullanılmaya devam eder",
+  "status.zone_lockout.cool_outdoor": "Soğutma kapalı: dışarısı {outdoor} ({threshold} altında)",
+  "status.zone_lockout.cool_season": "Soğutma kapalı: mevsim yalnızca ısıtmaya ayarlı",
+  "status.zone_lockout.heat_outdoor": "Isıtma kapalı: dışarısı {outdoor} ({threshold} üstünde)",
+  "status.zone_lockout.heat_season": "Isıtma kapalı: mevsim yalnızca soğutmaya ayarlı"
 }

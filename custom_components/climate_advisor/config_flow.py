@@ -43,6 +43,7 @@ from .const import (
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_BRIEFING_NOTIFICATIONS_ENABLED,
+    CONF_COOL_LOCKOUT_OUTDOOR_TEMP,
     CONF_COOL_POWER_KW,
     CONF_EMAIL_BRIEFING,
     CONF_EMAIL_DOOR_WINDOW_PAUSE,
@@ -61,10 +62,12 @@ from .const import (
     CONF_GITHUB_TOKEN,
     CONF_GUEST_TOGGLE,
     CONF_GUEST_TOGGLE_INVERT,
+    CONF_HEAT_LOCKOUT_OUTDOOR_TEMP,
     CONF_HEAT_POWER_KW,
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
     CONF_HVAC_FAN_RESTRICT_MODE,
+    CONF_HVAC_SEASON,
     CONF_INDOOR_HUMIDITY_ENTITY,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
@@ -109,6 +112,7 @@ from .const import (
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_FAN_MODE,
     DEFAULT_HVAC_FAN_RESTRICT_MODE,
+    DEFAULT_HVAC_SEASON,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NAT_VENT_SOFT_START_ENABLED,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
@@ -137,6 +141,7 @@ from .const import (
     HVAC_FAN_RESTRICT_BOTH,
     HVAC_FAN_RESTRICT_COOL,
     HVAC_FAN_RESTRICT_HEAT,
+    HVAC_SEASON_OPTIONS,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
@@ -163,6 +168,7 @@ from .setpoint_combinations import (
     setpoint_combination_findings,
 )
 from .temperature import CELSIUS, FAHRENHEIT, convert_delta, from_fahrenheit, ha_system_unit, to_fahrenheit
+from .zone_capability import lockout_thresholds_overlap
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -509,6 +515,14 @@ _SETPOINT_KEYS: tuple[str, ...] = (
 )
 # Issue #1347: optional separate vacation setpoints (options flow only; blank = away -/+ 3 °F).
 _VACATION_KEYS: tuple[str, ...] = (CONF_VACATION_HEAT, CONF_VACATION_COOL)
+# Issue #1699: optional OUTDOOR lockout temperatures (options flow only; blank = no lockout), stored in °F.
+_LOCKOUT_KEYS: tuple[str, ...] = (CONF_COOL_LOCKOUT_OUTDOOR_TEMP, CONF_HEAT_LOCKOUT_OUTDOOR_TEMP)
+HVAC_SEASON_SELECTOR = "hvac_season"
+
+
+def lockout_slider_range(is_celsius: bool) -> tuple[float, float, float]:
+    """``(min, max, step)`` for an outdoor lockout temperature in the display unit (Issue #1699)."""
+    return (-30.0, 45.0, 0.5) if is_celsius else (-20.0, 110.0, 1.0)
 
 
 def setpoint_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, float, float]]:
@@ -1328,6 +1342,8 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         ranges = {k: (mn, mx, step) for k, (mn, mx, _default, step) in slider.items()}
         for key in _VACATION_KEYS:
             ranges[key] = ranges["setback_heat"]
+        for key in _LOCKOUT_KEYS:
+            ranges[key] = lockout_slider_range(is_celsius)
         defaults_f = {
             "comfort_heat": DEFAULT_COMFORT_HEAT,
             "comfort_cool": DEFAULT_COMFORT_COOL,
@@ -1337,7 +1353,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             "sleep_cool": DEFAULT_SLEEP_COOL,
         }
         stored_f: dict[str, float | None] = {k: current.get(k, defaults_f[k]) for k in _SETPOINT_KEYS}
-        for key in _VACATION_KEYS:
+        for key in (*_VACATION_KEYS, *_LOCKOUT_KEYS):
             stored_f[key] = current.get(key)
         disp = {
             k: _display_default(v, is_celsius, ranges[k][0], ranges[k][1]) for k, v in stored_f.items() if v is not None
@@ -1347,7 +1363,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             # Display → stored °F. A value left as shown keeps the stored °F exactly, so re-saving a
             # °C page never drifts a setpoint by rounding (Issue #1347 row 12, #1049 history).
             converted: dict[str, Any] = dict(user_input)
-            for key in (*_SETPOINT_KEYS, *_VACATION_KEYS):
+            for key in (*_SETPOINT_KEYS, *_VACATION_KEYS, *_LOCKOUT_KEYS):
                 if key not in converted:
                     continue
                 if key in disp and float(converted[key]) == disp[key]:
@@ -1356,12 +1372,18 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     converted[key] = to_fahrenheit(converted[key], unit)
             warnings = _setpoint_warnings(self.hass, current.get("climate_entity"), converted)
             shown = {"warnings": warnings, "values": dict(user_input)}
-            if warnings and self._setpoints_acknowledged != shown:
+            if lockout_thresholds_overlap(
+                converted.get(CONF_COOL_LOCKOUT_OUTDOOR_TEMP), converted.get(CONF_HEAT_LOCKOUT_OUTDOOR_TEMP)
+            ):
+                # Issue #1699: a hard error, not a warning -- heat locked out above H and cool below C with H <= C
+                # leaves outdoor temperatures at which the zone could neither heat nor cool.
+                errors = {CONF_HEAT_LOCKOUT_OUTDOOR_TEMP: "lockout_overlap"}
+            elif warnings and self._setpoints_acknowledged != shown:
                 self._setpoints_acknowledged = shown
                 errors = dict(warnings)
             else:
                 self._setpoints_acknowledged = {}
-                await self._commit_section(converted, clearable_keys=_VACATION_KEYS)
+                await self._commit_section(converted, clearable_keys=(*_VACATION_KEYS, *_LOCKOUT_KEYS))
                 return await self.async_step_init()
 
         # A re-shown form (warnings) keeps what the occupant typed, so "Submit again" really resubmits it.
@@ -1385,6 +1407,21 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         # Optional vacation setpoints: blank = away -/+ 3 °F (suggested_value so the field can be cleared).
         for key in _VACATION_KEYS:
             schema[vol.Optional(key, description={"suggested_value": shown_values.get(key)})] = _num(key)
+        # Issue #1699: optional outdoor lockouts (blank = off) and the HVAC season (default Auto).
+        for key in _LOCKOUT_KEYS:
+            schema[vol.Optional(key, description={"suggested_value": shown_values.get(key)})] = _num(key)
+        schema[
+            vol.Required(
+                CONF_HVAC_SEASON,
+                default=shown_values.get(CONF_HVAC_SEASON, current.get(CONF_HVAC_SEASON, DEFAULT_HVAC_SEASON)),
+            )
+        ] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=list(HVAC_SEASON_OPTIONS),
+                mode=selector.SelectSelectorMode.DROPDOWN,
+                translation_key=HVAC_SEASON_SELECTOR,
+            )
+        )
 
         return self.async_show_form(
             step_id="setpoints",

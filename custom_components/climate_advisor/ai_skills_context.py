@@ -2397,6 +2397,38 @@ _RESTORE_DEFERRED_KEYS = {
 }
 
 
+def _lockout_facts(p: dict, unit: str) -> Cell:
+    """Issue #1699: the Settings cell of a lockout row -- the outdoor reading and limit, or the depth past the edge."""
+    if p.get("safety") and isinstance(p.get("depth_f"), (int, float)):
+        return _m("lockout_fact_depth", depth=_tdp(p["depth_f"], unit, 1))
+    outdoor, threshold = p.get("outdoor_f"), p.get("threshold_f")
+    if isinstance(outdoor, (int, float)) and isinstance(threshold, (int, float)):
+        return _m("lockout_fact_outdoor", outdoor=_tp(outdoor, unit, 1), threshold=_tp(threshold, unit, 1))
+    if isinstance(outdoor, (int, float)):
+        return _m("lockout_fact_outdoor_only", outdoor=_tp(outdoor, unit, 1))
+    return ""
+
+
+def _lockout_why(p: dict) -> str:
+    """``select`` argument for the lockout's reason (``season`` / anything else = the outdoor lockout)."""
+    return "season" if p.get("reason") == "season" else "outdoor"
+
+
+@_msg_renderer
+def _render_hvac_lockout_engaged(p: dict, unit: str) -> tuple[Cell, Cell]:
+    # Issue #1699: an outdoor lockout or the season setting took a side away (or locked it again once the house was
+    # back inside the tolerance after a safety release).
+    key = "lockout_safety_relocked" if p.get("safety") else "lockout_engaged"
+    return _m(key, mode=mode_w(str(p.get("family") or "")), why=_lockout_why(p)), _lockout_facts(p, unit)
+
+
+@_msg_renderer
+def _render_hvac_lockout_released(p: dict, unit: str) -> tuple[Cell, Cell]:
+    # Issue #1699: the lock ended, or stepped aside because the house went deeper past the edge than the tolerance.
+    key = "lockout_safety_released" if p.get("safety") else "lockout_released"
+    return _m(key, mode=mode_w(str(p.get("family") or "")), why=_lockout_why(p)), _lockout_facts(p, unit)
+
+
 @_msg_renderer
 def _render_occupancy_restore_deferred(p: dict, unit: str) -> tuple[Cell, Cell]:
     # Issue #1050 (#1048 change 18): arriving home while a hold is active -- the comfort restore waits.
@@ -4009,6 +4041,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "comfort_family_switch": _render_comfort_family_switch,
     "thermostat_mode_set": _render_thermostat_mode_set,
     "comfort_switch_held": _render_comfort_switch_held,
+    "hvac_lockout_engaged": _render_hvac_lockout_engaged,
+    "hvac_lockout_released": _render_hvac_lockout_released,
     "setpoint_rejected": _render_setpoint_rejected,
     "hvac_mode_not_applied": _render_hvac_mode_not_applied,
     "hvac_mode_applied_recovered": _render_hvac_mode_applied_recovered,

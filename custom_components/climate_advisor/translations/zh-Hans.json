@@ -241,7 +241,10 @@
           "sleep_heat": "睡眠制热温度",
           "sleep_cool": "睡眠制冷温度",
           "vacation_heat": "度假制热温度",
-          "vacation_cool": "度假制冷温度"
+          "vacation_cool": "度假制冷温度",
+          "cool_lockout_outdoor_temp": "室外低于此值不制冷",
+          "heat_lockout_outdoor_temp": "室外高于此值不制热",
+          "hvac_season": "制热与制冷季节"
         },
         "data_description": {
           "comfort_heat": "有人在家时制热的目标温度。",
@@ -251,7 +254,10 @@
           "sleep_heat": "睡眠时段（有人在家时）制热的目标温度。",
           "sleep_cool": "睡眠时段（有人在家时）制冷的目标温度。",
           "vacation_heat": "度假开关开启期间的制热温度。留空则使用离家制热温度减 3 °F（约 1.5 °C）。",
-          "vacation_cool": "度假开关开启期间的制冷温度。留空则使用离家制冷温度加 3 °F（约 1.5 °C）。"
+          "vacation_cool": "度假开关开启期间的制冷温度。留空则使用离家制冷温度加 3 °F（约 1.5 °C）。",
+          "cool_lockout_outdoor_temp": "室外比此温度冷时，Climate Advisor 不制冷；高出此温度 2 °C (3.6 °F) 后再次允许制冷。比制冷温度高出超过当天容差的房屋仍会制冷。留空表示不锁定。",
+          "heat_lockout_outdoor_temp": "室外比此温度暖时，Climate Advisor 不制热；低于此温度 2 °C (3.6 °F) 后再次允许制热。比制热温度低出超过当天容差的房屋仍会制热。必须高于制冷锁定温度。留空表示不锁定。",
+          "hvac_season": "自动会制热和制冷。仅制热或仅制冷会在本季去掉另一侧，就像温控器做不到一样；远超该侧舒适边界的房屋仍会使用它。"
         }
       },
       "temperature_sources": {
@@ -572,7 +578,8 @@
       "vacation_heat_above_away_warning": "度假制热温度高于离家制热温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
       "vacation_cool_below_away_warning": "度假制冷温度低于离家制冷温度，因此度假比平常外出的一天更耗能。再次提交可保留此设置。",
       "vacation_freeze_warning": "按此设置，度假制热温度最终会低于 45 °F (7 °C)。长途旅行期间水管可能会冻结。再次提交可保留此设置。",
-      "thermostat_shared_zone": "另一个 Climate Advisor 区域已在使用此恒温器。请选择其他恒温器。"
+      "thermostat_shared_zone": "另一个 Climate Advisor 区域已在使用此恒温器。请选择其他恒温器。",
+      "lockout_overlap": "制热锁定温度必须高于制冷锁定温度；否则会有既不允许制热也不允许制冷的室外温度。"
     }
   },
   "issues": {
@@ -840,6 +847,13 @@
         "both": "制冷和制热",
         "cool": "仅制冷",
         "heat": "仅制热"
+      }
+    },
+    "hvac_season": {
+      "options": {
+        "auto": "自动（制热和制冷）",
+        "heat_only": "仅制热",
+        "cool_only": "仅制冷"
       }
     }
   },

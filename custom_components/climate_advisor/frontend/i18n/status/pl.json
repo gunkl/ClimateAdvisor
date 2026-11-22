@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "nie wysłano",
   "status.pre_cool.outcome.superseded": "zastąpiono",
   "status.pre_cool.skipped_awake": "pominięto: godziny czuwania",
+  "status.pre_cool.skipped_cool_unavailable": "pominięto: chłodzenie niedostępne",
   "status.pre_cool.skipped_manual_override": "pominięto: ręczna zmiana",
   "status.pre_cool.skipped_not_eligible": "pominięto: nie kwalifikuje się",
   "status.pre_cool.skipped_occupancy": "pominięto: {mode, select, away {poza domem} vacation {wakacje} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "korzysta z typowego tempa grzania i chłodzenia domu (wartości domyślne)",
   "status.thermostat_notice.use_defaults_learning": "decyzje opierają się na typowym tempie grzania i chłodzenia domu (wartości domyślne), dopóki {engine} się uczy",
   "status.thermostat_notice.use_engine": "decyzje opierają się na własnym tempie grzania i chłodzenia silnika {engine}",
-  "status.thermostat_notice.use_learned": "nadal korzysta z tempa grzania i chłodzenia, które już poznał"
+  "status.thermostat_notice.use_learned": "nadal korzysta z tempa grzania i chłodzenia, które już poznał",
+  "status.zone_lockout.cool_outdoor": "Chłodzenie wyłączone: na zewnątrz {outdoor} (poniżej {threshold})",
+  "status.zone_lockout.cool_season": "Chłodzenie wyłączone: sezon ustawiony na tylko ogrzewanie",
+  "status.zone_lockout.heat_outdoor": "Ogrzewanie wyłączone: na zewnątrz {outdoor} (powyżej {threshold})",
+  "status.zone_lockout.heat_season": "Ogrzewanie wyłączone: sezon ustawiony na tylko chłodzenie"
 }

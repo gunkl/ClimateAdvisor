@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "non inviato",
   "status.pre_cool.outcome.superseded": "sostituito",
   "status.pre_cool.skipped_awake": "saltato: ore di veglia",
+  "status.pre_cool.skipped_cool_unavailable": "saltato: raffrescamento non disponibile",
   "status.pre_cool.skipped_manual_override": "saltato: modifica manuale",
   "status.pre_cool.skipped_not_eligible": "saltato: non idoneo",
   "status.pre_cool.skipped_occupancy": "saltato: {mode, select, away {assenza} vacation {vacanza} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "usa le velocità di riscaldamento e raffreddamento di una casa tipo (valori predefiniti)",
   "status.thermostat_notice.use_defaults_learning": "le decisioni usano le velocità di riscaldamento e raffreddamento di una casa tipo (valori predefiniti) mentre {engine} impara",
   "status.thermostat_notice.use_engine": "le decisioni usano le velocità di riscaldamento e raffreddamento proprie del motore {engine}",
-  "status.thermostat_notice.use_learned": "continua a usare le velocità di riscaldamento e raffreddamento già apprese"
+  "status.thermostat_notice.use_learned": "continua a usare le velocità di riscaldamento e raffreddamento già apprese",
+  "status.zone_lockout.cool_outdoor": "Raffrescamento spento: esterno {outdoor} (sotto {threshold})",
+  "status.zone_lockout.cool_season": "Raffrescamento spento: stagione impostata su solo riscaldamento",
+  "status.zone_lockout.heat_outdoor": "Riscaldamento spento: esterno {outdoor} (sopra {threshold})",
+  "status.zone_lockout.heat_season": "Riscaldamento spento: stagione impostata su solo raffrescamento"
 }

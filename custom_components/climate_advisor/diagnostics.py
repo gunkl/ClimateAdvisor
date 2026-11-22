@@ -114,6 +114,9 @@ async def async_get_diagnostics_payload(hass: HomeAssistant, entry: ConfigEntry)
                 "debug_state": coordinator.get_debug_state(),
                 "thermostat_snapshot": thermostat_snapshot,
                 "recent_hvac_events": hvac_events,
+                # Issue #1699: what the zone can do right now (equipment narrowed by the outdoor lockouts and the
+                # season setting); thermostat_snapshot keeps showing the equipment's own capabilities.
+                "zone_capability": _zone_capability(coordinator),
                 "chart_data_summary": _chart_data_summary(coordinator),
                 "learning_summary": coordinator.learning.get_compliance_summary(),
                 "config": dict(coordinator.config),
@@ -125,6 +128,18 @@ async def async_get_diagnostics_payload(hass: HomeAssistant, entry: ConfigEntry)
         )
 
     return async_redact_data(payload, TO_REDACT)
+
+
+def _zone_capability(coordinator: Any) -> dict[str, Any] | None:
+    """The coordinator's zone capability snapshot (None when it cannot say), never raising."""
+    fn = getattr(coordinator, "zone_capability_snapshot", None)
+    if not callable(fn):
+        return None
+    try:
+        value = fn()
+    except Exception:  # noqa: BLE001 - diagnostics must never raise
+        return None
+    return value if isinstance(value, dict) else None
 
 
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:

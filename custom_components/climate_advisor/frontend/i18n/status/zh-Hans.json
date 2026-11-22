@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "未发送",
   "status.pre_cool.outcome.superseded": "已被取代",
   "status.pre_cool.skipped_awake": "已跳过：清醒时段",
+  "status.pre_cool.skipped_cool_unavailable": "已跳过：制冷不可用",
   "status.pre_cool.skipped_manual_override": "已跳过：手动更改",
   "status.pre_cool.skipped_not_eligible": "已跳过：不符合条件",
   "status.pre_cool.skipped_occupancy": "已跳过：{mode, select, away {离家} vacation {度假} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "将采用典型住宅的制热和制冷速率（默认值）",
   "status.thermostat_notice.use_defaults_learning": "在 {engine} 学习期间，决策采用典型住宅的制热和制冷速率（默认值）",
   "status.thermostat_notice.use_engine": "决策采用 {engine} 引擎自身的制热和制冷速率",
-  "status.thermostat_notice.use_learned": "将继续使用已经学到的制热和制冷速率"
+  "status.thermostat_notice.use_learned": "将继续使用已经学到的制热和制冷速率",
+  "status.zone_lockout.cool_outdoor": "制冷关闭：室外 {outdoor}（低于 {threshold}）",
+  "status.zone_lockout.cool_season": "制冷关闭：季节设为仅制热",
+  "status.zone_lockout.heat_outdoor": "制热关闭：室外 {outdoor}（高于 {threshold}）",
+  "status.zone_lockout.heat_season": "制热关闭：季节设为仅制冷"
 }

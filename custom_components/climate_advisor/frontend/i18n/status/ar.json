@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "لم يُرسل",
   "status.pre_cool.outcome.superseded": "استُبدل",
   "status.pre_cool.skipped_awake": "تم التخطي: ساعات اليقظة",
+  "status.pre_cool.skipped_cool_unavailable": "تم التخطي: التبريد غير متاح",
   "status.pre_cool.skipped_manual_override": "تم التخطي: تغيير يدوي",
   "status.pre_cool.skipped_not_eligible": "تم التخطي: غير مؤهل",
   "status.pre_cool.skipped_occupancy": "تم التخطي: {mode, select, away {خارج المنزل} vacation {إجازة} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "يستخدم معدلات التدفئة والتبريد لمنزل نموذجي (القيم الافتراضية)",
   "status.thermostat_notice.use_defaults_learning": "تعتمد القرارات على معدلات التدفئة والتبريد لمنزل نموذجي (القيم الافتراضية) إلى أن يتعلم {engine}",
   "status.thermostat_notice.use_engine": "تعتمد القرارات على معدلات التدفئة والتبريد الخاصة بمحرك {engine}",
-  "status.thermostat_notice.use_learned": "يواصل استخدام معدلات التدفئة والتبريد التي تعلّمها بالفعل"
+  "status.thermostat_notice.use_learned": "يواصل استخدام معدلات التدفئة والتبريد التي تعلّمها بالفعل",
+  "status.zone_lockout.cool_outdoor": "التبريد متوقف: الخارج {outdoor} (أقل من {threshold})",
+  "status.zone_lockout.cool_season": "التبريد متوقف: الموسم مضبوط على التدفئة فقط",
+  "status.zone_lockout.heat_outdoor": "التدفئة متوقفة: الخارج {outdoor} (أعلى من {threshold})",
+  "status.zone_lockout.heat_season": "التدفئة متوقفة: الموسم مضبوط على التبريد فقط"
 }

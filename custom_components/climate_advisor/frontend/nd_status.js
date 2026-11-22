@@ -162,6 +162,8 @@
     // What is happening now, and why: the Status sentence rides on the hallway (thermostat) card. The header health
     // line only says whether automation is on; this says what it is doing (nat-vent, a grace period, a pause).
     var statusLine = '<div class="n" id="status-automation-line">' + ND.iso(t('automation_line', { phrase: automationPhrase(d) })) + '</div>';
+    // Issue #1699: an outdoor lockout or the season setting takes a side away ("Cooling off: outdoor 3 °C (below 16 °C)").
+    if (d.zone_lockout_status) statusLine += '<div class="n" id="status-zone-lockout">' + ND.iso(ND.text(d, 'zone_lockout_status')) + '</div>';
     // Issue #1676: the thermostat reads falsely high after a heating stop; say so, and which sensor CA reads meanwhile.
     var recal = d.thermostat_recalibration || null;
     if (recal) {

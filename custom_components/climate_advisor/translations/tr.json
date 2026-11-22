@@ -241,7 +241,10 @@
           "sleep_heat": "Uyku ısıtma sıcaklığı",
           "sleep_cool": "Uyku soğutma sıcaklığı",
           "vacation_heat": "Tatil ısıtma sıcaklığı",
-          "vacation_cool": "Tatil soğutma sıcaklığı"
+          "vacation_cool": "Tatil soğutma sıcaklığı",
+          "cool_lockout_outdoor_temp": "Dışarısı altındaysa soğutma yok",
+          "heat_lockout_outdoor_temp": "Dışarısı üstündeyse ısıtma yok",
+          "hvac_season": "Isıtma ve soğutma mevsimi"
         },
         "data_description": {
           "comfort_heat": "Evde biri varken ısıtmadaki hedef sıcaklık.",
@@ -251,7 +254,10 @@
           "sleep_heat": "Uyku saatlerinde (evdeyken) ısıtmadaki hedef sıcaklık.",
           "sleep_cool": "Uyku saatlerinde (evdeyken) soğutmadaki hedef sıcaklık.",
           "vacation_heat": "Tatil anahtarı açıkken ısıtma sıcaklığı. Evde yokken ısıtmadan 3 °F (yaklaşık 1,5 °C) düşük değeri kullanmak için boş bırakın.",
-          "vacation_cool": "Tatil anahtarı açıkken soğutma sıcaklığı. Evde yokken soğutmadan 3 °F (yaklaşık 1,5 °C) yüksek değeri kullanmak için boş bırakın."
+          "vacation_cool": "Tatil anahtarı açıkken soğutma sıcaklığı. Evde yokken soğutmadan 3 °F (yaklaşık 1,5 °C) yüksek değeri kullanmak için boş bırakın.",
+          "cool_lockout_outdoor_temp": "Dışarısı bundan soğukken Climate Advisor soğutmaz ve bunun 2 °C (3,6 °F) üstünde yeniden soğutmaya izin verir. Soğutma sıcaklığından günün toleransından fazla sıcak bir ev yine de soğutulur. Kilit istemiyorsanız boş bırakın.",
+          "heat_lockout_outdoor_temp": "Dışarısı bundan sıcakken Climate Advisor ısıtmaz ve bunun 2 °C (3,6 °F) altında yeniden ısıtmaya izin verir. Isıtma sıcaklığından günün toleransından fazla soğuk bir ev yine de ısıtılır. Soğutma kilidinin üstünde olmalıdır. Kilit istemiyorsanız boş bırakın.",
+          "hvac_season": "Otomatik ısıtır ve soğutur. Yalnızca ısıtma veya Yalnızca soğutma, termostat yapamıyormuş gibi mevsim boyunca diğer tarafı kaldırır; o tarafın konfor sınırını çok aşan bir ev yine de onu alır."
         }
       },
       "temperature_sources": {
@@ -572,7 +578,8 @@
       "vacation_heat_above_away_warning": "Tatil ısıtması evde yokken ısıtmadan daha sıcak; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
       "vacation_cool_below_away_warning": "Tatil soğutması evde yokken soğutmadan daha serin; bu yüzden tatil, normal bir dışarıda gününden daha fazla enerji harcar. Korumak için yeniden gönderin.",
       "vacation_freeze_warning": "Bu ayarla tatil ısıtması 45 °F (7 °C) altına düşer. Uzun bir yolculukta borular donabilir. Korumak için yeniden gönderin.",
-      "thermostat_shared_zone": "Bu termostatı başka bir Climate Advisor bölgesi zaten kullanıyor. Farklı bir termostat seçin."
+      "thermostat_shared_zone": "Bu termostatı başka bir Climate Advisor bölgesi zaten kullanıyor. Farklı bir termostat seçin.",
+      "lockout_overlap": "Isıtma kilidi soğutma kilidinin üstünde olmalıdır; aksi halde ne ısıtmaya ne soğutmaya izin verilen dış sıcaklıklar olur."
     }
   },
   "issues": {
@@ -840,6 +847,13 @@
         "both": "Soğutma ve ısıtma",
         "cool": "Yalnızca soğutma",
         "heat": "Yalnızca ısıtma"
+      }
+    },
+    "hvac_season": {
+      "options": {
+        "auto": "Otomatik (ısıtma ve soğutma)",
+        "heat_only": "Yalnızca ısıtma",
+        "cool_only": "Yalnızca soğutma"
       }
     }
   },

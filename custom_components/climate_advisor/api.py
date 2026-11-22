@@ -608,6 +608,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "nat_vent_on_threshold": _nat_vent_on_threshold_display,
                 "nat_vent_off_threshold": _nat_vent_off_threshold_display,
                 **_text_fields("pre_cool_status", data.get("pre_cool_status"), _lang),
+                # Issue #1699: "Cooling off: outdoor 3 °C (below 16 °C)" while a lockout / the season takes a side away.
+                **_text_fields("zone_lockout_status", data.get("zone_lockout_status"), _lang),
                 "coordinator_healthy": _coordinator_healthy,
                 # Issue #796 PR9: dashboard zone selector. loadStatus() polls every
                 # cycle regardless of which tab is active, so this is the one

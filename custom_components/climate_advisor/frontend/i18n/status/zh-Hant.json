@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "未傳送",
   "status.pre_cool.outcome.superseded": "已被取代",
   "status.pre_cool.skipped_awake": "已略過：清醒時段",
+  "status.pre_cool.skipped_cool_unavailable": "已略過：冷氣無法使用",
   "status.pre_cool.skipped_manual_override": "已略過：手動變更",
   "status.pre_cool.skipped_not_eligible": "已略過：不符合條件",
   "status.pre_cool.skipped_occupancy": "已略過：{mode, select, away {離家} vacation {度假} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "目前改用一般住家的升降溫速率（預設值）",
   "status.thermostat_notice.use_defaults_learning": "在 {engine} 學習期間，決策會使用一般住家的升降溫速率（預設值）",
   "status.thermostat_notice.use_engine": "決策會使用 {engine} 引擎本身的升降溫速率",
-  "status.thermostat_notice.use_learned": "會繼續使用先前已學到的升降溫速率"
+  "status.thermostat_notice.use_learned": "會繼續使用先前已學到的升降溫速率",
+  "status.zone_lockout.cool_outdoor": "冷氣關閉：室外 {outdoor}（低於 {threshold}）",
+  "status.zone_lockout.cool_season": "冷氣關閉：季節設為僅暖氣",
+  "status.zone_lockout.heat_outdoor": "暖氣關閉：室外 {outdoor}（高於 {threshold}）",
+  "status.zone_lockout.heat_season": "暖氣關閉：季節設為僅冷氣"
 }

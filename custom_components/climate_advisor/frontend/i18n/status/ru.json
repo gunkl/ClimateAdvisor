@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "не отправлено",
   "status.pre_cool.outcome.superseded": "заменено",
   "status.pre_cool.skipped_awake": "пропущено: время бодрствования",
+  "status.pre_cool.skipped_cool_unavailable": "пропущено: охлаждение недоступно",
   "status.pre_cool.skipped_manual_override": "пропущено: ручное изменение",
   "status.pre_cool.skipped_not_eligible": "пропущено: не подходит",
   "status.pre_cool.skipped_occupancy": "пропущено: {mode, select, away {не дома} vacation {отпуск} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "используются типичные для дома скорости нагрева и охлаждения (значения по умолчанию)",
   "status.thermostat_notice.use_defaults_learning": "решения опираются на типичные для дома скорости нагрева и охлаждения (значения по умолчанию), пока {engine} обучается",
   "status.thermostat_notice.use_engine": "решения опираются на собственные скорости нагрева и охлаждения движка {engine}",
-  "status.thermostat_notice.use_learned": "по-прежнему используются уже изученные скорости нагрева и охлаждения"
+  "status.thermostat_notice.use_learned": "по-прежнему используются уже изученные скорости нагрева и охлаждения",
+  "status.zone_lockout.cool_outdoor": "Охлаждение выключено: снаружи {outdoor} (ниже {threshold})",
+  "status.zone_lockout.cool_season": "Охлаждение выключено: сезон — только отопление",
+  "status.zone_lockout.heat_outdoor": "Отопление выключено: снаружи {outdoor} (выше {threshold})",
+  "status.zone_lockout.heat_season": "Отопление выключено: сезон — только охлаждение"
 }

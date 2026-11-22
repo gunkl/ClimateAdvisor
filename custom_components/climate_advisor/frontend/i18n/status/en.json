@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "not_sent",
   "status.pre_cool.outcome.superseded": "superseded",
   "status.pre_cool.skipped_awake": "skipped: awake hours",
+  "status.pre_cool.skipped_cool_unavailable": "skipped: cooling unavailable",
   "status.pre_cool.skipped_manual_override": "skipped: manual override",
   "status.pre_cool.skipped_not_eligible": "skipped: not eligible",
   "status.pre_cool.skipped_occupancy": "skipped: {mode, select, away {away} vacation {vacation} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "it uses a typical home's heating and cooling rates (defaults)",
   "status.thermostat_notice.use_defaults_learning": "the decisions use a typical home's heating and cooling rates (defaults) while {engine} learns",
   "status.thermostat_notice.use_engine": "the decisions use the {engine} engine's own heating and cooling rates",
-  "status.thermostat_notice.use_learned": "it keeps using the heating and cooling rates it had already learned"
+  "status.thermostat_notice.use_learned": "it keeps using the heating and cooling rates it had already learned",
+  "status.zone_lockout.cool_outdoor": "Cooling off: outdoor {outdoor} (below {threshold})",
+  "status.zone_lockout.cool_season": "Cooling off: season set to heat only",
+  "status.zone_lockout.heat_outdoor": "Heating off: outdoor {outdoor} (above {threshold})",
+  "status.zone_lockout.heat_season": "Heating off: season set to cool only"
 }

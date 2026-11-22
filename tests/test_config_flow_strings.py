@@ -50,6 +50,9 @@ _HELPER_BUILT_KEYS = {
             "sleep_cool",
             "vacation_heat",
             "vacation_cool",
+            # Issue #1699: the outdoor lockouts are built in a loop over _LOCKOUT_KEYS.
+            "cool_lockout_outdoor_temp",
+            "heat_lockout_outdoor_temp",
         },
     },
     "config": {

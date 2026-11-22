@@ -64,6 +64,11 @@ Every fix in this project follows this method, whether a person or an AI assista
 A workflow (`.github/workflows/submission-check.yml`) reads every new issue and pull request and posts one comment. The comment either lists what's missing and how to complete it, or says the submission is complete. It helps you finish a submission; it never closes or blocks anything.
 
 - **When it runs:** at most twice per submission. The first time is when you open it. The second is after your first revision (an edit, a push or a reply). Each time it waits 5 minutes for further edits first. After that it stays quiet; the maintainer can comment `/recheck` to run it again.
+- **What the comment says:**
+  - **First round:** what's **Missing** and **Suggestions**.
+  - **Second round:** it builds on the first. It reads your edits and replies, lists **what your update settled**, then what's **still missing** (at most three items from the AI review). Your replies count: if a comment gives the form's parts, it doesn't ask for the form again.
+  - **Next step:** the one most useful thing to do now, such as a file to attach.
+  - **For the maintainer:** decisions that are the maintainer's, not gaps in your submission: whether to split it, whether it's a bug or a feature, and its scope. They never count as missing.
 - **Labels:**
   - `needs-info` while something is missing;
   - `submission: complete` once nothing is missing;
@@ -81,6 +86,7 @@ A workflow (`.github/workflows/submission-check.yml`) reads every new issue and 
     - is a hypothesis presented as a finding;
     - do the analysis sections say something real;
     - does it match a closed `wontfix` issue, or duplicate another issue?
+  - **What the AI review knows:** the round, what the previous check said, and the names of the files you attached. Climate Advisor's diagnostics already hold your settings, setpoints, thermostat capabilities and versions, so it doesn't ask for those once the diagnostics are attached. It checks the docs before asking about a setting, and only calls two statements a conflict when it quotes both and they can't both be true.
 - **Limits:** the AI review runs for at most 10 submissions a day across the project. Each contributor gets at most 3 issues and 3 PRs a day, and 30 of each a month. Past a limit, the script checks still run, and the comment says the AI review is paused.
 - **Skipped:** the maintainer's own submissions, Dependabot, and the nightly-failure issues.
 

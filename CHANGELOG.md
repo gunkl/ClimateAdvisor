@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.72] — 2026-11-22
+
+### Changed
+- #1700: the submission check's second comment builds on the first. It reads the contributor's edits and replies, says what the update settled, lists at most three things still missing, and gives one concrete next step. A reply that gives the form's parts counts, so the form isn't asked for again. Decisions that are the maintainer's (splitting, bug or feature, scope) go under "For the maintainer" instead of "Missing", the review knows which files are attached and that diagnostics hold the settings and versions, and it only calls two statements a conflict when it quotes both. Nothing changes in your house.
+
 ## [0.9.71] — 2026-11-22
 
 ### Changed

@@ -9,6 +9,10 @@ Run by .github/workflows/submission-check.yml in three steps:
 - ``post``: compose the comment from ``check.json`` and the AI's ``ai_review.json`` (if any), sanitise the AI
   text, post it and set the labels. This step has write access and runs no AI.
 
+Issue #1700: round 2 builds on round 1. ``prepare`` also writes the round, what the previous check said (read back
+from its own comment) and the attached files; the author's replies count towards the form's parts. The AI may
+return ``addressed``, ``next_step`` and ``for_maintainer`` next to ``findings``.
+
 Submission text is untrusted: it is never interpolated into a shell command or a prompt, only written to files.
 """
 
@@ -213,9 +217,54 @@ def _suggest(text: str) -> dict[str, str]:
     return {"level": "suggestion", "text": text}
 
 
-def check_issue(body: str, author_replied: bool) -> tuple[list[dict[str, str]], set[str]]:
-    """Deterministic findings for an issue, and labels to add."""
+# Issue #1700: the parts of the bug form, as they can be recognised in free text (the body or the author's replies).
+_FORM_PARTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "what the person at home experienced",
+        re.compile(r"experienc|at home|\bwoke\b|\bfelt\b|\bnoticed\b|comfort impact", re.IGNORECASE),
+    ),
+    ("what you expected", re.compile(r"\bexpect", re.IGNORECASE)),
+    ("whether you have data or a hypothesis", re.compile(r"\bevidence\b|hypothes", re.IGNORECASE)),
+    (
+        "your Climate Advisor version",
+        re.compile(r"(?:climate advisor|\bCA\b|\bversion\b)[^\n]{0,40}?\b\d\.\d+\.\d+\b", re.IGNORECASE),
+    ),
+    (
+        "your Home Assistant version",
+        re.compile(r"(?:home assistant|\bHA\b)[^\n]{0,40}?\b20\d\d\.\d{1,2}\b", re.IGNORECASE),
+    ),
+)
+# the form fields a reply can stand in for on round 2, and the part of _FORM_PARTS that answers each
+_FIELD_PART = {
+    F_EXPERIENCE: 0,
+    F_EXPECTED: 1,
+    F_EVIDENCE_KIND: 2,
+    F_CA_VERSION: 3,
+    F_HA_VERSION: 4,
+}
+
+
+def form_parts_missing(texts: list[str]) -> list[str]:
+    """Issue #1700: the bug form's parts that none of ``texts`` (the body and the author's replies) gives."""
+    joined = "\n".join(_COMMENT_RE.sub("", t or "") for t in texts)
+    return [name for name, pattern in _FORM_PARTS if not pattern.search(joined)]
+
+
+def check_issue(
+    body: str,
+    author_replied: bool,
+    *,
+    comments: list[str] | tuple[str, ...] = (),
+    round_no: int = 1,
+) -> tuple[list[dict[str, str]], set[str]]:
+    """Deterministic findings for an issue, and labels to add.
+
+    Issue #1700: from round 2 on, the author's replies (``comments``) count towards the form's parts, and the
+    "use the form" request is not made again: round 1 already made it, and the reply is the answer.
+    """
     findings: list[dict[str, str]] = []
+    replies = [c for c in comments if c]
+    later = round_no > 1 and bool(replies)
     labels: set[str] = set()
     if APP_REPORT_SIGNATURE in (body or ""):
         if not author_replied:
@@ -231,15 +280,18 @@ def check_issue(body: str, author_replied: bool) -> tuple[list[dict[str, str]], 
     form = parse_form(body)
     if F_EVIDENCE_KIND in form:
         kind = form.get(F_EVIDENCE_KIND, "")
+        # a field left empty in the form counts as answered when a reply (round 2 on) gives that part
+        unanswered = set(form_parts_missing(replies)) if later else {name for name, _ in _FORM_PARTS}
         for field in (F_EVIDENCE_KIND, F_EXPERIENCE, F_EXPECTED, F_CA_VERSION, F_HA_VERSION):
-            if not form.get(field):
+            if not form.get(field) and _FORM_PARTS[_FIELD_PART[field]][0] in unanswered:
                 findings.append(_missing(f'Fill in "{field}".'))
         findings += _check_latest(form)
         evidence = form.get(F_EVIDENCE, "")
+        attached_in_replies = later and any(_ATTACHMENT_RE.search(c) for c in replies)
         if kind == KIND_SAW:
             if not form.get(F_WHEN):
                 findings.append(_missing('Fill in "When did it happen?" (date, time and time zone).'))
-            if not evidence or not _ATTACHMENT_RE.search(evidence):
+            if (not evidence or not _ATTACHMENT_RE.search(evidence)) and not attached_in_replies:
                 findings.append(
                     _missing(
                         "Attach the diagnostics and logs (drag the files into the issue): Settings → Devices & "
@@ -265,6 +317,11 @@ def check_issue(body: str, author_replied: bool) -> tuple[list[dict[str, str]], 
     elif F_OUTCOME in form:
         if not form.get(F_OUTCOME):
             findings.append(_missing(f'Fill in "{F_OUTCOME}".'))
+    elif later:
+        # Issue #1700: round 1 asked for the form; the reply counts. Ask only for the parts still not given.
+        gaps = form_parts_missing([body, *replies])
+        if gaps:
+            findings.append(_missing("Your update doesn't give " + _join(gaps) + " yet. Adding it here is fine."))
     else:
         findings.append(
             _missing(
@@ -274,6 +331,10 @@ def check_issue(body: str, author_replied: bool) -> tuple[list[dict[str, str]], 
             )
         )
     return findings, labels
+
+
+def _join(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " or " + items[-1]
 
 
 def _check_latest(form: dict[str, str]) -> list[dict[str, str]]:
@@ -409,20 +470,85 @@ def sanitise_ai_text(text: str, repo: str) -> str:
     return text[:500]
 
 
+# AI output caps (Issue #1683, #1700): the post step enforces them whatever the AI returns.
+AI_MAX_FINDINGS = 6
+AI_MAX_MISSING_LATER = 3  # round 2 on: only what still blocks the maintainer
+AI_MAX_ADDRESSED = 6
+AI_MAX_FOR_MAINTAINER = 3
+
+# Issue #1700: headings of the comment's sections (parse_previous_check reads them back on the next round).
+H_SETTLED = "What your update settled"
+H_MISSING = "Missing"
+H_STILL_MISSING = "Still missing"
+H_NEXT = "Next step:"
+H_SUGGESTIONS = "Suggestions"
+H_MAINTAINER = "For the maintainer"
+
+# Issue #1700: splitting, bug vs feature and scope are the maintainer's calls, never the author's gap.
+_MAINTAINER_CALL_RE = re.compile(
+    r"\bsplit(?:ting)?\b|separate issues?|(?:its|their) own issues?|\bbug or (?:a )?feature\b|"
+    r"\bfeature or (?:a )?bug\b|\bscope\b(?! facts?\b)",
+    re.IGNORECASE,
+)
+# Issue #1700: a claimed contradiction must quote both statements.
+_CONFLICT_RE = re.compile(r"conflict|contradict|inconsisten|doesn't match|does not match", re.IGNORECASE)
+_QUOTE_RE = re.compile(r'"[^"]{3,}"|\u201c[^\u201d]{3,}\u201d')
+
+
+def _ai_strings(value: Any, repo: str, cap: int) -> list[str]:
+    """A list of AI strings, each sanitised, empty ones dropped, at most ``cap``; anything else gives []."""
+    if not isinstance(value, list):
+        return []
+    out = [sanitise_ai_text(v, repo) for v in value if isinstance(v, str)]
+    return [t for t in out if t][:cap]
+
+
+def _unquoted_conflict(text: str) -> bool:
+    return bool(_CONFLICT_RE.search(text)) and len(_QUOTE_RE.findall(text)) < 2
+
+
 def compose_comment(check: dict[str, Any], ai_review: dict[str, Any] | None, repo: str) -> tuple[str, bool]:
-    """The comment text and whether the submission is complete."""
+    """The comment text and whether the submission is complete.
+
+    Issue #1700: the AI may also return ``addressed`` (what the author's update settled), ``next_step`` (one
+    concrete action) and ``for_maintainer`` (decisions that are the maintainer's, not gaps). An older
+    ``ai_review.json`` without them renders as before. From round 2 on, the comment opens with what the update
+    settled and keeps at most three AI items under "Still missing".
+    """
+    round_no = check["round"]
+    later = round_no > 1
     findings = list(check["findings"])
     ai_ran = ai_review is not None
+    addressed: list[str] = []
+    for_maintainer: list[str] = []
+    next_step = ""
     if ai_review:
-        for item in (ai_review.get("findings") or [])[:6]:
+        ai_missing = 0
+        raw = ai_review.get("findings")
+        for item in (raw if isinstance(raw, list) else [])[:AI_MAX_FINDINGS]:
+            if not isinstance(item, dict):
+                continue
             level = "missing" if item.get("level") == "missing" else "suggestion"
             text = sanitise_ai_text(item.get("text", ""), repo)
-            if text:
-                findings.append({"level": level, "text": text})
+            if not text or _unquoted_conflict(text):
+                continue
+            if _MAINTAINER_CALL_RE.search(text):
+                for_maintainer.append(text)
+                continue
+            if level == "missing":
+                ai_missing += 1
+                if later and ai_missing > AI_MAX_MISSING_LATER:
+                    continue
+            findings.append({"level": level, "text": text})
+        addressed = _ai_strings(ai_review.get("addressed"), repo, AI_MAX_ADDRESSED) if later else []
+        for_maintainer = (for_maintainer + _ai_strings(ai_review.get("for_maintainer"), repo, AI_MAX_FOR_MAINTAINER))[
+            :AI_MAX_FOR_MAINTAINER
+        ]
+        step = ai_review.get("next_step")
+        next_step = sanitise_ai_text(step, repo) if isinstance(step, str) else ""
     missing = [f["text"] for f in findings if f["level"] == "missing"]
     suggestions = [f["text"] for f in findings if f["level"] == "suggestion"]
     complete = not missing
-    round_no = check["round"]
     out = [make_marker(round_no, check["ai_allowed"] and ai_ran, check["kind"], check["author"])]
     out.append(
         f"### Submission check ({min(round_no, MAX_ROUNDS)} of {MAX_ROUNDS})"
@@ -430,17 +556,36 @@ def compose_comment(check: dict[str, Any], ai_review: dict[str, Any] | None, rep
         else "### Submission check (recheck)"
     )
     out.append("")
-    if complete:
+
+    def section(heading: str, items: list[str]) -> None:
+        if items:
+            out.append("")
+            out.append(f"**{heading}**")
+            out.extend(f"- {t}" for t in items)
+
+    if later:
+        out.append("Thanks for the update.")
+        section(H_SETTLED, addressed)
+        out.append("")
+        if complete:
+            out.append(
+                "**This submission looks complete.** Nothing is blocking: the maintainer will take it from here."
+            )
+        else:
+            out.append(f"**{H_STILL_MISSING}**")
+            out.extend(f"- {t}" for t in missing)
+    elif complete:
         out.append("**This submission looks complete.** Thanks: the maintainer will take it from here.")
     else:
         out.append("Thanks for this. A few things would let the maintainer pick it up:")
         out.append("")
-        out.append("**Missing**")
+        out.append(f"**{H_MISSING}**")
         out.extend(f"- {t}" for t in missing)
-    if suggestions:
+    if next_step:
         out.append("")
-        out.append("**Suggestions**")
-        out.extend(f"- {t}" for t in suggestions)
+        out.append(f"**{H_NEXT}** {next_step}")
+    section(H_SUGGESTIONS, suggestions)
+    section(H_MAINTAINER, for_maintainer)
     if not check["ai_allowed"]:
         out.append("")
         out.append(
@@ -456,6 +601,84 @@ def compose_comment(check: dict[str, Any], ai_review: dict[str, Any] | None, rep
         tail = "That was its last automatic check."
     out.append(f"<sub>An automatic check ([how it works]({GUIDE}#the-automatic-submission-check)). {tail}</sub>")
     return "\n".join(out), complete
+
+
+# ------------------------------------------------------------------------------------------------ round context
+
+
+_SECTION_KEYS = {
+    H_SETTLED: "addressed",
+    H_MISSING: "missing",
+    H_STILL_MISSING: "missing",
+    H_SUGGESTIONS: "suggestions",
+    H_MAINTAINER: "for_maintainer",
+}
+_HEADING_RE = re.compile(r"^\*\*(.+?)\*\*\s*(.*)$")
+
+
+def parse_previous_check(body: str) -> dict[str, Any] | None:
+    """Issue #1700: what one of the check's own comments said, read back from its sections, or None.
+
+    Reads both the round-1 layout (Missing / Suggestions) and the later one (settled / Still missing / Next step
+    / For the maintainer), so round 2 can build on round 1.
+    """
+    marker = parse_marker(body)
+    if marker is None:
+        return None
+    prev: dict[str, Any] = {
+        "round": int(marker["round"]) if marker.get("round", "").isdigit() else None,
+        "complete": "looks complete" in body,
+        "addressed": [],
+        "missing": [],
+        "suggestions": [],
+        "for_maintainer": [],
+        "next_step": "",
+    }
+    key: str | None = None
+    for line in body.splitlines():
+        m = _HEADING_RE.match(line.strip())
+        if m:
+            heading, rest = m.group(1).strip(), m.group(2).strip()
+            if heading == H_NEXT:
+                prev["next_step"], key = rest, None
+            else:
+                key = _SECTION_KEYS.get(heading)
+        elif key and line.startswith("- "):
+            prev[key].append(line[2:].strip())
+        elif not line.strip():
+            continue
+        else:
+            key = None
+    return prev
+
+
+_ATTACH_LINK_RE = re.compile(
+    r"!?\[([^\]]*)\]\((https://github\.com/(?:user-attachments/[^)\s]+|[^/\s]+/[^/\s]+/files/\d+/[^)\s]+))\)"
+)
+_ATTACH_BARE_RE = re.compile(r"https://github\.com/(?:user-attachments/|[^/\s]+/[^/\s]+/files/\d+/)[^\s)>\]]+")
+MAX_ATTACHMENTS = 30
+
+
+def list_attachments(body: str, author_comments: list[str]) -> list[dict[str, str]]:
+    """Issue #1700: the files attached to the body and the author's comments: name, url and where it is.
+
+    The AI review can't open them, so it gets their names (a diagnostics file holds the settings, setpoints,
+    capabilities and versions) and doesn't ask for what is already attached.
+    """
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    sources = [("body", body or "")] + [(f"comment {i}", c or "") for i, c in enumerate(author_comments, 1)]
+    for where, text in sources:
+        text = _COMMENT_RE.sub("", text)
+        for name, url in _ATTACH_LINK_RE.findall(text):
+            if url not in seen:
+                seen.add(url)
+                found.append({"name": name.strip() or url.rsplit("/", 1)[-1], "url": url, "where": where})
+        for url in _ATTACH_BARE_RE.findall(text):
+            if url not in seen:
+                seen.add(url)
+                found.append({"name": url.rsplit("/", 1)[-1], "url": url, "where": where})
+    return found[:MAX_ATTACHMENTS]
 
 
 # ------------------------------------------------------------------------------------------------ I/O (GitHub CLI)
@@ -532,7 +755,7 @@ def cmd_prepare() -> None:
             )
     allowed, reason = ai_allowed(ledger, now=now, number=number, kind=kind, author=author, recheck=trigger == "recheck")
 
-    author_comments = [c["body"] for c in comments if c["user"]["login"] == author]
+    author_comments = [c.get("body") or "" for c in comments if c["user"]["login"] == author]
     body = item.get("body") or ""
     submission: dict[str, Any] = {
         "kind": kind,
@@ -541,10 +764,14 @@ def cmd_prepare() -> None:
         "body": body,
         "labels": [lbl["name"] for lbl in item.get("labels") or []],
         "author_comments": author_comments[-10:],
+        # Issue #1700: the round, what the previous check said, and what is attached
+        "round": round_no,
+        "previous_check": parse_previous_check(own[-1].get("body", "")) if own else None,
+        "attachments": list_attachments(body, author_comments),
     }
     labels: set[str] = set()
     if kind == "issue":
-        findings, labels = check_issue(body, bool(author_comments))
+        findings, labels = check_issue(body, bool(author_comments), comments=author_comments, round_no=round_no)
     else:
         files = [f["filename"] for f in _gh_paginated(f"repos/{repo}/pulls/{number}/files?per_page=100")]
         issue_number = linked_issue(body)

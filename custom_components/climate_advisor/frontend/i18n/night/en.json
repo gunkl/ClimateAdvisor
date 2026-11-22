@@ -15,7 +15,7 @@
   "night.option_fan_2h": "Whole-house fan with the windows open for {hours} h, then close up",
   "night.option_fan_then_ac": "Whole-house fan until the bedroom is under {limit}, then close up and let the AC finish",
   "night.option_fan_until_target": "Whole-house fan until the bedroom reaches {reach}, then close up",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "Open the bedroom windows for {hours} h at bedtime, then close them",
   "night.option_windows_all": "Leave the bedroom windows open all night",
   "night.sentence_fan_off": "{t}: turn the {fan, select, hvac {HVAC fan} other {whole-house fan}} off; CA takes over holding the bedroom.",

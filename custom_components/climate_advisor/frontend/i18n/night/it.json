@@ -15,7 +15,7 @@
   "night.option_fan_2h": "Ventola per tutta la casa con le finestre aperte per {hours} h, poi chiudere",
   "night.option_fan_then_ac": "Ventola per tutta la casa finché la camera da letto scende sotto {limit}, poi chiudere e lasciare che il condizionatore finisca il lavoro",
   "night.option_fan_until_target": "Ventola per tutta la casa finché la camera da letto raggiunge {reach}, poi chiudere",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "Aprire le finestre della camera da letto per {hours} h prima di dormire, poi chiuderle",
   "night.option_windows_all": "Lasciare aperte le finestre della camera da letto tutta la notte",
   "night.sentence_fan_off": "{t}: spegni la {fan, select, hvac {ventola della climatizzazione} other {ventola per tutta la casa}}; CA si occupa di mantenere la camera da letto.",

@@ -6,7 +6,8 @@ module's floor: its line-and-branch coverage, both test tiers combined, when the
 (``validate.yml``, job ``coverage``) collects coverage in every unit and real-HA slice, combines it, writes the
 ``coverage json`` report and runs ``check`` on it:
 
-* a module below its floor (less the file's ``tolerance``) fails;
+* a module below its floor (less the file's ``tolerance``) fails; once a floor reaches the 95 % target, the
+  tolerance no longer reaches below the target (Issue #1671: Silver needs every module above it);
 * a new module (no floor yet) below the 95 % target fails: test it, or record its floor deliberately (``update``);
 * a floor for a module that no longer exists fails (stale entry: ``update`` drops it);
 * a module well above its floor is a note, not a failure: raise the floors with ``update`` (never lowers one).
@@ -105,6 +106,19 @@ class CheckResult:
     notes: list[str] = field(default_factory=list)
 
 
+def _limit(floor: float, floors: Floors) -> float:
+    """The lowest passing figure for a module with a floor.
+
+    ``tolerance`` absorbs small measurement swings below a floor, but (Issue #1671) never below the target for a
+    module whose floor has reached it: Silver ``test-coverage`` needs every module above 95 %, so a module that got
+    there may not quietly slip back under it.
+    """
+    limit = floor - floors.tolerance
+    if floor >= floors.target:
+        limit = max(limit, floors.target)
+    return limit
+
+
 def check(coverage: dict[str, ModuleCoverage], floors: Floors) -> CheckResult:
     result = CheckResult()
     for module, cov in sorted(coverage.items()):
@@ -117,9 +131,12 @@ def check(coverage: dict[str, ModuleCoverage], floors: Floors) -> CheckResult:
                 )
             else:
                 result.notes.append(f"{module}: new module at {cov.percent:.1f}%; record its floor: `{UPDATE_HINT}`")
-        elif cov.percent < floor - floors.tolerance:
+        elif cov.percent < _limit(floor, floors):
+            below = f"its floor {floor:.1f}%"
+            if floor >= floors.target and cov.percent < floors.target:
+                below = f"the {floors.target:.0f}% target (floor {floor:.1f}%)"
             result.errors.append(
-                f"{module}: coverage {cov.percent:.2f}% fell below its floor {floor:.1f}% "
+                f"{module}: coverage {cov.percent:.2f}% fell below {below} "
                 f"({cov.missing_lines} lines, {cov.missing_branches} branches not covered); cover the new code"
             )
         elif floor_of(cov.percent) >= floor + RAISE_NOTE_MARGIN:

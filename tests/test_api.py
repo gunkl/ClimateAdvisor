@@ -415,27 +415,30 @@ class TestConfigViewDisplayTransform:
 class TestToggleAutomationView:
     """Tests for the toggle_automation API endpoint."""
 
+    # These drive the real view (they used to copy its logic, which tested nothing).
+    def _post_toggle(self, enabled):
+        import asyncio
+
+        from custom_components.climate_advisor.api import ClimateAdvisorToggleAutomationView
+
+        coord = MagicMock()
+        coord.automation_enabled = enabled
+        resp = asyncio.run(ClimateAdvisorToggleAutomationView().post(_make_view_request(coord)))
+        return coord, resp
+
     def test_toggle_disables_when_enabled(self):
         """Toggling when enabled should disable automation."""
-        coord = MagicMock()
-        coord.automation_enabled = True
-        coord.set_automation_enabled = MagicMock()
-
-        new_state = not coord.automation_enabled
-        coord.set_automation_enabled(new_state)
-
+        coord, resp = self._post_toggle(True)
         coord.set_automation_enabled.assert_called_once_with(False)
+        assert resp.status == 200
+        assert resp.json_data["automation_enabled"] is False
 
     def test_toggle_enables_when_disabled(self):
         """Toggling when disabled should enable automation."""
-        coord = MagicMock()
-        coord.automation_enabled = False
-        coord.set_automation_enabled = MagicMock()
-
-        new_state = not coord.automation_enabled
-        coord.set_automation_enabled(new_state)
-
+        coord, resp = self._post_toggle(False)
         coord.set_automation_enabled.assert_called_once_with(True)
+        assert resp.status == 200
+        assert resp.json_data["automation_enabled"] is True
 
     def test_toggle_automation_constant_defined(self):
         """API_TOGGLE_AUTOMATION should be under the base path."""

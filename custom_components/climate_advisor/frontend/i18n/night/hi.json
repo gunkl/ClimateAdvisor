@@ -15,7 +15,7 @@
   "night.option_fan_2h": "खिड़कियाँ खोलकर पूरे घर का पंखा {hours} घंटे चलाएँ, फिर बंद कर दें",
   "night.option_fan_then_ac": "बेडरूम {limit} से नीचे आने तक पूरे घर का पंखा चलाएँ, फिर बंद कर दें और बाकी AC पर छोड़ दें",
   "night.option_fan_until_target": "बेडरूम {reach} तक पहुँचने तक पूरे घर का पंखा चलाएँ, फिर बंद कर दें",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "सोते समय बेडरूम की खिड़कियाँ {hours} घंटे खोलें, फिर बंद कर दें",
   "night.option_windows_all": "बेडरूम की खिड़कियाँ पूरी रात खुली छोड़ें",
   "night.sentence_fan_off": "{t}: {fan, select, hvac {HVAC पंखा} other {पूरे घर का पंखा}} बंद करें; इसके बाद CA बेडरूम का तापमान सँभालता है।",

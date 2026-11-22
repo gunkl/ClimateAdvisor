@@ -771,7 +771,7 @@ def _label_msg(key: str, inp: NightInputs) -> i18n.Msg:
         return i18n.Msg("night.option_fan_then_ac", limit=_tp(inp.ceiling_f - FAN_THEN_AC_BELOW_CEILING_F, inp.unit))
     if key == OPT_BLOWER_2H:
         return i18n.Msg("night.option_blower_2h", hours=inp.window_hours)
-    return i18n.Msg("night.option_unknown", key=key)
+    return i18n.Msg("night.option_unknown", option=key)
 
 
 def _label(key: str, inp: NightInputs, sim: _Sim | None) -> str:

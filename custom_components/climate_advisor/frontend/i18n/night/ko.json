@@ -15,7 +15,7 @@
   "night.option_fan_2h": "창문을 열고 집 전체 환기 송풍기를 {hours}시간 작동한 뒤 닫기",
   "night.option_fan_then_ac": "침실이 {limit} 아래로 내려갈 때까지 집 전체 환기 송풍기를 작동한 뒤 닫고 나머지는 에어컨에 맡기기",
   "night.option_fan_until_target": "침실이 {reach}에 도달할 때까지 집 전체 환기 송풍기를 작동한 뒤 닫기",
-  "night.option_unknown": "{key}",
+  "night.option_unknown": "{option}",
   "night.option_windows_2h": "취침 시 침실 창문을 {hours}시간 연 뒤 닫기",
   "night.option_windows_all": "침실 창문을 밤새 열어 두기",
   "night.sentence_fan_off": "{t}: {fan, select, hvac {냉난방 송풍기} other {집 전체 환기 송풍기}}를 끄세요. 이후에는 CA가 침실 온도를 유지합니다.",

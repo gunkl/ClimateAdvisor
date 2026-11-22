@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.62] — 2026-11-21
+
+### Added
+- **Every setting is documented:** [docs/configuration-options.md](docs/configuration-options.md) explains all 109 setup and options fields: what each does, its default and its range. A test keeps it complete when options change (#1671).
+- **Gold on the Home Assistant quality scale (self-assessed):** Silver was the last tier with open rules, so finishing it reaches Gold. Every module now has over 95 % test coverage (97.8 % overall, up from 94 %), and CI no longer lets a module slip back under 95 % (#1671). The README badge reads Gold; only the two Platinum items are left (strict typing, and the shared web session in #1650).
+
+### Fixed
+- If a night option were ever offered without its own label, planning the bedroom night would have failed for that evening; it now shows a generic label. No current option was affected (#1670).
+
 ## [0.9.61] — 2026-11-21
 
 ### Added

@@ -59,8 +59,10 @@ rules:
     comment: Translated ServiceValidationError for bad input, HomeAssistantError for failures (#1655).
   config-entry-unloading: done
   docs-configuration-parameters:
-    status: todo
-    comment: Partial. About 20 options are documented only in the UI (incremental).
+    status: done
+    comment: >-
+      docs/configuration-options.md documents all 109 options; tests/test_docs_configuration_parameters.py fails
+      when one is added or renamed without a row (#1671).
   docs-installation-parameters: done
   entity-unavailable:
     status: done
@@ -76,8 +78,10 @@ rules:
     status: done
     comment: Claude key and GitHub token (#1643).
   test-coverage:
-    status: todo
-    comment: Partial. Per-module ratchet in CI (#1644); 31 modules still under 95 % (incremental).
+    status: done
+    comment: >-
+      Every module above 95 % (both tiers combined; 97.8 % overall). The CI ratchet (#1644) keeps each module at
+      its floor and never lets one slip under 95 % (#1671).
 
   # Gold
   devices:

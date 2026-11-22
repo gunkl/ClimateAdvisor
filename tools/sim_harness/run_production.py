@@ -1237,6 +1237,59 @@ def _feed_outdoor_temp(engine: Any, coordinator: Any | None, outdoor_f: float) -
         engine.update_outdoor_temp(outdoor_f)
 
 
+def _apply_scenario_humidity(
+    event: dict, engine: Any, fake_hass: FakeHass, climate_entity: str, coordinator: Any | None
+) -> None:
+    """Issue #1690: the optional ``humidity`` / ``outdoor_humidity`` (RH %) of a ``temp_update``.
+
+    Coordinator mode: the thermostat's own humidity sensor and the outdoor sensor's own humidity sensor report
+    (``humidity_devices.report_scenario_humidity``, shared with the real-HA adapter: the same-device lookup is seeded,
+    only these entities are stamped). Once a run has carried ``outdoor_humidity``, every later ``outdoor_f`` is also
+    written silently to the outdoor temperature sensor's state (in the install's unit), as real HA's adapter does on
+    every event: the dew point pairs the humidity with the temperature the coordinator was fed, and the coordinator's
+    own 5-minute outdoor refresh (which reads that sensor) never reverts a later ``outdoor_f`` to a frozen value.
+    ``_feed_outdoor_temp`` hands the value over directly and never writes the sensor, so runs without
+    ``outdoor_humidity`` (every golden) are unchanged. Engine-only mode: the bare engine's ``StaticEngineInputs``
+    tracks the event's temperatures on EVERY ``temp_update`` and its humidity when given.
+    """
+    from tools.sim_harness import humidity_devices  # noqa: PLC0415
+
+    humidity, outdoor_humidity = event.get("humidity"), event.get("outdoor_humidity")
+    if coordinator is None:
+        from custom_components.climate_advisor.engine_inputs import StaticEngineInputs  # noqa: PLC0415
+
+        inputs = getattr(engine, "_inputs", None)
+        if isinstance(inputs, StaticEngineInputs):
+            if event.get("indoor_f") is not None:
+                inputs.indoor_f = float(event["indoor_f"])
+            if event.get("outdoor_f") is not None:
+                inputs.outdoor_f = float(event["outdoor_f"])
+            if humidity is not None:
+                inputs.humidity = float(humidity)
+            if outdoor_humidity is not None:
+                inputs.outdoor_humidity = float(outdoor_humidity)
+        return
+    if outdoor_humidity is not None:
+        fake_hass._sim_outdoor_humidity_seen = True  # type: ignore[attr-defined]
+    if event.get("outdoor_f") is not None and getattr(fake_hass, "_sim_outdoor_humidity_seen", False):
+        from custom_components.climate_advisor.temperature import UNIT_SYMBOL, from_fahrenheit  # noqa: PLC0415
+
+        sensor = humidity_devices.require_outdoor_sensor(coordinator.config)
+        unit = coordinator.config.get("temp_unit", "fahrenheit")
+        fake_hass.states.set(
+            sensor,
+            FakeState(
+                state=str(from_fahrenheit(float(event["outdoor_f"]), unit)),
+                attributes={"unit_of_measurement": UNIT_SYMBOL.get(unit, "°F")},
+            ),
+        )
+    if humidity is None and outdoor_humidity is None:
+        return
+    humidity_devices.report_scenario_humidity(
+        coordinator, climate_entity, event, fake_hass.states.async_report_humidity
+    )
+
+
 def _handle_temp_update(
     event: dict,
     engine: Any,
@@ -1287,6 +1340,8 @@ def _handle_temp_update(
 
     if indoor_f is not None:
         _inject_indoor_temp(fake_hass, climate_entity, float(indoor_f), dispatch=coordinator is not None)
+
+    _apply_scenario_humidity(event, engine, fake_hass, climate_entity, coordinator)
 
     new_indoor = float(indoor_f) if indoor_f is not None else None
     if coordinator is None and new_indoor is not None and new_indoor != old_indoor:

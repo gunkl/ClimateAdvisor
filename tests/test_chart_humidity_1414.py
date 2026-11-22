@@ -540,29 +540,41 @@ class TestForecastLists:
         assert "outdoor_humidity_forecast" not in res
 
 
-# ── chart display only: nothing in automation / control reads any of it ──────────────────────────────────────────────
-_NEW_NAMES = {
-    "feels_like",
-    "humidity_sources",
+# ── feels-like is chart display only; humidity reaches decisions only through the dew-point facts ─────────────────────
+# Issue #1690 (#1507 H0) amended these pins (it did not delete them). Before it, NO non-chart module could name any
+# humidity or feels-like code. The approved #1507 plan makes humidity a decision input, but only as a dew point
+# (``humidity_facts``: same-device pairing, glitch / freshness / unit checks, 15-minute median) carried in
+# ``EngineFacts``. So the pin is split in two:
+# * feels-like (heat index, wind chill, the chart's feels-like keys) still never reaches a decision: same 6 modules;
+# * the humidity resolver and the humidity settings may be named only by the dew-point reader (``humidity_facts``)
+#   and the facts it fills (``engine_inputs``). The later #1507 rules read ``EngineFacts.indoor_dew_point_f`` /
+#   ``outdoor_dew_point_f`` / ``humid_latches`` (not banned names), never the raw resolver: a second, unfiltered
+#   humidity path (raw 0 %, no freshness, no median) would fail here. A lane that truly needs a humidity setting name
+#   widens this list in its own PR, with the reason.
+_FEELS_LIKE_NAMES = {
     "feels_like_f",
     "heat_index_f",
     "wind_chill_f",
-    "resolve_humidity",
     "_read_chart_humidity",
     "_build_outdoor_humidity_feelslike_forecast",
+}
+_FEELS_LIKE_STRINGS = {"feelslike", "outdoor_feelslike"}
+_HUMIDITY_NAMES = {
+    "humidity_sources",
+    "resolve_humidity",
+    "resolve_humidity_paired",
     "CONF_INDOOR_HUMIDITY_ENTITY",
     "CONF_SLEEP_INDOOR_HUMIDITY_ENTITY",
     "CONF_OUTDOOR_HUMIDITY_ENTITY",
 }
-_NEW_STRINGS = {
-    "feelslike",
-    "outdoor_feelslike",
+_HUMIDITY_STRINGS = {
     "outdoor_humidity",
     "indoor_humidity_entity",
     "sleep_indoor_humidity_entity",
     "outdoor_humidity_entity",
 }
-# The only modules allowed to name the new code or keys: the two new modules, the chart log, the settings surfaces.
+# The only modules allowed to name feels-like: its module, the chart log, the settings surfaces (and in the
+# coordinator only the chart paths, pinned below).
 _ALLOWED_MODULES = {
     "feels_like.py",
     "humidity_sources.py",
@@ -571,6 +583,9 @@ _ALLOWED_MODULES = {
     "const.py",
     "config_flow.py",
 }
+# Issue #1690: the modules that may name the humidity resolver / settings: the above, the dew-point reader and the
+# facts it fills. Nothing else (see the comment above).
+_HUMIDITY_ALLOWED_MODULES = _ALLOWED_MODULES | {"humidity_facts.py", "engine_inputs.py"}
 
 
 def _names_and_strings(tree: ast.AST) -> set[str]:
@@ -589,37 +604,69 @@ def _names_and_strings(tree: ast.AST) -> set[str]:
     return found
 
 
-def test_no_automation_or_control_module_reads_the_new_values():
+def test_no_automation_or_control_module_reads_feels_like():
     offenders = {}
     for path in sorted(PKG.glob("*.py")):
         if path.name in _ALLOWED_MODULES:
             continue
-        hits = _names_and_strings(ast.parse(path.read_text(encoding="utf-8"))) & (_NEW_NAMES | _NEW_STRINGS)
+        hits = _names_and_strings(ast.parse(path.read_text(encoding="utf-8"))) & (
+            _FEELS_LIKE_NAMES | _FEELS_LIKE_STRINGS
+        )
         if hits:
             offenders[path.name] = sorted(hits)
-    assert not offenders, f"chart-only humidity / feels-like reached a non-chart module: {offenders}"
+    assert not offenders, f"chart-only feels-like reached a non-chart module: {offenders}"
+
+
+def test_humidity_reaches_only_the_dew_point_reader():
+    offenders = {}
+    for path in sorted(PKG.glob("*.py")):
+        if path.name in _HUMIDITY_ALLOWED_MODULES:
+            continue
+        hits = _names_and_strings(ast.parse(path.read_text(encoding="utf-8"))) & (_HUMIDITY_NAMES | _HUMIDITY_STRINGS)
+        if hits:
+            offenders[path.name] = sorted(hits)
+    assert not offenders, (
+        f"humidity reached a module outside the dew-point reader (read EngineFacts instead): {offenders}"
+    )
 
 
 def test_in_the_coordinator_only_the_chart_paths_touch_it():
     src = (PKG / "coordinator.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "ClimateAdvisorCoordinator")
-    users = set()
-    for fn in cls.body:
-        if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) and _names_and_strings(fn) & (
-            _NEW_NAMES - {"feels_like", "humidity_sources"}
-        ):
-            users.add(fn.name)
-    # Issue #1459: ``_humidity_role_inputs`` is the one config read of the resolver's inputs (shared by the chart rows
-    # and the capabilities block) and ``chart_capabilities`` only feeds ``chart_data["capabilities"]`` (pinned to
-    # ``get_chart_data`` by tests/test_chart_capabilities_1459.py): both chart display only, so the guard still holds.
-    assert users == {
+    fns = [fn for fn in cls.body if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef)]
+
+    def users(names: set[str]) -> set[str]:
+        return {fn.name for fn in fns if _names_and_strings(fn) & names}
+
+    # Feels-like: the chart paths only, exactly as before Issue #1690 (no decision function names it).
+    assert users(_FEELS_LIKE_NAMES | _FEELS_LIKE_STRINGS) == {
         "_read_chart_humidity",
         "_read_chart_context",
         "get_chart_data",
+    }
+    # Humidity: the chart paths (Issue #1459: ``_humidity_role_inputs`` is the one config read of the resolver's inputs,
+    # shared by the chart rows and the capabilities block; ``chart_capabilities`` only feeds the chart key) plus, since
+    # Issue #1690, the decision dew point: its pure reader (``_read_dew_point``, through ``humidity_facts``), the
+    # smoothed fact (``_dew_point_fact``) that ``engine_facts`` carries, the 5-minute sample that keeps the median and
+    # the latches (``_sample_humidity_facts``) and the #1689 outdoor reconnect check (``_outdoor_reading_glitched``,
+    # which reads the same device's humidity only to spot the 0 % / 32 F glitch). Adding a function here is a
+    # deliberate decision: say why in this comment.
+    humidity_names = _HUMIDITY_NAMES | _HUMIDITY_STRINGS | {"read_humidity_state", "read_dew_point", "_read_dew_point"}
+    assert users(humidity_names | {"_humidity_role_inputs", "_dew_point_fact"}) == {
+        "_read_chart_humidity",
         "_humidity_role_inputs",
         "chart_capabilities",
+        "_read_dew_point",
+        "_dew_point_fact",
+        "_sample_humidity_facts",
+        "_outdoor_reading_glitched",
+        "engine_facts",
     }
+    # The decision facts carry a dew point, never a raw RH: engine_facts names only the smoothed dew-point fact.
+    engine_facts = next(fn for fn in fns if fn.name == "engine_facts")
+    assert "_dew_point_fact" in _names_and_strings(engine_facts)
+    assert not _names_and_strings(engine_facts) & (humidity_names | _FEELS_LIKE_NAMES | {"_humidity_role_inputs"})
     # and _read_chart_context's output only ever goes into a chart_log row
     readers = set()
     for fn in cls.body:

@@ -3,6 +3,17 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.73] — 2026-11-22
+
+### Fixed
+- Fix #1689: after an outage, the outdoor sensor can report 0 % humidity and exactly 32 °F for a few seconds before its real reading arrives. Climate Advisor used to accept that 32 °F as the outside temperature, so a decision taken in those seconds (window advice, natural ventilation, heating plans) could rest on a false freezing night. That reading (or a 32 °F first reading in the 30 seconds after the sensor comes back, before its humidity does) is now skipped: the weather service answers until the sensor's next reading or the 5-minute refresh, logged like any outdoor-sensor fallback. Any other first reading after an outage is still used at once.
+
+### Added
+- #1690 (humidity, step 1 of #1507): Climate Advisor now works out the dew point indoors and outside, ready for the humid-night protections that follow. Nothing changes in your house yet: no decision reads it. The dew point uses the humidity the Status chart already shows, paired with the temperature of the same device. It is unknown, which means today's behaviour, when the reading is stale, not in %, or taken from the thermostat while it reads high after a heating shutdown; a reconnect glitch (0 %) only drops that one reading. At night it uses the bedroom sensor, else the room's. The chart still logs humidity exactly as received.
+
+### Docs
+- The chart-log spec now says the `hvac` field is the thermostat's `hvac_action` (heating, cooling, fan, idle, off), not the HVAC mode. Rows written before 0.9.32 may show cooling or heating while only the blower ran (#1512 removed that relabel). Found by the #1697 investigation.
+
 ## [0.9.72] — 2026-11-22
 
 ### Changed

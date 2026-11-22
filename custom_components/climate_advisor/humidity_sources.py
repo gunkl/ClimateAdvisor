@@ -1,8 +1,10 @@
 """Indoor and outdoor relative humidity for the Status charts (Issue #1414): one resolver, three roles.
 
 Occupant view: the chart shows how humid the room CA is reading feels next to its temperature (the day room by day,
-the bedroom in the sleep window), and how humid it is outside. CHART DISPLAY ONLY: no decision, setpoint or control
-path reads anything here (pinned by ``tests/test_chart_humidity_1414.py``).
+the bedroom in the sleep window), and how humid it is outside. The chart logs the value this resolver returns, raw
+and at native resolution. Since Issue #1690 the same resolver also picks the sensor behind the decision dew point
+(``humidity_facts``), which adds the glitch, freshness, unit and smoothing rules on top; decisions never read the
+raw chart value, and feels-like never reaches a decision (pinned by ``tests/test_chart_humidity_1414.py``).
 
 Source order per role (first usable value wins):
 
@@ -92,13 +94,36 @@ def resolve_humidity(
     temperature sensor). ``fallback_entity``: the climate entity (indoor_day) or the weather entity (outdoor).
     ``discover(entity_id, exclude_non_room)``: companion lookup (the coordinator passes its cached one).
     ``source`` is an entity id, or ``"<entity>#<attribute>"`` for the attribute fallback. Never raises.
+    Thin view of ``resolve_humidity_paired`` (one resolver for the chart and the decision dew point, Issue #1690).
+    """
+    rh, source, _via = resolve_humidity_paired(
+        hass, role, chosen=chosen, source_entities=source_entities, fallback_entity=fallback_entity, discover=discover
+    )
+    return rh, source
+
+
+def resolve_humidity_paired(
+    hass: Any,
+    role: str,
+    *,
+    chosen: str | None = None,
+    source_entities: Iterable[str | None] = (),
+    fallback_entity: str | None = None,
+    discover: Discover | None = None,
+) -> tuple[float | None, str | None, str | None]:
+    """``resolve_humidity`` plus ``via``: the entity whose DEVICE supplied the humidity (Issue #1690).
+
+    ``via`` is the source entity a device sensor was found through (so its temperature is the same device's), the
+    fallback entity for an attribute source (the climate or weather entity itself), and None for the user's chosen
+    entity (its device is looked up by the caller). The dew-point reader pairs the humidity with ``via``'s
+    temperature; the chart ignores it. Same source order and checks as before; never raises.
     """
     if role not in ROLES:
-        return None, None
+        return None, None, None
     try:
         v = read_humidity_state(hass, chosen)
         if v is not None:
-            return v, chosen
+            return v, chosen, None
         exclude_non_room = role != ROLE_OUTDOOR
         lookup = discover or (
             lambda eid, excl: discover_companion_sensors(hass, eid, "humidity", exclude_non_room=excl)
@@ -111,13 +136,13 @@ def resolve_humidity(
             for cand in lookup(src, exclude_non_room):
                 v = read_humidity_state(hass, cand)
                 if v is not None:
-                    return v, cand
+                    return v, cand, src
         v = _read_fallback(hass, role, fallback_entity)
         if v is not None:
-            return v, f"{fallback_entity}#{_FALLBACK_ATTR[role][1]}"  # type: ignore[index]
+            return v, f"{fallback_entity}#{_FALLBACK_ATTR[role][1]}", fallback_entity  # type: ignore[index]
     except Exception:  # noqa: BLE001 - a chart row must never fail on humidity
-        return None, None
-    return None, None
+        return None, None, None
+    return None, None, None
 
 
 def read_humidity_source(hass: Any, source: str | None) -> float | None:

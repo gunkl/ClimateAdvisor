@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.72"
+VERSION = "0.9.73"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -670,8 +670,9 @@ INDOOR_SENSOR_STALE_HOURS = 12.0
 # (chart_log ``indoor_sensors`` companions and the R1b control candidates) before re-reading the entity registry.
 COMPANION_SENSOR_REFRESH_SECONDS = 900.0
 
-# Issue #1414: optional humidity sources for the Status charts (chart display only; no decision reads humidity).
-# Unset = detect automatically (``humidity_sources.resolve_humidity``).
+# Issue #1414: optional humidity sources for the Status charts. Unset = detect automatically
+# (``humidity_sources.resolve_humidity``). Issue #1690: the same pick feeds the decision dew point (``humidity_facts``);
+# feels-like stays chart display only.
 CONF_INDOOR_HUMIDITY_ENTITY = "indoor_humidity_entity"
 CONF_SLEEP_INDOOR_HUMIDITY_ENTITY = "sleep_indoor_humidity_entity"
 CONF_OUTDOOR_HUMIDITY_ENTITY = "outdoor_humidity_entity"
@@ -721,6 +722,14 @@ REMOTE_OFFSET_CAP_C: float = 2.0
 # Separate from (and much tighter than) the 12 h INDOOR_SENSOR_STALE_HOURS fallback rule above.
 REMOTE_OFFSET_FRESHNESS_MINUTES: float = 120.0
 REMOTE_OFFSET_CHECK_INTERVAL_S: int = 60  # the 1-minute floor under the remote-sensor update listener
+# Issue #1690: the decision dew point (``humidity_facts``). Indoor humidity and its paired temperature go stale on the
+# same 120-minute rule as the remote reading (one constant); outdoor ones on ``OUTDOOR_SENSOR_STALE_HOURS``, so outdoor
+# temperature and outdoor humidity go stale together. The facts are the median of the last 15 minutes of 5-minute
+# samples plus the current reading. A reading that arrived less than ``SENSOR_RECONNECT_SETTLE_S`` after its sensor
+# came back from ``unavailable`` is not used (the 0 % / 32 F reconnect value lasts 3-5 s; Issue #1689).
+HUMIDITY_INDOOR_FRESHNESS_MINUTES: float = REMOTE_OFFSET_FRESHNESS_MINUTES
+HUMIDITY_MEDIAN_WINDOW_MINUTES: float = 15.0
+SENSOR_RECONNECT_SETTLE_S: float = 30.0
 # Startup wait after a raise before a further raise is allowed (thermostat actuation feedback): the
 # measured thermostat latency plus a margin, never below the minimum, and this default where unmeasured.
 REMOTE_OFFSET_DEFAULT_WAIT_S: float = 300.0

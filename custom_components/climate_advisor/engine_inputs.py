@@ -37,6 +37,8 @@ from typing import Any, Protocol
 
 from homeassistant.util import dt as dt_util
 
+from .feels_like import dew_point_f
+
 # A passed-in snapshot is for ONE decision: older than this (a timer that fires later inside the context that
 # captured it, a long await) it is not used, and a fresh one is built instead.
 FACTS_MAX_AGE = timedelta(seconds=60)
@@ -98,6 +100,15 @@ class EngineFacts:
     outdoor_today_peak: float | None = None  # today's observed outdoor peak so far, #540
     outdoor_today_sample_count: int = 0
     tou_av: TouAvWindow = TOU_AV_INACTIVE  # the active Away/Vacation TOU window, #899
+    # Issue #1690 (#1507 H0): the filtered dew points (humidity_facts: same-device pairing, glitch / freshness / unit
+    # checks, 15-minute median) and the names of the humid latches that are on. None / empty = unknown = today's
+    # behaviour. No decision reads them yet (the #1507 wave-2/3 rules will).
+    indoor_dew_point_f: float | None = None
+    outdoor_dew_point_f: float | None = None
+    humid_latches: frozenset[str] = frozenset()
+    # The humidity source each dew point came from (entity id or "<entity>#<attribute>"), for display, None = none.
+    indoor_dew_point_source: str | None = None
+    outdoor_dew_point_source: str | None = None
 
     def fresh_for(self, now: datetime) -> bool:
         """True when this snapshot was built for a decision at ``now`` (within ``FACTS_MAX_AGE``)."""
@@ -113,15 +124,34 @@ def build_engine_facts(
     hourly_forecast: list[dict] | None,
     outdoor_history: list[tuple[str, float]] | None,
     tou_av: TouAvWindow | None,
+    outdoor_today: tuple[float | None, int] | None = None,
+    indoor_dew_point_f: float | None = None,
+    outdoor_dew_point_f: float | None = None,
+    humid_latches: frozenset[str] | None = None,
+    indoor_dew_point_source: str | None = None,
+    outdoor_dew_point_source: str | None = None,
 ) -> EngineFacts:
-    """The one place a snapshot is computed (the coordinator's ``engine_facts`` and a bare engine's source)."""
-    temps = [t for _, t in (outdoor_history or [])]
+    """The one place a snapshot is computed (the coordinator's ``engine_facts`` and a bare engine's source).
+
+    ``outdoor_today`` (peak, sample count) replaces the values derived from ``outdoor_history`` when the caller holds
+    them directly (``StaticEngineInputs``).
+    """
+    if outdoor_today is not None:
+        peak, count = outdoor_today
+    else:
+        temps = [t for _, t in (outdoor_history or [])]
+        peak, count = (max(temps) if temps else None), len(temps)
     return EngineFacts(
         as_of=now,
         forecast_peak_2h=forecast_peak_next_2h(hourly_forecast, now),
-        outdoor_today_peak=max(temps) if temps else None,
-        outdoor_today_sample_count=len(temps),
+        outdoor_today_peak=peak,
+        outdoor_today_sample_count=count,
         tou_av=tou_av if isinstance(tou_av, TouAvWindow) else TOU_AV_INACTIVE,
+        indoor_dew_point_f=indoor_dew_point_f,
+        outdoor_dew_point_f=outdoor_dew_point_f,
+        humid_latches=frozenset(humid_latches or ()),
+        indoor_dew_point_source=indoor_dew_point_source,
+        outdoor_dew_point_source=outdoor_dew_point_source,
     )
 
 
@@ -137,21 +167,34 @@ class EngineInputs(Protocol):
 
 @dataclass
 class StaticEngineInputs:
-    """Source for a bare engine (no coordinator): the caller that built the engine owns these fields."""
+    """Source for a bare engine (no coordinator): the caller that built the engine owns these fields.
+
+    Issue #1690: ``humidity`` / ``outdoor_humidity`` (%) with ``indoor_f`` / ``outdoor_f`` give the dew-point facts
+    through the one ``feels_like.dew_point_f`` (the caller owns the readings, so no glitch or freshness filter
+    applies); ``humid_latches`` is handed through as given.
+    """
 
     thermal: dict = field(default_factory=dict)
     hourly_forecast: list[dict] = field(default_factory=list)
     today_peak: float | None = None
     today_sample_count: int = 0
     tou_av: TouAvWindow = TOU_AV_INACTIVE
+    indoor_f: float | None = None
+    humidity: float | None = None
+    outdoor_f: float | None = None
+    outdoor_humidity: float | None = None
+    humid_latches: frozenset[str] = frozenset()
 
     def build_facts(self, now: datetime) -> EngineFacts:
-        return EngineFacts(
-            as_of=now,
-            forecast_peak_2h=forecast_peak_next_2h(self.hourly_forecast, now),
-            outdoor_today_peak=self.today_peak,
-            outdoor_today_sample_count=self.today_sample_count,
+        return build_engine_facts(
+            now,
+            hourly_forecast=self.hourly_forecast,
+            outdoor_history=None,
             tou_av=self.tou_av,
+            outdoor_today=(self.today_peak, self.today_sample_count),
+            indoor_dew_point_f=dew_point_f(self.indoor_f, self.humidity),
+            outdoor_dew_point_f=dew_point_f(self.outdoor_f, self.outdoor_humidity),
+            humid_latches=self.humid_latches,
         )
 
     def thermal_model(self) -> dict:

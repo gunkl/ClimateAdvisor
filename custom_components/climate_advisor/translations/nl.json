@@ -266,7 +266,8 @@
           "indoor_humidity_entity": "Sensor binnenluchtvochtigheid",
           "sleep_indoor_temp_entity": "Binnentemperatuursensor (slapen)",
           "sleep_indoor_humidity_entity": "Luchtvochtigheidssensor (slapen)",
-          "thermostat_companion_sensor": "Nauwkeurigere thermostaatsensor"
+          "thermostat_companion_sensor": "Nauwkeurigere thermostaatsensor",
+          "thermostat_recalibration_guard": "Kalibratiebewaking"
         },
         "data_description": {
           "outdoor_temp_source": "Waar de buitentemperatuur vandaan komt. ‘Weerdienst’ gebruikt je weerintegratie; met een eigen sensor of invoerhulp kun je een specifieke entiteit gebruiken. Terugschakelen naar ‘Weerdienst’ verwijdert de gekozen entiteit.",
@@ -277,7 +278,8 @@
           "indoor_humidity_entity": "De luchtvochtigheidssensor in de ruimte die Climate Advisor overdag uitleest, getoond in de statusgrafiek samen met hoe warm de ruimte aanvoelt. Alleen voor de grafiek: geen verwarmings- of koelbeslissing gebruikt hem. Laat leeg om automatisch te detecteren.",
           "sleep_indoor_temp_entity": "Optionele slaapkamersensor die wordt gebruikt voor comfort- en automatiseringsbeslissingen zolang je slaapschema actief is (het thermische model gebruikt altijd de primaire sensor). Valt terug op de primaire sensor als hij niet beschikbaar is. Laat leeg om uit te schakelen.",
           "sleep_indoor_humidity_entity": "De luchtvochtigheidssensor in de slaapkamer, getoond in de statusgrafiek zolang je slaapschema actief is. Alleen voor de grafiek: geen verwarmings- of koelbeslissing gebruikt hem. Laat leeg om automatisch te detecteren.",
-          "thermostat_companion_sensor": "Veel thermostaten melden hele graden op de hoofdentiteit, maar hebben op hetzelfde apparaat ook een nauwkeurigere temperatuursensor. ‘Auto’ gebruikt die nauwkeurigere sensor zodra die dezelfde meting blijkt te geven (binnen 1 °F, met decimalen terwijl de thermostaat hele graden toont) en valt terug op de eigen meting van de thermostaat als die ontbreekt of afwijkt. Geldt alleen voor de ingebouwde sensor van de thermostaat als bron. ‘Uit’ gebruikt altijd de eigen meting van de thermostaat."
+          "thermostat_companion_sensor": "Veel thermostaten melden hele graden op de hoofdentiteit, maar hebben op hetzelfde apparaat ook een nauwkeurigere temperatuursensor. ‘Auto’ gebruikt die nauwkeurigere sensor zodra die dezelfde meting blijkt te geven (binnen 1 °F, met decimalen terwijl de thermostaat hele graden toont) en valt terug op de eigen meting van de thermostaat als die ontbreekt of afwijkt. Geldt alleen voor de ingebouwde sensor van de thermostaat als bron. ‘Uit’ gebruikt altijd de eigen meting van de thermostaat.",
+          "thermostat_recalibration_guard": "Sommige thermostaten tonen tot ongeveer 40 minuten lang een waarde die enkele graden te hoog is nadat de ketel zichzelf heeft uitgeschakeld (de oververhittingsbeveiliging sprong aan) terwijl de kamer nog onder het setpoint is. Aan (standaard): Climate Advisor ziet de sprong, logt een waarschuwing, toont een Reparaties-melding die je kunt negeren, houdt die metingen buiten wat het over het huis leert en leest de kamer van je slaapsensor of eigen binnensensor tot de thermostaat tot rust komt. Geldt alleen als de binnenbron de ingebouwde sensor van de thermostaat is. Uit negeert de sprong."
         }
       },
       "sensors": {
@@ -613,6 +615,14 @@
     "ai_settings_unified": {
       "title": "AI-instellingen gelden nu voor alle zones",
       "description": "AI-instellingen worden nu door alle zones gedeeld. Je zones hadden verschillende AI-instellingen, dus Climate Advisor heeft de instellingen van {zone} behouden en voor elke zone gebruikt. De dagelijkse limieten voor AI-verzoeken tellen nu voor alle zones samen.\n\nOm ze te wijzigen, open je de AI-instellingen in de opties van een willekeurige zone."
+    },
+    "thermostat_recalibration": {
+      "title": "Thermostaat te hoog na het stoppen van de verwarming",
+      "description": "Om {time} stopte de verwarming in {zone} voordat de kamer het setpoint bereikte, en {thermostat} sprong naar een waarde die enkele graden te hoog is. Meestal betekent dit dat de ketel oververhit raakte en de oververhittingsbeveiliging hem uitschakelde; daarna kalibreert de thermostaat zich 10 tot 40 minuten opnieuw. Tot hij tot rust komt, leest Climate Advisor de kamer van {sensor} en houdt het de valse metingen buiten wat het leert.\n\nAls dit vaak gebeurt, laat de ketel nakijken: een vuil filter of afgedekte roosters zijn veelvoorkomende oorzaken. Negeer deze melding om hem niet meer te zien; Climate Advisor blijft het op dezelfde manier afhandelen."
+    },
+    "thermostat_recalibration_no_alternate": {
+      "title": "Thermostaat te hoog na het stoppen van de verwarming",
+      "description": "Om {time} stopte de verwarming in {zone} voordat de kamer het setpoint bereikte, en {thermostat} sprong naar een waarde die enkele graden te hoog is. Meestal betekent dit dat de ketel oververhit raakte en de oververhittingsbeveiliging hem uitschakelde; daarna kalibreert de thermostaat zich 10 tot 40 minuten opnieuw. Climate Advisor houdt de valse metingen buiten wat het leert, maar deze zone heeft geen andere temperatuursensor om de kamer intussen te lezen: voeg een slaapsensor of eigen binnensensor toe bij Temperatuurbronnen.\n\nAls dit vaak gebeurt, laat de ketel nakijken: een vuil filter of afgedekte roosters zijn veelvoorkomende oorzaken. Negeer deze melding om hem niet meer te zien."
     }
   },
   "common": {

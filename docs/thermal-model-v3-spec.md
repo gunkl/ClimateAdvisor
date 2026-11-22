@@ -132,6 +132,10 @@ as a real temperature) is gone. Every caller must skip, never append, on `None`:
 | `_sample_all_observations` (5-min tick, both sampling sites) | `continue` — the observation keeps its existing samples. |
 | `_end_hvac_active_phase` | The closing sample is not appended; the phase still ends. |
 
+### Thermostat recalibration exclusion (Issue #1676)
+
+While the thermostat recalibrates after a furnace high-limit trip (its reading 6-7 °F high for up to ~40 min), every learning input reads `coordinator._learning_indoor_f()`, which returns None: the samples are handled exactly as an indoor outage below (skipped, a session is not started). At the start of an episode the open coast windows are dropped and the cycle recorder records a gap. See [Bug E](08-COMPUTATION-REFERENCE.md#bug-e--thermostat-recalibration-after-a-furnace-high-limit-trip-issue-1676).
+
 ### Indoor-sensor outage handling (Issue #1035)
 
 Occupant outcome: while the indoor sensor is down, the house is not taught a wrong

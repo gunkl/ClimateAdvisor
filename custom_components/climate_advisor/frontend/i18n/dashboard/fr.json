@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "état pas encore connu",
   "dashboard.status.ran_today": "Système en marche {n, plural, one {# min} many {# min} other {# min}} aujourd’hui",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor lit le capteur de la chambre (période de nuit)",
+  "dashboard.status.thermostat_recal_reading": "Thermostat en recalibrage après l’arrêt du chauffage — Climate Advisor lit {name} jusqu’à sa stabilisation",
+  "dashboard.status.thermostat_recal_no_alt": "Thermostat en recalibrage après l’arrêt du chauffage — sa valeur est trop élevée pour l’instant",
   "dashboard.status.reads_in_sleep": "Climate Advisor le lit pendant la période de nuit",
   "dashboard.status.reads_this_sensor": "Climate Advisor lit ce capteur",
   "dashboard.status.says_cooler": "{who} indique {theirs}, {gap}° de moins que {name}",

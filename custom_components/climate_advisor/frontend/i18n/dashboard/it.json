@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "stato non ancora noto",
   "dashboard.status.ran_today": "Il sistema ha funzionato {n, plural, one {# min} many {# min} other {# min}} oggi",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor legge il sensore della camera (fascia notturna)",
+  "dashboard.status.thermostat_recal_reading": "Termostato in ricalibrazione dopo lo stop del riscaldamento — Climate Advisor legge {name} finché non si stabilizza",
+  "dashboard.status.thermostat_recal_no_alt": "Termostato in ricalibrazione dopo lo stop del riscaldamento — per ora il valore è troppo alto",
   "dashboard.status.reads_in_sleep": "Climate Advisor lo legge nella fascia notturna",
   "dashboard.status.reads_this_sensor": "Climate Advisor legge questo sensore",
   "dashboard.status.says_cooler": "{who} indica {theirs}, {gap}° in meno di {name}",

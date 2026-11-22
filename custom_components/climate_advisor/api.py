@@ -537,6 +537,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "target_temp_high": target_temp_high,
                 ATTR_INDOOR_TEMP: indoor_temp_display,
                 "sleep_indoor_sensor_active": data.get("sleep_indoor_sensor_active", False),
+                # Issue #1676: {since, entity, name} while the thermostat recalibrates after a heating stop, else None.
+                "thermostat_recalibration": data.get("thermostat_recalibration"),
                 "outdoor_temp": outdoor_temp_display,
                 "unit": unit,
                 # Issue #1341: the prose in the backend language, ``automation_status_msg`` ({key, params}) for the

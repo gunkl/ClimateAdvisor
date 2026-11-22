@@ -2751,6 +2751,36 @@ def _render_indoor_source_changed(p: dict, unit: str) -> tuple[Cell, Cell]:
 
 
 @_msg_renderer
+def _render_thermostat_recalibration_started(p: dict, unit: str) -> tuple[Cell, Cell]:
+    """Issue #1676: the thermostat jumped several degrees high when the heating stopped (a furnace high-limit trip) and
+    reads falsely until it recalibrates; the room is read from another sensor meanwhile when one is configured."""
+    name = p.get("thermostat_name") or p.get("thermostat") or _m("unknown_paren")
+    alternate = p.get("alternate_name") or p.get("alternate_entity")
+    label = _m("thermostat_recal_started", name=name, has_alt=_yn(alternate), alt=str(alternate or ""))
+    parts: list[Cell] = []
+    for key, fact in (("reading_f", "fact_now_temp"), ("baseline_f", "fact_was_temp")):
+        value_f = p.get(key)
+        if isinstance(value_f, (int, float)) and not isinstance(value_f, bool):
+            parts.append(_m(fact, temp=_tp(value_f, unit, 1)))
+    return label, _join(parts)
+
+
+@_msg_renderer
+def _render_thermostat_recalibration_ended(p: dict, unit: str) -> tuple[Cell, Cell]:
+    """Issue #1676: the thermostat's reading is back (``settled``) or the watch ran out (``timed_out``)."""
+    name = p.get("thermostat_name") or p.get("thermostat") or _m("unknown_paren")
+    label = _m("thermostat_recal_ended", name=name, how="timed_out" if p.get("how") == "timed_out" else "settled")
+    parts: list[Cell] = []
+    minutes = p.get("minutes")
+    if isinstance(minutes, (int, float)) and not isinstance(minutes, bool):
+        parts.append(_m("fact_recal_min", minutes=_num(minutes)))
+    peak = p.get("peak_f")
+    if isinstance(peak, (int, float)) and not isinstance(peak, bool):
+        parts.append(_m("fact_peak_temp", temp=_tp(peak, unit, 1)))
+    return label, _join(parts)
+
+
+@_msg_renderer
 def _render_humidity_source_changed(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1455: the source a chart humidity line (room, bedroom, outdoor) is read from changed. Chart only."""
     subject = str(p.get("subject") or "humidity")
@@ -4002,6 +4032,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "indoor_sensor_unavailable": _render_indoor_sensor_unavailable,
     "indoor_sensor_recovered": _render_indoor_sensor_recovered,
     "indoor_source_changed": _render_indoor_source_changed,
+    "thermostat_recalibration_started": _render_thermostat_recalibration_started,
+    "thermostat_recalibration_ended": _render_thermostat_recalibration_ended,
     "humidity_source_changed": _render_humidity_source_changed,
     "forecast_model_changed": _render_forecast_model_changed,
     "fan_blind_started": _render_fan_blind_started,
@@ -4125,6 +4157,8 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "indoor_sensor_unavailable",
         "indoor_sensor_recovered",
         "indoor_source_changed",
+        "thermostat_recalibration_started",
+        "thermostat_recalibration_ended",
         "humidity_source_changed",
         "forecast_model_changed",
         "entity_unavailable",

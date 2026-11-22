@@ -281,6 +281,7 @@ class ChartStateLog:
         feelslike: float | None = None,
         outdoor_humidity: float | None = None,
         outdoor_feelslike: float | None = None,
+        recal_false: list[str] | None = None,
     ) -> None:
         """Append one entry. ts defaults to now (via dt_util).
 
@@ -330,6 +331,9 @@ class ChartStateLog:
             indoor RH % of the room whose temperature is ``indoor`` (the bedroom in the sleep window), ``feelslike`` its
             NWS heat index (internal F) when NWS defines one; ``outdoor_humidity`` the outdoor RH %,
             ``outdoor_feelslike`` the NWS heat index or wind chill (internal F). Each is written only when not None.
+        recal_false: Issue #1676, the entities reading falsely on this row because the thermostat is recalibrating after
+            a heating shutdown (the climate entity and the sensors on its device). Their readings are still logged as
+            received; the v4 fit skips them on this row (``predictor_v4``). Written only when given and non-empty.
         nat_vent_target: the real thermostatic target the nat-vent fan was cycling
             around this cycle (Phase 3a), computed via
             ``nat_vent_cycling.compute_nat_vent_target()`` — only meaningful (non-None)
@@ -384,6 +388,8 @@ class ChartStateLog:
         ):
             if val is not None:
                 entry[key] = val
+        if recal_false:
+            entry["recal_false"] = list(recal_false)
 
         self._entries.append(entry)
         self._maybe_prune()

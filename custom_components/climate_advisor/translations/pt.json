@@ -266,7 +266,8 @@
           "indoor_humidity_entity": "Sensor de humidade interior",
           "sleep_indoor_temp_entity": "Sensor de temperatura interior (sono)",
           "sleep_indoor_humidity_entity": "Sensor de humidade (sono)",
-          "thermostat_companion_sensor": "Sensor de precisão do termóstato"
+          "thermostat_companion_sensor": "Sensor de precisão do termóstato",
+          "thermostat_recalibration_guard": "Proteção de recalibração"
         },
         "data_description": {
           "outdoor_temp_source": "Onde ler a temperatura exterior. «Serviço meteorológico» usa a sua integração meteorológica; um sensor dedicado ou um auxiliar de entrada permite usar uma entidade específica. Voltar a «Serviço meteorológico» remove a entidade escolhida.",
@@ -277,7 +278,8 @@
           "indoor_humidity_entity": "O sensor de humidade da divisão que o Climate Advisor lê durante o dia, mostrado no gráfico de Estado com a sensação térmica da divisão. Apenas para o gráfico: nenhuma decisão de aquecimento ou arrefecimento o usa. Deixe em branco para deteção automática.",
           "sleep_indoor_temp_entity": "Sensor opcional do quarto usado nas decisões de conforto e automatização enquanto o horário de sono está ativo (o modelo térmico usa sempre o sensor principal). Se não estiver disponível, usa o sensor principal. Deixe em branco para desativar.",
           "sleep_indoor_humidity_entity": "O sensor de humidade do quarto, mostrado no gráfico de Estado enquanto o horário de sono está ativo. Apenas para o gráfico: nenhuma decisão de aquecimento ou arrefecimento o usa. Deixe em branco para deteção automática.",
-          "thermostat_companion_sensor": "Muitos termóstatos indicam graus inteiros na entidade principal, mas têm também um sensor de temperatura mais preciso no mesmo dispositivo. Auto usa esse sensor mais preciso depois de provar que dá a mesma leitura (dentro de 1 grau F, mostrando frações enquanto o termóstato mostra graus inteiros) e volta à leitura do próprio termóstato se desaparecer ou divergir. Aplica-se apenas à fonte do sensor integrado do termóstato. Desligado usa sempre a leitura do próprio termóstato."
+          "thermostat_companion_sensor": "Muitos termóstatos indicam graus inteiros na entidade principal, mas têm também um sensor de temperatura mais preciso no mesmo dispositivo. Auto usa esse sensor mais preciso depois de provar que dá a mesma leitura (dentro de 1 grau F, mostrando frações enquanto o termóstato mostra graus inteiros) e volta à leitura do próprio termóstato se desaparecer ou divergir. Aplica-se apenas à fonte do sensor integrado do termóstato. Desligado usa sempre a leitura do próprio termóstato.",
+          "thermostat_recalibration_guard": "Alguns termostatos indicam vários graus a mais durante até cerca de 40 minutos depois de a caldeira se desligar sozinha (a segurança de sobreaquecimento disparou) enquanto a divisão ainda está abaixo do ponto de ajuste. Ligado (predefinição): o Climate Advisor deteta o salto, regista um aviso, mostra um aviso de Reparações que pode ignorar, deixa essas leituras fora do que aprende sobre a casa e lê a divisão a partir do seu sensor de sono ou sensor interior dedicado até o termostato estabilizar. Só se aplica quando a fonte interior é o sensor incorporado do termostato. Desligado ignora o salto."
         }
       },
       "sensors": {
@@ -613,6 +615,14 @@
     "ai_settings_unified": {
       "title": "As definições de IA aplicam-se agora a todas as zonas",
       "description": "As definições de IA são agora partilhadas por todas as zonas. As suas zonas tinham definições de IA diferentes, por isso o Climate Advisor manteve as de {zone} e usou-as em todas as zonas. Os limites diários de pedidos de IA contam agora para todas as zonas em conjunto.\n\nPara as alterar, abra Definições de IA nas opções de qualquer zona."
+    },
+    "thermostat_recalibration": {
+      "title": "Leitura do termostato demasiado alta após o aquecimento parar",
+      "description": "Às {time} o aquecimento em {zone} parou antes de a divisão atingir o ponto de ajuste, e {thermostat} saltou para uma leitura vários graus demasiado alta. Normalmente isto significa que a caldeira sobreaqueceu e a segurança de sobreaquecimento a desligou; depois o termostato recalibra durante 10 a 40 minutos. Até estabilizar, o Climate Advisor lê a divisão a partir de {sensor} e deixa as leituras falsas fora do que aprende.\n\nSe acontecer com frequência, mande verificar a caldeira: um filtro sujo ou grelhas tapadas são causas comuns. Ignore este aviso para deixar de o ver; o Climate Advisor continua a tratar a situação da mesma forma."
+    },
+    "thermostat_recalibration_no_alternate": {
+      "title": "Leitura do termostato demasiado alta após o aquecimento parar",
+      "description": "Às {time} o aquecimento em {zone} parou antes de a divisão atingir o ponto de ajuste, e {thermostat} saltou para uma leitura vários graus demasiado alta. Normalmente isto significa que a caldeira sobreaqueceu e a segurança de sobreaquecimento a desligou; depois o termostato recalibra durante 10 a 40 minutos. O Climate Advisor deixa as leituras falsas fora do que aprende, mas esta zona não tem outro sensor de temperatura para ler a divisão entretanto: adicione um sensor de sono ou um sensor interior dedicado em Fontes de temperatura.\n\nSe acontecer com frequência, mande verificar a caldeira: um filtro sujo ou grelhas tapadas são causas comuns. Ignore este aviso para deixar de o ver."
     }
   },
   "common": {

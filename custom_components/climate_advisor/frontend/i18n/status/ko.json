@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "정밀 센서 값이 올바르지 않음 — 온도 조절기 사용",
   "status.indoor_source.reason_non_numeric": "정밀 센서 값이 숫자가 아님 — 온도 조절기 사용",
   "status.indoor_source.reason_not_proven": "정밀 센서가 확인되지 않음 — 온도 조절기 사용",
+  "status.indoor_source.reason_recal_settled": "재보정 후 온도조절기 안정됨",
+  "status.indoor_source.reason_recal_started": "난방이 멈춘 뒤 온도조절기 재보정 중",
   "status.indoor_source.reason_setting_changed": "실내 센서 설정이 변경됨",
   "status.indoor_source.reason_setting_off": "설정이 꺼짐",
   "status.indoor_source.reason_sleep_ended": "취침 시간대 종료",

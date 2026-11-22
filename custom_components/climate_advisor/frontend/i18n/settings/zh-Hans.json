@@ -246,6 +246,8 @@
   "settings.temp_unit.label": "温度单位",
   "settings.thermostat_companion_sensor.description": "许多恒温器在主实体上以整数度数报告室温，而同一设备往往还有更精细的温度传感器。“自动”（默认）会在确认该精细传感器与恒温器读数一致且精度更高后（与恒温器读数相差在 1°F 以内，且在恒温器显示整数时显示小数），将其用于舒适度决策；当它缺失、不可用、数据过时或与恒温器不一致时，则回退到恒温器自己的读数。仅当室内温度来源为恒温器内置传感器时适用。“关闭”则始终使用恒温器自己的读数。",
   "settings.thermostat_companion_sensor.label": "恒温器精细传感器",
+  "settings.thermostat_recalibration_guard.description": "有些温控器在房间仍低于设定温度时、炉子自行关闭（其过热安全保护跳闸）之后，会在大约 40 分钟内显示高出几度的读数。开启（默认）时，Climate Advisor 会识别这次跳升、记录警告、显示一条可忽略的修复通知、把这些读数排除在对房屋的学习之外，并在温控器稳定之前改用睡眠传感器或专用室内传感器读取房间温度。仅在室内来源为温控器内置传感器时适用。关闭则忽略跳升。",
+  "settings.thermostat_recalibration_guard.label": "重新校准保护",
   "settings.threshold_cool.description": "预报最高温达到或高于此温度（但低于温和日）的日子归为凉爽日；低于此温度则为寒冷日。默认：45°F / 7°C。",
   "settings.threshold_cool.label": "凉爽日阈值",
   "settings.threshold_hot.description": "预报最高温达到或高于此温度的日子归为炎热日。默认：85°F / 29°C。",

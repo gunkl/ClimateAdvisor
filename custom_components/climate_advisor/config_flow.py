@@ -82,6 +82,7 @@ from .const import (
     CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
     CONF_TEMP_UNIT,
     CONF_THERMOSTAT_COMPANION_SENSOR,
+    CONF_THERMOSTAT_RECAL_GUARD,
     CONF_THRESHOLD_COOL,
     CONF_THRESHOLD_HOT,
     CONF_THRESHOLD_MILD,
@@ -120,6 +121,7 @@ from .const import (
     DEFAULT_SLEEP_HEAT,
     DEFAULT_TEMP_UNIT,
     DEFAULT_THERMOSTAT_COMPANION_SENSOR,
+    DEFAULT_THERMOSTAT_RECAL_GUARD,
     DEFAULT_THRESHOLD_COOL,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_THRESHOLD_MILD,
@@ -1516,6 +1518,11 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
+                    # Issue #1676: watch for the thermostat's false high reading after a heating stop (default on).
+                    vol.Required(
+                        CONF_THERMOSTAT_RECAL_GUARD,
+                        default=current.get(CONF_THERMOSTAT_RECAL_GUARD, DEFAULT_THERMOSTAT_RECAL_GUARD),
+                    ): selector.BooleanSelector(),
                 }
             ),
             errors=errors,

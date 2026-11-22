@@ -266,7 +266,8 @@
           "indoor_humidity_entity": "İç nem sensörü",
           "sleep_indoor_temp_entity": "Uyku iç sıcaklık sensörü",
           "sleep_indoor_humidity_entity": "Uyku nem sensörü",
-          "thermostat_companion_sensor": "Termostat hassas sensörü"
+          "thermostat_companion_sensor": "Termostat hassas sensörü",
+          "thermostat_recalibration_guard": "Yeniden Kalibrasyon Koruması"
         },
         "data_description": {
           "outdoor_temp_source": "Dış sıcaklığın nereden okunacağı. 'Hava durumu hizmeti' hava durumu entegrasyonunuzu kullanır; özel bir sensör veya giriş yardımcısı belirli bir varlığı kullanmanızı sağlar. 'Hava durumu hizmeti'ne geri dönmek seçilen varlığı kaldırır.",
@@ -277,7 +278,8 @@
           "indoor_humidity_entity": "Climate Advisor'ın gündüz okuduğu odadaki nem sensörü; Durum grafiğinde odanın ne kadar sıcak hissettirdiğiyle birlikte gösterilir. Yalnızca grafik içindir: hiçbir ısıtma veya soğutma kararı bunu kullanmaz. Otomatik algılama için boş bırakın.",
           "sleep_indoor_temp_entity": "Uyku zamanlamanız etkinken konfor ve otomasyon kararlarında kullanılan isteğe bağlı yatak odası sensörü (termal model her zaman birincil sensörü kullanır). Kullanılamazsa birincil sensöre geri döner. Devre dışı bırakmak için boş bırakın.",
           "sleep_indoor_humidity_entity": "Uyku zamanlamanız etkinken Durum grafiğinde gösterilen yatak odasındaki nem sensörü. Yalnızca grafik içindir: hiçbir ısıtma veya soğutma kararı bunu kullanmaz. Otomatik algılama için boş bırakın.",
-          "thermostat_companion_sensor": "Birçok termostat ana varlıkta tam derece bildirir, ancak aynı cihazda daha hassas bir sıcaklık sensörü de bulunur. Otomatik, bu hassas sensör aynı değeri verdiğini kanıtladığında (1 °F içinde, termostat tam derece gösterirken kesirleri göstererek) onu kullanır; kaybolursa veya uyuşmazsa termostatın kendi değerine döner. Yalnızca termostatın yerleşik sensör kaynağı için geçerlidir. Kapalı her zaman termostatın kendi değerini kullanır."
+          "thermostat_companion_sensor": "Birçok termostat ana varlıkta tam derece bildirir, ancak aynı cihazda daha hassas bir sıcaklık sensörü de bulunur. Otomatik, bu hassas sensör aynı değeri verdiğini kanıtladığında (1 °F içinde, termostat tam derece gösterirken kesirleri göstererek) onu kullanır; kaybolursa veya uyuşmazsa termostatın kendi değerine döner. Yalnızca termostatın yerleşik sensör kaynağı için geçerlidir. Kapalı her zaman termostatın kendi değerini kullanır.",
+          "thermostat_recalibration_guard": "Bazı termostatlar, oda hâlâ ayar noktasının altındayken kombi kendini kapattıktan sonra (aşırı ısınma emniyeti devreye girdiğinde) yaklaşık 40 dakikaya kadar birkaç derece yüksek değer gösterir. Açık (varsayılan): Climate Advisor sıçramayı fark eder, bir uyarı kaydeder, yok sayabileceğiniz bir Onarımlar bildirimi gösterir, bu değerleri ev hakkında öğrendiklerinin dışında tutar ve termostat oturana kadar odayı uyku sensörünüzden veya ayrı iç mekân sensörünüzden okur. Yalnızca iç mekân kaynağı termostatın yerleşik sensörü olduğunda geçerlidir. Kapalı sıçramayı yok sayar."
         }
       },
       "sensors": {
@@ -613,6 +615,14 @@
     "ai_settings_unified": {
       "title": "Yapay zekâ ayarları artık tüm bölgeler için geçerli",
       "description": "Yapay zekâ ayarları artık tüm bölgeler tarafından paylaşılıyor. Bölgelerinizin yapay zekâ ayarları farklıydı, bu yüzden Climate Advisor {zone} bölgesinin ayarlarını korudu ve her bölge için kullandı. Günlük yapay zekâ istek sınırları artık tüm bölgeler için toplam olarak sayılır.\n\nDeğiştirmek için herhangi bir bölgenin seçeneklerinde yapay zekâ ayarlarını açın."
+    },
+    "thermostat_recalibration": {
+      "title": "Isıtma durduktan sonra termostat değeri çok yüksek",
+      "description": "{time} saatinde {zone} bölgesindeki ısıtma oda ayar noktasına ulaşmadan durdu ve {thermostat} birkaç derece yüksek bir değere sıçradı. Bu genellikle kombinin aşırı ısındığı ve aşırı ısınma emniyetinin onu kapattığı anlamına gelir; ardından termostat 10 ila 40 dakika kendini yeniden kalibre eder. Oturana kadar Climate Advisor odayı {sensor} üzerinden okur ve yanlış değerleri öğrendiklerinin dışında tutar.\n\nBu sık oluyorsa kombiyi kontrol ettirin: kirli filtre veya kapanmış menfezler yaygın nedenlerdir. Artık görmemek için bu bildirimi yok sayın; Climate Advisor durumu aynı şekilde yönetmeye devam eder."
+    },
+    "thermostat_recalibration_no_alternate": {
+      "title": "Isıtma durduktan sonra termostat değeri çok yüksek",
+      "description": "{time} saatinde {zone} bölgesindeki ısıtma oda ayar noktasına ulaşmadan durdu ve {thermostat} birkaç derece yüksek bir değere sıçradı. Bu genellikle kombinin aşırı ısındığı ve aşırı ısınma emniyetinin onu kapattığı anlamına gelir; ardından termostat 10 ila 40 dakika kendini yeniden kalibre eder. Climate Advisor yanlış değerleri öğrendiklerinin dışında tutar, ancak bu bölgede bu arada odayı okuyacak başka bir sıcaklık sensörü yok: Sıcaklık kaynakları bölümünden bir uyku sensörü veya ayrı bir iç mekân sensörü ekleyin.\n\nBu sık oluyorsa kombiyi kontrol ettirin: kirli filtre veya kapanmış menfezler yaygın nedenlerdir. Artık görmemek için bu bildirimi yok sayın."
     }
   },
   "common": {

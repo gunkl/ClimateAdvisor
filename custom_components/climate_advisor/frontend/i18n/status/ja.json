@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "高精度センサーの値が無効 — サーモスタットを使用",
   "status.indoor_source.reason_non_numeric": "高精度センサーの値が数値ではありません — サーモスタットを使用",
   "status.indoor_source.reason_not_proven": "高精度センサーは未確認 — サーモスタットを使用",
+  "status.indoor_source.reason_recal_settled": "再校正後にサーモスタットが安定",
+  "status.indoor_source.reason_recal_started": "暖房停止後にサーモスタットが再校正中",
   "status.indoor_source.reason_setting_changed": "室内センサーの設定が変更されました",
   "status.indoor_source.reason_setting_off": "設定がオフ",
   "status.indoor_source.reason_sleep_ended": "就寝時間帯が終了",

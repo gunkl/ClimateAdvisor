@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "stan jeszcze nieznany",
   "dashboard.status.ran_today": "System pracował dziś {n, plural, one {# min} few {# min} many {# min} other {# min}}",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor odczytuje czujnik w sypialni (okno snu)",
+  "dashboard.status.thermostat_recal_reading": "Termostat kalibruje się po zatrzymaniu ogrzewania — Climate Advisor odczytuje {name}, aż się ustabilizuje",
+  "dashboard.status.thermostat_recal_no_alt": "Termostat kalibruje się po zatrzymaniu ogrzewania — na razie jego odczyt jest zawyżony",
   "dashboard.status.reads_in_sleep": "Climate Advisor odczytuje go w oknie snu",
   "dashboard.status.reads_this_sensor": "Climate Advisor odczytuje ten czujnik",
   "dashboard.status.says_cooler": "{who} pokazuje {theirs}, o {gap}° chłodniej niż {name}",

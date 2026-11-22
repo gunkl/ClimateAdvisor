@@ -109,6 +109,7 @@
     "thermal_confidence.py": 96.8,
     "thermal_lead_time.py": 98.7,
     "thermostat_profile.py": 98.8,
+    "thermostat_recal.py": 100.0,
     "time_utils.py": 100.0,
     "timeline_surfaces.py": 99.2,
     "v4_archive.py": 99.8,

@@ -33,6 +33,7 @@ from homeassistant.const import EVENT_CALL_SERVICE, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_time,
@@ -164,6 +165,7 @@ from .const import (
     CONF_SLEEP_HEAT,
     CONF_SLEEP_INDOOR_HUMIDITY_ENTITY,
     CONF_THERMOSTAT_COMPANION_SENSOR,
+    CONF_THERMOSTAT_RECAL_GUARD,
     CONF_THRESHOLD_COOL,
     CONF_THRESHOLD_HOT,
     CONF_THRESHOLD_MILD,
@@ -190,6 +192,7 @@ from .const import (
     DEFAULT_SETBACK_DEPTH_F,
     DEFAULT_SETBACK_HEAT,
     DEFAULT_THERMOSTAT_COMPANION_SENSOR,
+    DEFAULT_THERMOSTAT_RECAL_GUARD,
     DEFAULT_THRESHOLD_COOL,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_THRESHOLD_MILD,
@@ -209,6 +212,8 @@ from .const import (
     HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN,
     INVESTIGATION_REPORT_HISTORY_CAP,
     INVESTIGATION_REPORTS_FILE,
+    ISSUE_THERMOSTAT_RECALIBRATION,
+    ISSUE_THERMOSTAT_RECALIBRATION_NO_ALTERNATE,
     MAX_PLAUSIBLE_OUTDOOR_F,
     MAX_WEATHER_BIAS_APPLY_F,
     MIN_PLAUSIBLE_OUTDOOR_F,
@@ -514,6 +519,9 @@ from .thermostat_profile import (
     fan_command_starts_blower,
     live_fan_profile,
 )
+from .thermostat_recal import STARTED as RECAL_STARTED
+from .thermostat_recal import TIMED_OUT as RECAL_TIMED_OUT
+from .thermostat_recal import RecalStep, ThermostatRecal
 from .time_utils import instant_after, seconds_since
 from .timeline_surfaces import (
     CardLive,
@@ -1731,6 +1739,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1230 R1b: the same candidates + 'finer' latch feed the resolver for control; shared with the engine.
         self._companion = CompanionSensors()
         self.automation_engine.indoor_companion = self._companion
+        # Issue #1676: the thermostat's recalibration after a heating shutdown, shared with the engine the same way.
+        self._recal = ThermostatRecal()
+        self.automation_engine.indoor_recal = self._recal
         with contextlib.suppress(Exception):
             self._companion_temp_sensors()  # resolve the candidates now so the first reading already knows them
         # Funnel state (``_refresh_indoor_sensor_health``): the companion in use now / last announced, and the
@@ -5039,6 +5050,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         upper=_band_upper_cc,
                         nat_vent_target=self._nat_vent_target_now(),
                         indoor_sensors=self._read_chart_indoor_sensors(),
+                        recal_false=self._chart_recal_false(),
                         **self._read_chart_context(
                             indoor=forecast.current_indoor_temp, outdoor=forecast.current_outdoor_temp
                         ),
@@ -5578,6 +5590,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _sleep_indoor_sensor_active = (
             _indoor_reading.source_entity is not None
             and _indoor_reading.source_entity == self.config.get("sleep_indoor_temp_entity")
+            and _indoor_reading.recal_entity is None  # Issue #1676: the recalibration fallback is not the sleep window
         )
         # Issue #1329: with the weather service down there is no forecast, but a dedicated outdoor sensor still has
         # a live reading. Show it rather than "unknown". Issue #1337: a weather-service install shows the kept
@@ -5659,6 +5672,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_INDOOR_TEMP: _indoor_temp,
             ATTR_EFFECTIVE_TARGET_TEMP: _effective_target_temp,
             "sleep_indoor_sensor_active": _sleep_indoor_sensor_active,
+            "thermostat_recalibration": self._thermostat_recal_status(),
             ATTR_OUTDOOR_TEMP: _outdoor_temp,
             ATTR_FORECAST_HIGH: c.today_high if c else None,
             ATTR_FORECAST_LOW: c.today_low if c else None,
@@ -5738,6 +5752,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_poll,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
+                    recal_false=self._chart_recal_false(),
                     **self._read_chart_context(indoor=indoor_temp, outdoor=outdoor_temp),
                 )
                 await self._executor_job(self._chart_log.save)
@@ -5981,6 +5996,200 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         return to_fahrenheit(float(weather_attrs.get("temperature", 65)), unit), "weather_attribute"
 
+    # ------------------------------------------------------------------
+    # Thermostat recalibration after a heating shutdown (Issue #1676)
+    # ------------------------------------------------------------------
+
+    def _recal_for_resolver(self) -> ThermostatRecal | None:
+        """The recalibration state for the indoor resolver and learning, or None when the occupant turned the guard off
+        (``thermostat_recalibration_guard``) or the coordinator has none (tests)."""
+        if self.config.get(CONF_THERMOSTAT_RECAL_GUARD, DEFAULT_THERMOSTAT_RECAL_GUARD) is False:
+            return None
+        recal = getattr(self, "_recal", None)
+        return recal if isinstance(recal, ThermostatRecal) else None
+
+    def _thermostat_recal_active(self) -> bool:
+        """True while the thermostat is reading falsely high after a heating shutdown (Issue #1676)."""
+        recal = self._recal_for_resolver()
+        return recal is not None and recal.active
+
+    def _learning_indoor_f(self) -> float | None:
+        """The always-primary reading thermal learning samples (Issue #895), or None while the thermostat recalibrates.
+
+        Issue #1676: every learning input (v3 observations, swing and coast, the cycle recorder) reads through here, so
+        the false reading is treated like a missing one: the sample is skipped, never fitted.
+        """
+        if self._thermostat_recal_active():
+            return None
+        return self._get_indoor_temp_with_provenance().primary_value
+
+    def _chart_recal_false(self) -> list[str] | None:
+        """The entities reading falsely on a chart row (the thermostat and the sensors on its device) while it
+        recalibrates, else None. Written as the row's ``recal_false`` so the v4 fit skips them (Issue #1676); the
+        readings themselves are still logged as received."""
+        if not self._thermostat_recal_active():
+            return None
+        ids = {str(self.config.get("climate_entity") or "")}
+        ids.update(str(e) for e in getattr(getattr(self, "_companion", None), "entities", ()))
+        return sorted(i for i in ids if i)
+
+    def _observe_thermostat_recal(self, *, previous_action: str | None = None) -> None:
+        """Feed the thermostat's own reading to the recalibration watch and announce what changed (Issue #1676).
+
+        Event loop only (it announces). Called first by ``_async_thermostat_changed`` (``previous_action``: the old
+        state's ``hvac_action``, so a run that ends in this very event still counts as recent heating) and by
+        ``_refresh_indoor_sensor_health`` (the periodic ticks and updates). Only on the ``climate_fallback`` source: a
+        dedicated sensor is not the thermostat's reading. Never raises.
+        """
+        recal = self._recal_for_resolver()
+        if recal is None:
+            return
+        if self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK) != TEMP_SOURCE_CLIMATE_FALLBACK:
+            return
+        try:
+            now = dt_util.now()
+            if str(previous_action).lower() == "heating":
+                recal.note_heating(now)
+            state = self.hass.states.get(self.config.get("climate_entity"))
+            action = state.attributes.get("hvac_action") if state is not None else None
+            step = recal.observe(now, self._get_indoor_temp_with_provenance().primary_value, action)
+            if step is not None:
+                self._announce_thermostat_recal(step)
+        except Exception:  # noqa: BLE001 - the watch must never break the listener or the funnel
+            _LOGGER.debug("Thermostat recalibration watch failed", exc_info=True)
+
+    def _announce_thermostat_recal(self, step: RecalStep) -> None:
+        """Log, record and notify one recalibration transition (Issue #1676).
+
+        Start: one WARNING line, a ``thermostat_recalibration_started`` Activity event, the zone's Repairs notice, and
+        the learning windows open right now are closed so the false reading never enters them. End: one line (INFO when
+        it settled, WARNING when it ran out of time) and a ``thermostat_recalibration_ended`` event. The switch of the
+        room's sensor itself is the ``indoor_source_changed`` row from ``_note_indoor_source``.
+        """
+        zone = self._indoor_zone_title()
+        thermostat = str(self.config.get("climate_entity") or "")
+        jump = round(step.reading_f - step.baseline_f, 2)
+        if step.kind == RECAL_STARTED:
+            alternate = self._get_indoor_temp_with_provenance().recal_entity
+            alt_name = self._indoor_friendly_name(alternate) if alternate else None
+            _LOGGER.warning(
+                'Thermostat recalibration detected: zone="%s" thermostat=%s reading=%.2f°F before=%.2f°F jump=%.2f°F'
+                " (heating stopped below the setpoint, a high-limit trip); %s",
+                zone,
+                thermostat,
+                step.reading_f,
+                step.baseline_f,
+                jump,
+                f"room temperature from {alternate} until it settles, thermal learning paused"
+                if alternate
+                else "no other temperature sensor configured: still using the thermostat's reading,"
+                " thermal learning paused",
+            )
+            self._emit_event(
+                "thermostat_recalibration_started",
+                {
+                    "zone": zone,
+                    "thermostat": thermostat,
+                    "thermostat_name": self._indoor_friendly_name(thermostat),
+                    "reading_f": round(step.reading_f, 2),
+                    "baseline_f": round(step.baseline_f, 2),
+                    "jump_f": jump,
+                    "alternate_entity": alternate,
+                    "alternate_name": alt_name,
+                },
+            )
+            self._raise_thermostat_recal_issue(alt_name, step.since)
+            self._recal_close_learning_windows()
+            return
+        _LOGGER.log(
+            logging.WARNING if step.kind == RECAL_TIMED_OUT else logging.INFO,
+            'Thermostat recalibration ended: zone="%s" thermostat=%s how=%s minutes=%.1f peak=%.2f°F reading=%.2f°F'
+            " before=%.2f°F",
+            zone,
+            thermostat,
+            step.kind,
+            step.minutes,
+            step.peak_f,
+            step.reading_f,
+            step.baseline_f,
+        )
+        self._emit_event(
+            "thermostat_recalibration_ended",
+            {
+                "zone": zone,
+                "thermostat": thermostat,
+                "thermostat_name": self._indoor_friendly_name(thermostat),
+                "how": step.kind,
+                "minutes": step.minutes,
+                "peak_f": round(step.peak_f, 2),
+                "reading_f": round(step.reading_f, 2),
+                "baseline_f": round(step.baseline_f, 2),
+            },
+        )
+
+    def _raise_thermostat_recal_issue(self, alt_name: str | None, since: datetime) -> None:
+        """Create or refresh the zone's ignorable Repairs notice for a recalibration (Issue #1676).
+
+        One issue per zone (``thermostat_recalibration_<entry_id>``), persistent so it survives a restart, never fixable
+        (nothing in Climate Advisor to change; the cause is the furnace). Re-creating it refreshes the wording and the
+        time of the latest episode; an issue the occupant ignored stays ignored (HA keeps its dismissal), which is how
+        the note is silenced. Removed with the zone (``async_remove_entry``). Never raises.
+        """
+        entry_id = getattr(self, "_entry_id", None) or "default"
+        try:
+            local = dt_util.as_local(since)
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"{ISSUE_THERMOSTAT_RECALIBRATION}_{entry_id}",
+                is_fixable=False,
+                is_persistent=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=(
+                    ISSUE_THERMOSTAT_RECALIBRATION if alt_name else ISSUE_THERMOSTAT_RECALIBRATION_NO_ALTERNATE
+                ),
+                translation_placeholders={
+                    "zone": self._indoor_zone_title(),
+                    "thermostat": self._indoor_friendly_name(self.config.get("climate_entity")),
+                    "sensor": alt_name or "",
+                    "time": i18n.render(
+                        i18n.Msg("common.date_time", date=i18n.Date(local), time=i18n.Time(local)),
+                        i18n.hass_language(self.hass),
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001 - a notice must never break the funnel
+            _LOGGER.debug("Thermostat recalibration Repairs notice failed", exc_info=True)
+
+    def _recal_close_learning_windows(self) -> None:
+        """Close the learning windows open at the jump so the false reading never enters them (Issue #1676).
+
+        The coast windows (post-run overshoot, ``swing.coast_*``) are dropped unrecorded: their extreme would be the
+        false reading. The cycle recorder treats it as the thermostat going unavailable (``gap``): an open cycle keeps
+        its clean part before the jump. Samples taken while it lasts are skipped by ``_learning_indoor_f``.
+        """
+        dropped = (
+            sorted(self._coast_candidates or {}) if isinstance(getattr(self, "_coast_candidates", None), dict) else []
+        )
+        if dropped:
+            self._coast_candidates.clear()
+        self._cycle_gap("unavailable")
+        _LOGGER.info(
+            "Thermal learning paused for the thermostat recalibration: coast_windows_dropped=%s", dropped or "none"
+        )
+
+    def _thermostat_recal_status(self) -> dict[str, Any] | None:
+        """The Status card's recalibration line, or None when the thermostat is not recalibrating (Issue #1676)."""
+        recal = self._recal_for_resolver()
+        if recal is None or not recal.active:
+            return None
+        alternate = self._get_indoor_temp_with_provenance().recal_entity
+        return {
+            "since": recal.since.isoformat() if recal.since is not None else None,
+            "entity": alternate,
+            "name": self._indoor_friendly_name(alternate) if alternate else None,
+        }
+
     def _refresh_indoor_sensor_health(self) -> None:
         """Single event-loop funnel that detects indoor sensor failure episodes (Issue #1033).
 
@@ -5989,6 +6198,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ``_get_indoor_temp*``, ``_emit_event`` (which reads indoor temp), the resolver, the
         engine or ``get_chart_data`` (runs in an executor thread). Event loop only.
         """
+        self._observe_thermostat_recal()  # Issue #1676: first, so the reading below already reflects it
         reading = self._get_indoor_temp_with_provenance()
         primary_entity = self._primary_indoor_entity()
         self._note_indoor_sensor_state("primary", reading.reason, primary_entity, reading.primary_value)
@@ -6030,6 +6240,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         for name, default in (
             ("_indoor_source_announced_role", None),
             ("_indoor_source_left_sleep_failed", False),
+            ("_indoor_source_announced_recal", False),
         ):
             if not hasattr(self, name):
                 setattr(self, name, default)
@@ -6069,6 +6280,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _indoor_source_reason(self, reading: IndoorTempReading, using: str, was_role: str) -> i18n.Msg:
         """Why the room's sensor changed, as a message (Issue #1230 R1c); ``was_role`` is a role code."""
+        if reading.recal_entity is not None and using == reading.recal_entity:
+            return i18n.Msg("status.indoor_source.reason_recal_started")  # Issue #1676
+        if getattr(self, "_indoor_source_announced_recal", False):
+            return i18n.Msg("status.indoor_source.reason_recal_settled")
         if reading.remote_context is not None:
             if self._indoor_source_left_sleep_failed:
                 return i18n.Msg("status.indoor_source.reason_sleep_reporting_again")
@@ -6106,6 +6321,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         self._indoor_source_ensure_attrs()
         using = reading.source_entity
+        if (
+            self._indoor_source_announced_recal
+            and reading.recal_entity is None
+            and using == self._sources_announced.get("indoor")
+        ):
+            # Issue #1676: the fallback sensor kept supplying the room for another reason (the sleep window started):
+            # the next switch away from it is not the thermostat settling.
+            self._indoor_source_announced_recal = False
         if using is None or not self._source_changed("indoor", using):
             return
         previous = self._sources_announced.get("indoor")
@@ -6119,6 +6342,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         to_name = self._indoor_friendly_name(using)
         to_text = f'"{to_name}" ({using}, {role_text}, {_fmt(to_value)})'
         if previous is None:
+            self._indoor_source_announced_recal = reading.recal_entity is not None and using == reading.recal_entity
             self._record_indoor_source(using, role)
             self._announce_source("indoor", using, subject="room temperature", to_text=to_text)
             return
@@ -6128,6 +6352,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         from_value = self._indoor_snapshot_f().get(previous)
         from_name = self._indoor_friendly_name(previous)
         self._indoor_source_left_sleep_failed = was_role == "sleep_sensor" and bool(reading.sleep_reason)
+        self._indoor_source_announced_recal = reading.recal_entity is not None and using == reading.recal_entity
         self._record_indoor_source(using, role)
         self._announce_source(
             "indoor",
@@ -6620,6 +6845,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
             sleep_indoor_temp_entity=self.config.get("sleep_indoor_temp_entity"),
             companion=self._companion_for_resolver(),
+            recal=self._recal_for_resolver(),
         )
 
     async def _get_forecast_data(self) -> list:
@@ -10287,6 +10513,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 upper=_upper,
                 nat_vent_target=self._nat_vent_target_now(),
                 indoor_sensors=self._read_chart_indoor_sensors(),
+                recal_false=self._chart_recal_false(),
                 **self._read_chart_context(indoor=_indoor_occ, outdoor=_outdoor_occ),
             )
         except Exception:  # noqa: BLE001 - a chart row must never break an occupancy change
@@ -12089,6 +12316,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         ``recheck``: the dropped-change re-check (Issue #1603) -- detection only, the real event's bookkeeping ran.
         """
+        # Issue #1676: the recalibration watch sees the new reading before any learning, decision or evidence reads it.
+        if not recheck:
+            _old = event.data.get("old_state")
+            self._observe_thermostat_recal(previous_action=_old.attributes.get("hvac_action") if _old else None)
         # Issue #1128: evidence first, before any early return below (sync, no I/O, never raises).
         if not recheck:
             self._record_promise_reading()
@@ -12350,6 +12581,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_ov,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
+                    recal_false=self._chart_recal_false(),
                     **self._read_chart_context(indoor=_indoor, outdoor=_outdoor_val),
                 )
             decide_sync(
@@ -12499,6 +12731,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     upper=_band_upper_hac,
                     nat_vent_target=self._nat_vent_target_now(),
                     indoor_sensors=self._read_chart_indoor_sensors(),
+                    recal_false=self._chart_recal_false(),
                     # outdoor=None on this row, so no outdoor feels-like (same value the row stores)
                     **self._read_chart_context(indoor=_indoor_hac, outdoor=None),
                 )
@@ -14613,7 +14846,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         sleep-window sensor swap, even when it's active for comfort/display purposes
         elsewhere in the same cycle. See indoor_temp.py's module docstring.
         """
-        indoor = self._get_indoor_temp_with_provenance().primary_value
+        indoor = self._learning_indoor_f()
         # Issue #1337: with the weather service down this is the sensor or the kept forecast, never the 65°F
         # placeholder, which learning would otherwise fit as a real outdoor temperature.
         weather_attrs, weather_down = self._weather_attrs_and_down()
@@ -14718,7 +14951,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 coast_thermostat_event(
                     self._coast_candidates,
                     now=now,
-                    reading=self._get_indoor_temp_with_provenance().primary_value,
+                    reading=self._learning_indoor_f(),
                     changed=changed,
                     old_dir=old_dir,
                     new_dir=new_dir,
@@ -14738,7 +14971,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._swing_last_off_ts[old_dir] = now
                 await self._close_swing_cycle(old_dir, new_state, now)
             if new_dir is not None:
-                indoor = self._get_indoor_temp_with_provenance().primary_value
+                indoor = self._learning_indoor_f()
                 setpoint = self._read_thermostat_setpoint_f(new_state, new_dir)
                 since = (
                     seconds_since(self._last_setpoint_change_ts, now=now)
@@ -14767,7 +15000,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         cand = (self._swing_candidates or {}).pop(mode, None)
         if cand is None:
             return
-        off_indoor = self._get_indoor_temp_with_provenance().primary_value
+        off_indoor = self._learning_indoor_f()
         unit = self.config.get("temp_unit", "fahrenheit")
         verdict = evaluate_swing_cycle(
             mode=mode,
@@ -14843,9 +15076,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         if not self._coast_candidates:
             return False
-        return self._coast_record(
-            coast_feed(self._coast_candidates, now, self._get_indoor_temp_with_provenance().primary_value)
-        )
+        return self._coast_record(coast_feed(self._coast_candidates, now, self._learning_indoor_f()))
 
     def _coast_record(self, closed: list) -> bool:
         """Log and record the coast windows the shared driver closed. True when a sample was recorded."""
@@ -15004,8 +15235,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not hasattr(self, "learning"):
             return
 
-        # Issue #895: .primary_value, not .value — see _get_current_sample() docstring.
-        indoor = self._get_indoor_temp_with_provenance().primary_value
+        # Issue #895: .primary_value, not .value (see _get_current_sample()); Issue #1676: None while recalibrating.
+        indoor = self._learning_indoor_f()
         outdoor = getattr(self, "_last_outdoor_temp", None)
 
         # Issue #130 D16: Use last-known outdoor temp if current reading is unavailable.
@@ -16270,9 +16501,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ts = dt_util.now().timestamp()
             self._cycle_flags()
             self._cycle_collect(
-                self._cycle_recorder.reading(
-                    ts, self._get_indoor_temp_with_provenance().primary_value, self._primary_indoor_entity()
-                )
+                self._cycle_recorder.reading(ts, self._learning_indoor_f(), self._primary_indoor_entity())
             )
         except Exception:  # noqa: BLE001
             _LOGGER.debug("cycle recorder reading failed", exc_info=True)
@@ -16375,7 +16604,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._cycle_recorder.on_edge(
                     ts,
                     mode,
-                    self._get_indoor_temp_with_provenance().primary_value,
+                    self._learning_indoor_f(),
                     getattr(self, "_last_outdoor_temp", None),
                     self._read_thermostat_setpoint_f(climate_state, mode),
                 )
@@ -16419,13 +16648,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             if old_dir != new_dir:
                 if new_dir is None:
-                    self._cycle_collect(rec.off_edge(ts, self._get_indoor_temp_with_provenance().primary_value))
+                    self._cycle_collect(rec.off_edge(ts, self._learning_indoor_f()))
                 else:
                     self._cycle_collect(
                         rec.on_edge(
                             ts,
                             new_dir,
-                            self._get_indoor_temp_with_provenance().primary_value,
+                            self._learning_indoor_f(),
                             getattr(self, "_last_outdoor_temp", None),
                             self._read_thermostat_setpoint_f(new_state, new_dir),
                         )

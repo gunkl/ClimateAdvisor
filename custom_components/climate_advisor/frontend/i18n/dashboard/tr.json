@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "durum henüz bilinmiyor",
   "dashboard.status.ran_today": "Sistem bugün {n, plural, one {# dk} other {# dk}} çalıştı",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor yatak odası sensörünü okuyor (uyku penceresi)",
+  "dashboard.status.thermostat_recal_reading": "Isıtma durduktan sonra termostat yeniden kalibre oluyor — oturana kadar Climate Advisor {name} değerini okuyor",
+  "dashboard.status.thermostat_recal_no_alt": "Isıtma durduktan sonra termostat yeniden kalibre oluyor — değeri şimdilik çok yüksek",
   "dashboard.status.reads_in_sleep": "Climate Advisor bunu uyku penceresinde okuyor",
   "dashboard.status.reads_this_sensor": "Climate Advisor bu sensörü okuyor",
   "dashboard.status.says_cooler": "{who} {theirs} diyor, {name} değerinden {gap}° daha serin",

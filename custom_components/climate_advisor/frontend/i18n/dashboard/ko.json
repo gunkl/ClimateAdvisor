@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "상태를 아직 알 수 없음",
   "dashboard.status.ran_today": "오늘 시스템 가동: {n, plural, other {#분}}",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor가 침실 센서를 읽습니다(수면 시간대)",
+  "dashboard.status.thermostat_recal_reading": "난방이 멈춘 뒤 온도조절기 재보정 중 — 안정될 때까지 Climate Advisor가 {name}을(를) 읽습니다",
+  "dashboard.status.thermostat_recal_no_alt": "난방이 멈춘 뒤 온도조절기 재보정 중 — 지금은 값이 너무 높습니다",
   "dashboard.status.reads_in_sleep": "Climate Advisor가 수면 시간대에 이 센서를 읽습니다",
   "dashboard.status.reads_this_sensor": "Climate Advisor가 이 센서를 읽습니다",
   "dashboard.status.says_cooler": "{who}: {theirs}, {name}보다 {gap}° 낮음",

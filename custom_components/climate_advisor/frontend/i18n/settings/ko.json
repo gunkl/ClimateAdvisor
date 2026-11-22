@@ -246,6 +246,8 @@
   "settings.temp_unit.label": "온도 단위",
   "settings.thermostat_companion_sensor.description": "많은 온도 조절기가 메인 엔티티에서 실내 온도를 정수 단위로 보고하지만, 같은 기기에 더 정밀한 온도 센서가 있는 경우도 있습니다. '자동'(기본값)은 그 정밀한 센서가 같은 값을 더 세밀하게 보여 준다고 확인되면(온도 조절기 값과 1°F 이내이고, 온도 조절기가 정수를 표시할 때 소수를 표시) 쾌적함 판단에 그 센서를 사용하며, 값이 없거나 사용할 수 없거나 오래되었거나 일치하지 않으면 온도 조절기 자체 값으로 돌아갑니다. 실내 온도 소스가 온도 조절기 내장 센서일 때만 적용됩니다. '끔'은 항상 온도 조절기 자체 값을 사용합니다.",
   "settings.thermostat_companion_sensor.label": "온도 조절기 정밀 센서",
+  "settings.thermostat_recalibration_guard.description": "일부 온도조절기는 실내가 아직 설정 온도보다 낮은데 보일러가 스스로 꺼진 뒤(과열 방지 안전장치 작동) 최대 약 40분 동안 몇 도 높은 값을 표시합니다. 켜짐(기본값): Climate Advisor가 급상승을 감지하고 경고를 기록하며, 무시할 수 있는 수리 알림을 표시하고, 그 값을 집에 대한 학습에서 제외하며, 온도조절기가 안정될 때까지 수면 센서나 전용 실내 센서로 실내 온도를 읽습니다. 실내 온도 출처가 온도조절기 내장 센서일 때만 적용됩니다. 꺼짐은 급상승을 무시합니다.",
+  "settings.thermostat_recalibration_guard.label": "재보정 보호",
   "settings.threshold_cool.description": "예보 최고 기온이 이 온도 이상(온화한 날 온도 미만)인 날은 서늘한 날로 분류되며, 그보다 낮으면 추운 날입니다. 기본값: 45°F / 7°C.",
   "settings.threshold_cool.label": "선선한 날 임계값",
   "settings.threshold_hot.description": "예보 최고 기온이 이 온도 이상인 날은 더운 날로 분류됩니다. 기본값: 85°F / 29°C.",

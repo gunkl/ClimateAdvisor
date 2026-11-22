@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "lectura del sensor más fino no válida — usando el termostato",
   "status.indoor_source.reason_non_numeric": "lectura del sensor más fino no numérica — usando el termostato",
   "status.indoor_source.reason_not_proven": "sensor más fino sin validar — usando el termostato",
+  "status.indoor_source.reason_recal_settled": "termostato estabilizado tras recalibrarse",
+  "status.indoor_source.reason_recal_started": "termostato recalibrándose tras parar la calefacción",
   "status.indoor_source.reason_setting_changed": "ajuste del sensor interior modificado",
   "status.indoor_source.reason_setting_off": "ajuste desactivado",
   "status.indoor_source.reason_sleep_ended": "periodo de sueño terminado",

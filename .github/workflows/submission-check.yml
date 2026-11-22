@@ -14,6 +14,10 @@ name: Submission check
 # runs no AI and sanitises the AI text (no mentions, no off-repo links, length cap).
 #
 # Issue #1685: the job folders are not hidden (no leading dot): upload-artifact skips hidden files by default.
+#
+# Issue #1700: round 2 builds on round 1. prepare writes the round, what the previous check said and the attached
+# files into submission.json; the AI returns what the update settled, at most 3 items still missing, one next step,
+# and the maintainer's own decisions in a separate list.
 
 on:
   issues:
@@ -137,10 +141,46 @@ jobs:
             - Does it look like a scope fact or a closed wontfix issue in "similar_issues"? A likely duplicate?
               Name the issue number.
 
+            The round. "round" in submission.json is 1 for the first check and 2 for the check after the
+            author's first edit, push or reply (3 or more only when the maintainer asked for a recheck).
+            From round 2 on, "previous_check" holds what the last check said (addressed, missing, suggestions,
+            for_maintainer, next_step) and "author_comments" holds the author's replies. Round 2 must build on
+            round 1:
+            - Read the replies and the current body first. Under "addressed", list each earlier point the
+              author has now settled, in a few words with the detail they gave.
+            - Don't repeat an earlier point the author has answered, in any layout. A reply that gives the
+              form's parts answers the request to use the form: don't ask for the form again.
+            - On round 2 or later, give at most 3 "missing" findings: only what still blocks the maintainer.
+              None, if nothing does.
+
+            Attachments. "attachments" lists the files linked from the body and the author's comments; you
+            can't open them, so go by the file name and what the author says they hold. A Climate Advisor
+            diagnostics file (config_entry-climate_advisor-*.json) contains the settings, setpoints and
+            comfort bands, the thermostat's capabilities and the versions. Don't ask for anything an attached
+            file holds.
+
+            Settings. Before asking about a setting, check the docs: docs/configuration-options.md, and grep
+            docs/ and claude.md for its name. Don't ask for a value that is fixed in the code (not a setting),
+            or that the diagnostics hold.
+
+            Contradictions. Only say two statements conflict when you quote both, word for word in double
+            quotes, and they cannot both be true. Statements that agree, or that are about different days,
+            versions or settings, are not a conflict.
+
+            The maintainer's decisions. Whether to split the submission, whether it is a bug or a feature, and
+            its scope are for the maintainer to decide, even when the author offered. Put them under
+            "for_maintainer", never in "findings".
+
             Write ONLY the file ai-output/ai_review.json, as JSON:
-            {"findings": [{"level": "missing" | "suggestion", "text": "<one or two plain sentences>"}]}
+            {"addressed": ["<an earlier point the update settled>"],
+             "findings": [{"level": "missing" | "suggestion", "text": "<one or two plain sentences>"}],
+             "next_step": "<the single most useful concrete action for the author, or empty>",
+             "for_maintainer": ["<a decision for the maintainer, in one sentence>"]}
             "missing" is something the maintainer needs before working on it; "suggestion" would help.
-            At most 6 findings, the most useful first. An empty list means it looks complete.
+            At most 6 findings, the most useful first (at most 3 of them "missing" from round 2 on). An empty
+            list means it looks complete. "addressed" is empty on round 1. "next_step" names one concrete
+            thing to do, for example "Attach climate_advisor_chart_log.json covering Nov 12 to 14."; leave it
+            empty when nothing is needed. At most 3 "for_maintainer" items.
             Be friendly and specific; no @-mentions, no links. Don't judge whether the idea is good.
       - if: ${{ always() }}
         uses: actions/upload-artifact@v7.0.2

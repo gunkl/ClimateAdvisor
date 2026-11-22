@@ -45,6 +45,8 @@ F_EXPERIENCE = "What did the person at home experience?"
 F_EXPECTED = "What did you expect instead?"
 F_WHEN = "When did it happen?"
 F_CA_VERSION = "Climate Advisor version"
+F_LATEST = "Checked against the latest version?"
+F_LATEST_DETAIL = "What did you check on the latest version?"
 F_HA_VERSION = "Home Assistant version"
 F_HARDWARE = "Thermostat, fan hardware and fan mode"
 F_EVIDENCE = "Diagnostics, logs and other evidence"
@@ -55,6 +57,12 @@ F_OUTCOME = "What should the person at home get?"
 KIND_SAW = "Evidence: I saw it happen and attached data"
 KIND_HARNESS = "Evidence: reproduced in the simulation harness"
 KIND_HYPOTHESIS = "Hypothesis: from reading code or docs, no data yet"
+
+# Issue #1687: was it checked against the latest version?
+LATEST_RELEASE = "Yes: it still happens on the latest release or pre-release"
+LATEST_MAIN = "Yes: it still happens on main (by analysis or the harness)"
+LATEST_NOT_CHECKED = "Not checked: I'm on an older version"
+RELEASES = "https://github.com/gunkl/ClimateAdvisor/releases"
 
 # The pull request template's sections (must match .github/pull_request_template.md).
 PR_SECTIONS = (
@@ -226,6 +234,7 @@ def check_issue(body: str, author_replied: bool) -> tuple[list[dict[str, str]], 
         for field in (F_EVIDENCE_KIND, F_EXPERIENCE, F_EXPECTED, F_CA_VERSION, F_HA_VERSION):
             if not form.get(field):
                 findings.append(_missing(f'Fill in "{field}".'))
+        findings += _check_latest(form)
         evidence = form.get(F_EVIDENCE, "")
         if kind == KIND_SAW:
             if not form.get(F_WHEN):
@@ -265,6 +274,32 @@ def check_issue(body: str, author_replied: bool) -> tuple[list[dict[str, str]], 
             )
         )
     return findings, labels
+
+
+def _check_latest(form: dict[str, str]) -> list[dict[str, str]]:
+    """Issue #1687: say whether it still happens on the latest version, and what was checked."""
+    if F_LATEST not in form:  # an issue filed before the field existed
+        return [
+            _missing(
+                f"Say whether it still happens on the [latest release or pre-release]({RELEASES}) or on `main`, "
+                "and what you checked (the CHANGELOG since your version, `tools/fix_search.py`, the code on `main`)."
+            )
+        ]
+    latest, detail = form.get(F_LATEST, ""), form.get(F_LATEST_DETAIL, "")
+    if not latest:
+        return [_missing(f'Fill in "{F_LATEST}".')]
+    if latest == LATEST_NOT_CHECKED:
+        return [
+            _missing(
+                "Please check whether it still happens on the latest version: upgrade to the "
+                f"[latest release or pre-release]({RELEASES}) and watch for it, or, if you can't, read the "
+                'CHANGELOG entries since your version and run `python tools/fix_search.py "<topic>"`. '
+                'Then update "Checked against the latest version?" and say what you found.'
+            )
+        ]
+    if not detail:
+        return [_missing(f'Fill in "{F_LATEST_DETAIL}": what you compared, and what you found.')]
+    return []
 
 
 def _section_text(body: str, heading: str) -> str | None:

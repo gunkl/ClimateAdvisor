@@ -154,6 +154,8 @@ def _bug(**overrides):
         sc.F_EXPECTED: "The AC stays off.",
         sc.F_WHEN: "2026-11-20 14:00 PST",
         sc.F_CA_VERSION: "0.9.67",
+        sc.F_LATEST: sc.LATEST_RELEASE,
+        sc.F_LATEST_DETAIL: "Upgraded to 0.9.69 and saw it again on 2026-11-21.",
         sc.F_HA_VERSION: "2026.11.1",
         sc.F_HARDWARE: "Ecobee, fan mode hvac_fan",
         sc.F_EVIDENCE: "[diag.json](https://github.com/user-attachments/files/1/diag.json)",
@@ -202,6 +204,23 @@ class TestIssueChecks:
     def test_required_fields_and_unticked_check(self):
         findings, _ = sc.check_issue(_bug(**{sc.F_CA_VERSION: "_No response_", sc.F_CHECKS: "- [ ] I checked"}), False)
         assert _levels(findings) == ["missing", "missing"]
+
+    def test_latest_version_check_1687(self):
+        """Issue #1687: the report says whether it still happens on the latest version, and what was checked."""
+        assert sc.check_issue(_bug(**{sc.F_LATEST: sc.LATEST_MAIN}), False)[0] == []
+        for value, needle in (
+            ("_No response_", "Checked against the latest version"),
+            (sc.LATEST_NOT_CHECKED, "latest release or pre-release"),
+        ):
+            findings, _ = sc.check_issue(_bug(**{sc.F_LATEST: value}), False)
+            assert _levels(findings) == ["missing"] and needle in findings[0]["text"], value
+        findings, _ = sc.check_issue(_bug(**{sc.F_LATEST_DETAIL: "_No response_"}), False)
+        assert _levels(findings) == ["missing"] and "what you compared" in findings[0]["text"]
+        # an issue filed on the older form (no such field) is asked too
+        old = _bug().replace(f"### {sc.F_LATEST}\n\n{sc.LATEST_RELEASE}", "")
+        old = old.replace(f"### {sc.F_LATEST_DETAIL}\n\nUpgraded to 0.9.69 and saw it again on 2026-11-21.", "")
+        findings, _ = sc.check_issue(old, False)
+        assert _levels(findings) == ["missing"] and "still happens" in findings[0]["text"]
 
     def test_missing_hardware_is_only_a_suggestion(self):
         assert _levels(sc.check_issue(_bug(**{sc.F_HARDWARE: "_No response_"}), False)[0]) == ["suggestion"]
@@ -360,6 +379,8 @@ class TestTemplatesMatchTheScript:
             sc.F_EXPECTED,
             sc.F_WHEN,
             sc.F_CA_VERSION,
+            sc.F_LATEST,
+            sc.F_LATEST_DETAIL,
             sc.F_HA_VERSION,
             sc.F_HARDWARE,
             sc.F_EVIDENCE,
@@ -368,6 +389,8 @@ class TestTemplatesMatchTheScript:
         ]
         kinds = next(f for f in form["body"] if f.get("id") == "evidence_kind")["attributes"]["options"]
         assert kinds == [sc.KIND_SAW, sc.KIND_HARNESS, sc.KIND_HYPOTHESIS]
+        latest = next(f for f in form["body"] if f.get("id") == "latest_check")["attributes"]["options"]
+        assert latest == [sc.LATEST_RELEASE, sc.LATEST_MAIN, sc.LATEST_NOT_CHECKED]
 
     def test_feature_form_and_config(self):
         form = yaml.safe_load((_ROOT / ".github/ISSUE_TEMPLATE/feature_request.yml").read_text(encoding="utf-8"))

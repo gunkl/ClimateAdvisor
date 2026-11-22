@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.71] — 2026-11-22
+
+### Changed
+- #1687: a bug report now says whether the problem still happens on the latest release, pre-release or `main`, and what the reporter checked: an upgrade, the changelog since their version, `tools/fix_search.py`, or the code on `main`. The bug form asks, the submission check requires it, and the contributing guide and its AI-assistant instructions say to check before filing or fixing. Nothing changes in your house.
+
 ## [0.9.70] — 2026-11-22
 
 ### Fixed

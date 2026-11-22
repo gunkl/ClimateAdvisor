@@ -39,9 +39,27 @@ body:
     id: ca_version
     attributes:
       label: Climate Advisor version
-      description: HACS → Climate Advisor, or the dashboard's Debug tab.
+      description: The version you saw it on (HACS → Climate Advisor, or the dashboard's Debug tab).
     validations:
       required: true
+  - type: dropdown
+    id: latest_check
+    attributes:
+      label: Checked against the latest version?
+      description: The latest release or pre-release is on the [releases page](https://github.com/gunkl/ClimateAdvisor/releases); `main` is the code being worked on.
+      options:
+        - "Yes: it still happens on the latest release or pre-release"
+        - "Yes: it still happens on main (by analysis or the harness)"
+        - "Not checked: I'm on an older version"
+    validations:
+      required: true
+  - type: textarea
+    id: latest_detail
+    attributes:
+      label: What did you check on the latest version?
+      description: |
+        For example: you upgraded and saw it again; you read the CHANGELOG entries since your version and found no fix for it;
+        `python tools/fix_search.py "<topic>"` found nothing; the code on `main` still does it (file and function); a harness run on `main` reproduces it.
   - type: input
     id: ha_version
     attributes:

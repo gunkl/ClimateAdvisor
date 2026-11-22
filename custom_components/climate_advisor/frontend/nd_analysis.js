@@ -432,7 +432,9 @@
     if (!rows.length) return h + '<div class="empty">' + esc(resp.no_events_msg ? CAI18N.tw(resp.no_events_msg) : T('rep.no_events')) + '</div>';
     h += '<table><thead><tr>' + ['time', 'event', 'settings', 'source', 'indoor', 'outdoor'].map(function (c) { return '<th scope="col">' + esc(T('rep.act_col_' + c)) + '</th>'; }).join('') + '</tr></thead><tbody>' +
       rows.map(function (r) {
-        return '<tr><td><bdi>' + esc(r.time) + '</bdi></td><td>' + bold(CAI18N.text(r, 'event')) + '</td><td>' + bold(CAI18N.text(r, 'settings')) + '</td><td>' + esc(CAI18N.word('dashboard.analysis.source.', r.source)) + '</td><td><bdi>' + esc(r.indoor) + '</bdi></td><td><bdi>' + esc(r.outdoor) + '</bdi></td></tr>';
+        // Issue #1674: a 7-day record spans days, so each row shows its date (`ts`, the viewer's language); `time`
+        // (the English "Sat 11-21 10:31" stamp) is the fallback for a row whose timestamp could not be read.
+        return '<tr><td><bdi>' + esc(r.ts ? ND.fmtDateTime(r.ts) : r.time) + '</bdi></td><td>' + bold(CAI18N.text(r, 'event')) + '</td><td>' + bold(CAI18N.text(r, 'settings')) + '</td><td>' + esc(CAI18N.word('dashboard.analysis.source.', r.source)) + '</td><td><bdi>' + esc(r.indoor) + '</bdi></td><td><bdi>' + esc(r.outdoor) + '</bdi></td></tr>';
       }).join('') + '</tbody></table>';
     var lines = String(resp.table || '').split('\n'), last = -1;
     lines.forEach(function (l, i) { if (l.trim().charAt(0) === '|') last = i; });

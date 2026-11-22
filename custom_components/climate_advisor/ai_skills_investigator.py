@@ -19,6 +19,8 @@ from .ai_skills_context import (
     _fetch_github_issues,
     build_activity_summary_narrative,
     filter_events_by_window,
+    fmt_clock_near,
+    fmt_day_stamp,
 )
 from .ai_skills_context import (
     build_version_context as _build_version_context_async,
@@ -128,6 +130,13 @@ HUMAN-READABLE-FIRST â€" every section's first sentence must be occupant-outc
  never lead with them. For example, write "Your fan is running even though nothing told\
  it to â€" this looks like someone turned it on manually at the thermostat" before\
  "(fan_status=off (manual override), hvac_action=fan)" â€" not the reverse.
+DAYS AND DATES (Issue #1674): the supplied window usually spans several days, so every time in\
+ the supplied data carries its weekday and month-day (e.g. "Sat 11-21 10:31", 24-hour local time).\
+ Whenever you mention a time anywhere in this report (Activity Summary, incongruities, data\
+ quality, errors/warnings, hypotheses, actions), keep its weekday and date with it, e.g.\
+ "Sat 11-21 10:31 AM". Never write a bare clock time such as "6:15 AM": the reader cannot tell\
+ which day it was. A second time on the same day may drop the day ("Sat 11-21 10:46 AM to\
+ 11:21 AM"); a second time on a later day names its own day.
 SECTION ROLES ARE EXCLUSIVE â€" each section contains only what belongs to it:\
  do not repeat content already stated in a prior section.\
  A one-line cross-reference ("see Hypotheses above") is acceptable;\
@@ -153,8 +162,10 @@ Return your investigation using these exact section headers (## prefix, exact ca
 Using ONLY the facts in the ACTIVITY SESSIONS section (never the raw ACTIVITY TIMELINE\
  table, never data from any other section), write exactly one line per session in this\
  exact format:
-<start> to <end>: <one plain-English sentence>
-(use a single time, not a range, for a session with only one moment of activity)
+<weekday> <month-day> <start> to <end>: <one plain-English sentence>
+(use a single time, not a range, for a session with only one moment of activity; copy the\
+ session's weekday and month-day exactly, and name the second day too when a session runs past\
+ midnight, e.g. "Fri 11-20 11:50 PM to Sat 11-21 12:10 AM")
 
 Rules -- violating any of these makes this section unusable, not just imperfect:
 - Do not introduce any fact not present in the supplied ACTIVITY SESSIONS data.
@@ -177,13 +188,13 @@ Rules -- violating any of these makes this section unusable, not just imperfect:
  exactly: "No notable activity in the analyzed window."
 
 Example shape (for calibration only -- never reuse these exact facts):
-10:53 AM to 10:58 AM: Automation restarted after updating to version 0.7.47 and\
+Sat 11-21 10:53 AM to 10:58 AM: Automation restarted after updating to version 0.7.47 and\
  classified today as warm. A door/window opened almost immediately, so automation\
  paused itself and left the AC off -- expected, since fresh air alone was already\
  holding the house steady.
-12:31 PM: You turned the whole-house fan on by remote with a 4-hour timer; automation\
+Sat 11-21 12:31 PM: You turned the whole-house fan on by remote with a 4-hour timer; automation\
  backed off so it wouldn't fight the fan.
-4:31 PM: Your 4-hour fan timer ended and the fan turned off; automation resumed its\
+Sat 11-21 4:31 PM: Your 4-hour fan timer ended and the fan turned off; automation resumed its\
  normal schedule.
 
 ## INCONGRUITIES FOUND
@@ -288,7 +299,11 @@ async def async_build_investigator_context(
 _ACTIVITY_SUMMARY_NO_ACTIVITY_TEXT = "No notable activity in the analyzed window."
 _ACTIVITY_SUMMARY_BANNED_SUBSTRINGS = ("setpoint:", "mode:", "fan:", "grace:")
 _ACTIVITY_SUMMARY_SNAKE_CASE_RE = re.compile(r"\b[a-z]+(?:_[a-z]+)+\b")
-_ACTIVITY_SUMMARY_LEADING_TIME_RE = re.compile(r"^\d{1,2}(:\d{2})?\s*(AM|PM|am|pm)?")
+# Issue #1674: each line must open with its weekday and date, then the time ("Sat 11-21 10:53 AM"; "Sat Nov 21"
+# and a comma are tolerated) -- a bare "10:53 AM" names no day in a multi-day report.
+_ACTIVITY_SUMMARY_LEADING_TIME_RE = re.compile(
+    r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\.?,?\s+(\d{1,2}[-/]\d{1,2}|[A-Z][a-z]{2,8}\.?\s+\d{1,2}),?\s+\d{1,2}:\d{2}"
+)
 
 
 def _check_activity_summary_drift(text: str) -> None:
@@ -307,7 +322,7 @@ def _check_activity_summary_drift(text: str) -> None:
     if banned_hits or snake_case_hits or malformed_lines:
         _LOGGER.warning(
             "Activity Summary drift detected: %d banned-term hit(s), %d snake_case "
-            "token(s), %d/%d line(s) missing a leading time",
+            "token(s), %d/%d line(s) missing a leading day and time",
             banned_hits,
             snake_case_hits,
             len(malformed_lines),
@@ -589,7 +604,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
         if worst_count >= 3 and worst_start is not None and worst_end is not None:
             incongruity_parts.append(
                 f"Rapid nat-vent cycling detected: {worst_count} transitions between"
-                f" {worst_start.strftime('%H:%M')} and {worst_end.strftime('%H:%M')}"
+                f" {fmt_day_stamp(worst_start)} and {fmt_clock_near(worst_end, worst_start)}"
                 " — possible decision-loop thrash"
             )
     except Exception:

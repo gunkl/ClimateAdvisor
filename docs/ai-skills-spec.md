@@ -27,6 +27,7 @@ audit.
 | What is the Issue #205 override false-positive pattern, and how is it detected now? | An `override_detected` event within 60 seconds of an automation-initiated event is a known code-path false positive, not a real user override. `_build_known_override_false_positives()` computes this deterministically and hands the model the result — the prompt no longer asks the model to re-derive it from raw timestamps. | [Event Log Provider](#event-log-provider) |
 | What sensitive config key does `investigator` strip before including config in context? | `ai_api_key` is removed via `.pop()` on a copy of `coordinator.config` before the config block is serialised into the context string. The config block itself is a curated ~11-field subset, not a full dump. | [Config Provider](#config-provider) |
 | What does the `THERMAL OBSERVATION PIPELINE` section in the investigator context show? | Per-type committed/rejected counts with top reason codes, NEVER LEARNED flags when `k_active_cool` or `k_active_heat` is None, pending in-flight observations, and engine status. The system prompt now points at these pre-computed markers directly rather than restating the diagnostic rules as prose (Issue #563). | [§Thermal Observation Pipeline Context](#thermal-observation-pipeline-context) |
+| How are times written in the investigator context, and why does each carry a day (Issue #1674)? | Every multi-day section stamps each time `Sat 11-21 10:31` (English weekday, month-day, 24-hour HA-local time; `fmt_day_stamp()` in `ai_skills_context.py`): ACTIVITY TIMELINE rows, ACTIVITY SESSIONS, SYSTEM LOG RECORDS, TIMING CORRELATIONS, KNOWN OVERRIDE FALSE POSITIVES (with seconds), FAN OWNERSHIP HISTORY, the current-override line and the no-AI fallback's notes. A same-day second time drops the day (`Sat 11-21 10:46-11:21`); one past midnight names its own day. The prompt's DAYS AND DATES rule makes the AI keep the weekday and date in every section of its report. | [Day-stamped times](#day-stamped-times-issue-1674) |
 | Why do `observation_count_heat`/`_cool` in `LEARNING — THERMAL MODEL` not match `committed` in `THERMAL OBSERVATION PIPELINE`? | They measure different scopes, both by design: `observation_count_heat`/`_cool` are the evidence behind the heat/cool rates (confidence-grading input: the pre-upgrade count, giving way only as newer informative cycles replace or contradict it, plus the cycle model's weighted informative cycles, Issue #1512; not cumulative: it can fall and stays flat in a quiet season); `committed` is a live count of the observations still kept: each kind keeps its own share of `THERMAL_OBS_CAP` (200), none leaves with time (Issue #1523). A large gap is expected on installs with history and is not data loss (Issue #586). | [§Thermal Observation Pipeline Context](#thermal-observation-pipeline-context) |
 | Does the registry cache skill responses? | No. The registry has no response cache. Every `async_execute()` call builds a fresh context, calls Claude, and parses a new response. | [Caching](#caching) |
 | What invariant holds for `async_execute()` with respect to exceptions? | `async_execute()` never raises to the caller. Every exception inside context building, Claude call, parsing, and fallback invocation is caught and surfaced as a structured error dict. | [Invariants](#invariants) |
@@ -310,6 +311,39 @@ Assembles five sub-sections:
 3. **`KNOWN OVERRIDE FALSE POSITIVES`** (Issue #563) — `override_detected` events within 60 seconds of an automation-initiated event (e.g., `nat_vent_*`, `classification_applied`, `grace_started`). Distinct from Timing Correlations above — a deterministic ≤60s match, not a cycle-period match.
 4. **`RESTART HISTORY`** (Issue #563) — `_build_restart_summary()` breaks down `system_restarted` events by `cause` (already computed by `coordinator.py`'s restart classification, Issue #403/#413/#1110: `user_restart`/`version_changed`/`reload`/`unknown`). `reload` (Issue #1110) is a Climate Advisor zone reload — the clean shutdown was written by the config-entry unload path (`_persist_shutdown_diagnostics(kind="unload")`, persisted as `LearningState.last_shutdown_kind`), not by the `EVENT_HOMEASSISTANT_STOP` listener (`kind="ha_stop"` → `user_restart`); state persisted before #1110 has no kind and falls back to `hass.is_running`. Only `cause=unknown` restarts are presented as noteworthy; benign restarts are never narrated as problems — this closes the "6 restarts today" hallucination class, which previously happened because only a raw count was visible with no cause breakdown.
 
+### Day-stamped times (Issue #1674)
+
+**Occupant problem:** a 7-day report listed "1:34 AM", "6:15 AM", "10:46 AM to 11:21 AM" with
+no day, so events from different days blurred together; the AI copied the bare `HH:MM` the
+context gave it. Original design gap (the sections were built for a 24-hour window), not a
+regression.
+
+**One compact style everywhere** (token budget): `Sat 11-21 10:31` — English weekday, `MM-DD`,
+24-hour clock, in Home Assistant local time (a naive stored time is read as UTC, like
+`_parse_event_time()`). English names on purpose (not the locale-dependent `%a`). Helpers in
+`ai_skills_context.py`:
+
+| Helper | Output | Used by |
+|---|---|---|
+| `fmt_day_stamp(dt, seconds=False)` | `Sat 11-21 10:31` / `Sat 11-21 21:54:36` | `_fmt_time()` (every timeline row, SYSTEM LOG RECORDS, FAN OWNERSHIP HISTORY), TIMING CORRELATIONS, KNOWN OVERRIDE FALSE POSITIVES, `Current override: active since ...`, the entity outage `since ...` and fan-off `started ...` facts, the fallback's rapid nat-vent cycling note |
+| `fmt_clock_near(dt, ref)` | `11:21` on `ref`'s day, else the full stamp | a second time printed right after a stamp (the prior automation event in TIMING CORRELATIONS, the matched event in KNOWN OVERRIDE FALSE POSITIVES, a collapsed run's end) |
+| `fmt_day_span(start, end)` | `Sat 11-21 10:46-11:21`, `Sat 11-21 06:15` (one moment), `Fri 11-20 23:50-Sat 11-21 00:10` | ACTIVITY SESSIONS headers, the no-AI fallback's Activity Summary |
+
+A collapsed timeline run prints its range after the row's own stamp as bare clocks
+(`Sensor all closed x5 (16:48-17:36)`), naming the end's day only when the run crosses
+midnight (`(23:50-Sat 11-21 00:10)`). MANUAL OVERRIDES TODAY keeps bare `HH:MM` (one day by
+definition). Log lines that mention a near-future clock time (`ends 14:30`) are unchanged: the
+SYSTEM LOG RECORDS stamp already names the day.
+
+**Prompt:** `_SYSTEM_PROMPT`'s DAYS AND DATES rule tells the AI to keep the weekday and date
+with every time it mentions in any section; the ACTIVITY SUMMARY format is
+`<weekday> <month-day> <start> to <end>: <sentence>`, and its calibration example is dated. The
+drift guardrail counts a line that does not open with a weekday, a date and a time.
+
+**Dashboard:** `build_event_timeline_wire()` rows also carry `ts` (the row's first event, ISO
+with offset); the Activity record shows `ND.fmtDateTime(ts)` in the viewer's language and
+falls back to the English `time` stamp. Tests: `tests/test_report_dates_1674.py`.
+
 ### Activity Sessions Provider
 
 `build_activity_sessions_context(hass, coordinator, **kwargs) → str` (`ai_skills_context.py`)
@@ -327,7 +361,8 @@ consecutive-*same-type*-only collapsing. This is what absorbs a tightly-clustere
 of different event types (e.g. a comfort-band change, a fan cycle, and a
 reclassification within one minute) into a single unit instead of N separate lines.
 
-**What each session carries:** start/end time, indoor/outdoor temp at session start and
+**What each session carries:** start/end time (and `time_range`, the day-stamped
+`fmt_day_span()` header text, Issue #1674), indoor/outdoor temp at session start and
 end, and `event_lines` — each event's already-fairly-plain `ev_text` (e.g.
 "Classification applied: warm (warming)"), deliberately **excluding** `settings_text`
 (the most jargon-dense field, e.g. `"setpoint: 72°F Cool (64°F Heat)"`, `"mode:
@@ -424,7 +459,8 @@ Issue #925 restored `## ACTIVITY SUMMARY` as an **LLM-authored** section — the
 required output section, ahead of `INCONGRUITIES FOUND` — fed *only* by the
 `ACTIVITY SESSIONS` context section (see [Activity Sessions Provider](#activity-sessions-provider)),
 never the raw `ACTIVITY TIMELINE` table. The system prompt constrains it with an exact
-output format (`<start>–<end>: <one sentence>`, one line per session), a banned-terms
+output format (`<weekday> <month-day> <start> to <end>: <one sentence>`, one line per
+session; the weekday and date since Issue #1674), a banned-terms
 list (no `"setpoint:"`, no `"mode: X to Y"`, no raw snake_case event-type names), and an
 embedded few-shot calibration example. Because it's an ordinary parsed LLM section
 again, it streams live with the rest of the report — the SSE ordering bug from Issue
@@ -461,7 +497,8 @@ feature live:**
 **Drift guardrail (Issue #925, detection only):** `parse_investigation_response()` calls
 `_check_activity_summary_drift()` after parsing, which logs a WARNING if the parsed
 `activity_summary` text contains banned substrings, snake_case-looking tokens, or lines
-missing a leading time — visibility for iterating on prompt quality, never a rewrite or
+missing a leading weekday, date and time (Issue #1674; `Sat 11-21 10:53 AM`, `Sat Nov 21,
+10:53 AM` also accepted) — visibility for iterating on prompt quality, never a rewrite or
 rejection of the model's output.
 
 ### Fallback

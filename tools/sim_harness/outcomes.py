@@ -260,6 +260,17 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # comfort_family_switch plus the live "comfort_family" engine attribute.
         "thermostat_mode_set",
         "comfort_switch_held",
+        # Issue #1676: thermostat_recalibration_started / _ended report a sensor-health episode (the thermostat's
+        # reading jumped after a heating shutdown and is treated as false until it settles), the same class as
+        # indoor_sensor_unavailable / indoor_source_changed above. They never command HVAC. The previous semantics
+        # (unmapped -> 'unknown:<type>' decision) were wrong for the same reason as every sibling: an episode ending
+        # at the moment a scenario asserts (golden override_adopted_on_matching_decision: a synthetic 66 -> 74 F step
+        # right after heating, timed out 60 min later at 14:00) shadowed the real override_detected outcome under
+        # last-decision-wins. Cannot hide a real failure: the decisions made during and after an episode still emit
+        # their own deciding events, and which sensor the room reading came from is still announced by
+        # indoor_source_changed (also unmapped) and asserted through engine state and the #1676 tests.
+        "thermostat_recalibration_started",
+        "thermostat_recalibration_ended",
     }
 )
 

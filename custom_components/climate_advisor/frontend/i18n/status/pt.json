@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "leitura do sensor mais preciso inválida — a usar o termóstato",
   "status.indoor_source.reason_non_numeric": "leitura do sensor mais preciso não numérica — a usar o termóstato",
   "status.indoor_source.reason_not_proven": "sensor mais preciso não validado — a usar o termóstato",
+  "status.indoor_source.reason_recal_settled": "termostato estabilizado após recalibrar",
+  "status.indoor_source.reason_recal_started": "termostato a recalibrar após o aquecimento parar",
   "status.indoor_source.reason_setting_changed": "definição do sensor interior alterada",
   "status.indoor_source.reason_setting_off": "definição desativada",
   "status.indoor_source.reason_sleep_ended": "período de sono terminado",

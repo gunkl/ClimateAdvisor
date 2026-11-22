@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "mesure du capteur plus précis invalide — utilisation du thermostat",
   "status.indoor_source.reason_non_numeric": "mesure du capteur plus précis non numérique — utilisation du thermostat",
   "status.indoor_source.reason_not_proven": "capteur plus précis non validé — utilisation du thermostat",
+  "status.indoor_source.reason_recal_settled": "thermostat stabilisé après le recalibrage",
+  "status.indoor_source.reason_recal_started": "thermostat en recalibrage après l’arrêt du chauffage",
   "status.indoor_source.reason_setting_changed": "réglage du capteur intérieur modifié",
   "status.indoor_source.reason_setting_off": "réglage désactivé",
   "status.indoor_source.reason_sleep_ended": "période de nuit terminée",

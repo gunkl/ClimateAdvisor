@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "lettura del sensore più preciso non valida — uso del termostato",
   "status.indoor_source.reason_non_numeric": "lettura del sensore più preciso non numerica — uso del termostato",
   "status.indoor_source.reason_not_proven": "sensore più preciso non verificato — uso del termostato",
+  "status.indoor_source.reason_recal_settled": "termostato stabilizzato dopo la ricalibrazione",
+  "status.indoor_source.reason_recal_started": "termostato in ricalibrazione dopo lo stop del riscaldamento",
   "status.indoor_source.reason_setting_changed": "impostazione del sensore interno modificata",
   "status.indoor_source.reason_setting_off": "impostazione disattivata",
   "status.indoor_source.reason_sleep_ended": "periodo notturno terminato",

@@ -162,6 +162,12 @@
     // What is happening now, and why: the Status sentence rides on the hallway (thermostat) card. The header health
     // line only says whether automation is on; this says what it is doing (nat-vent, a grace period, a pause).
     var statusLine = '<div class="n" id="status-automation-line">' + ND.iso(t('automation_line', { phrase: automationPhrase(d) })) + '</div>';
+    // Issue #1676: the thermostat reads falsely high after a heating stop; say so, and which sensor CA reads meanwhile.
+    var recal = d.thermostat_recalibration || null;
+    if (recal) {
+      statusLine += '<div class="n" id="status-thermostat-recal">' + esc(recal.name
+        ? t('thermostat_recal_reading', { name: recal.name }) : t('thermostat_recal_no_alt')) + '</div>';
+    }
     var cards = [];
     var metas = ((cd || {}).indoor_sensors || []).filter(function (m) { return latestReading(cd, m.id); });
     if (!metas.length) {
@@ -171,7 +177,8 @@
       var holder = metas.filter(function (m) { return m.role_code === 'thermostat'; })[0] || metas.filter(function (m) { return m.primary; })[0] || metas[0];
       metas.forEach(function (m, i) {
         var r = latestReading(cd, m.id), isBed = m.role_code === 'bedroom_sensor';
-        var reads = isBed ? !!d.sleep_indoor_sensor_active : (m.primary && !d.sleep_indoor_sensor_active);
+        var reads = recal && recal.entity ? m.id === recal.entity
+          : isBed ? !!d.sleep_indoor_sensor_active : (m.primary && !d.sleep_indoor_sensor_active);
         var id = m === holder ? 'status-card-hallway' : isBed ? 'status-card-bedroom' : 'status-card-sensor-' + i;
         var note = (m === holder ? hvacNote + statusLine : '') +
           (reads ? '<div class="n"' + (isBed ? ' id="status-sleep-sensor"' : '') + '>' + esc(t('reads_this_sensor')) + '</div>'

@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "स्थिति अभी ज्ञात नहीं",
   "dashboard.status.ran_today": "सिस्टम आज {n, plural, one {# मिनट} other {# मिनट}} चला",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor बेडरूम का सेंसर पढ़ता है (नींद का समय)",
+  "dashboard.status.thermostat_recal_reading": "हीटिंग रुकने के बाद थर्मोस्टैट फिर से कैलिब्रेट हो रहा है — स्थिर होने तक Climate Advisor {name} पढ़ता है",
+  "dashboard.status.thermostat_recal_no_alt": "हीटिंग रुकने के बाद थर्मोस्टैट फिर से कैलिब्रेट हो रहा है — अभी उसकी रीडिंग बहुत ज़्यादा है",
   "dashboard.status.reads_in_sleep": "Climate Advisor इसे नींद के समय में पढ़ता है",
   "dashboard.status.reads_this_sensor": "Climate Advisor यह सेंसर पढ़ता है",
   "dashboard.status.says_cooler": "{who} के अनुसार {theirs}, {name} से {gap}° ठंडा",

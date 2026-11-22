@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "meetwaarde van nauwkeurigere sensor ongeldig — thermostaat wordt gebruikt",
   "status.indoor_source.reason_non_numeric": "meetwaarde van nauwkeurigere sensor is geen getal — thermostaat wordt gebruikt",
   "status.indoor_source.reason_not_proven": "nauwkeurigere sensor nog niet betrouwbaar gebleken — thermostaat wordt gebruikt",
+  "status.indoor_source.reason_recal_settled": "thermostaat tot rust gekomen na het kalibreren",
+  "status.indoor_source.reason_recal_started": "thermostaat kalibreert opnieuw na het stoppen van de verwarming",
   "status.indoor_source.reason_setting_changed": "instelling voor de binnensensor gewijzigd",
   "status.indoor_source.reason_setting_off": "instelling uit",
   "status.indoor_source.reason_sleep_ended": "slaapperiode afgelopen",

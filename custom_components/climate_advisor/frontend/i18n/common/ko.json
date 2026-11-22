@@ -1,4 +1,5 @@
 {
+  "common.date_time": "{date} {time}",
   "common.duration.hours": "{n, plural, other {#시간}}",
   "common.duration.hours_frac": "{n, number, ::.0}시간",
   "common.duration.min": "{n, plural, other {#분}}",

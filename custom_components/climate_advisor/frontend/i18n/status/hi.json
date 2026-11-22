@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "सटीक सेंसर की रीडिंग अमान्य — थर्मोस्टैट का उपयोग",
   "status.indoor_source.reason_non_numeric": "सटीक सेंसर की रीडिंग संख्या नहीं है — थर्मोस्टैट का उपयोग",
   "status.indoor_source.reason_not_proven": "सटीक सेंसर की पुष्टि नहीं हुई — थर्मोस्टैट का उपयोग",
+  "status.indoor_source.reason_recal_settled": "फिर से कैलिब्रेट होने के बाद थर्मोस्टैट स्थिर",
+  "status.indoor_source.reason_recal_started": "हीटिंग रुकने के बाद थर्मोस्टैट फिर से कैलिब्रेट हो रहा है",
   "status.indoor_source.reason_setting_changed": "आंतरिक सेंसर की सेटिंग बदली गई",
   "status.indoor_source.reason_setting_off": "सेटिंग बंद है",
   "status.indoor_source.reason_sleep_ended": "सोने का समय समाप्त",

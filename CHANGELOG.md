@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.67] — 2026-11-21
+
+### Added
+- **Thermostat recalibration after a furnace high-limit trip (#1676):** when the furnace overheats and switches itself off before the room reaches the setpoint, some thermostats (the Ecobee on the reference home) report a reading 6-7 °F too high for 9-42 minutes. Climate Advisor now spots that jump, logs a warning, and shows a Repairs notice you can ignore. Until the thermostat settles it reads the room from your sleep sensor or a dedicated indoor sensor (one "room temperature now from ..." row each way in the Activity log), and the false readings no longer go into thermal learning or the prediction model. With no other sensor it warns and keeps learning clean. The Status card says the thermostat is recalibrating, and the AI Investigator sees it as a named event instead of an unexplained artifact. New option **Recalibration Guard** (Options > Temperature Sources, on by default).
+
 ## [0.9.66] — 2026-11-21
 
 ### Fixed

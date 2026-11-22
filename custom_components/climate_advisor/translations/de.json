@@ -266,7 +266,8 @@
           "indoor_humidity_entity": "Innenluftfeuchtigkeitssensor",
           "sleep_indoor_temp_entity": "Innentemperatursensor (Schlafzeit)",
           "sleep_indoor_humidity_entity": "Luftfeuchtigkeitssensor (Schlafzeit)",
-          "thermostat_companion_sensor": "Feinerer Thermostat-Sensor"
+          "thermostat_companion_sensor": "Feinerer Thermostat-Sensor",
+          "thermostat_recalibration_guard": "Kalibrierungsschutz"
         },
         "data_description": {
           "outdoor_temp_source": "Woher die Außentemperatur kommt. „Wetterdienst“ nutzt deine Wetter-Integration; mit einem eigenen Sensor oder Eingabehelfer kannst du eine bestimmte Entität verwenden. Wechselst du zurück zu „Wetterdienst“, wird die gewählte Entität entfernt.",
@@ -277,7 +278,8 @@
           "indoor_humidity_entity": "Der Luftfeuchtigkeitssensor in dem Raum, den Climate Advisor tagsüber abliest. Er wird im Status-Diagramm zusammen mit der gefühlten Raumtemperatur angezeigt. Nur für das Diagramm: Keine Heiz- oder Kühlentscheidung nutzt ihn. Leer lassen für automatische Erkennung.",
           "sleep_indoor_temp_entity": "Optionaler Schlafzimmersensor für Komfort- und Automatisierungsentscheidungen, solange dein Schlafplan aktiv ist (das thermische Modell nutzt immer den Hauptsensor). Fällt auf den Hauptsensor zurück, wenn er nicht verfügbar ist. Leer lassen zum Deaktivieren.",
           "sleep_indoor_humidity_entity": "Der Luftfeuchtigkeitssensor im Schlafzimmer, der im Status-Diagramm angezeigt wird, solange dein Schlafplan aktiv ist. Nur für das Diagramm: Keine Heiz- oder Kühlentscheidung nutzt ihn. Leer lassen für automatische Erkennung.",
-          "thermostat_companion_sensor": "Viele Thermostate melden an der Hauptentität ganze Grad, haben aber am selben Gerät auch einen feineren Temperatursensor. „Auto“ nutzt diesen feineren Sensor, sobald er sich als derselbe Messwert erweist (innerhalb von 1 °F; er zeigt Bruchteile, während das Thermostat ganze Grad zeigt), und fällt auf den Messwert des Thermostats zurück, wenn er fehlt oder abweicht. Gilt nur für die Quelle „eingebauter Thermostat-Sensor“. „Aus“ nutzt immer den Messwert des Thermostats."
+          "thermostat_companion_sensor": "Viele Thermostate melden an der Hauptentität ganze Grad, haben aber am selben Gerät auch einen feineren Temperatursensor. „Auto“ nutzt diesen feineren Sensor, sobald er sich als derselbe Messwert erweist (innerhalb von 1 °F; er zeigt Bruchteile, während das Thermostat ganze Grad zeigt), und fällt auf den Messwert des Thermostats zurück, wenn er fehlt oder abweicht. Gilt nur für die Quelle „eingebauter Thermostat-Sensor“. „Aus“ nutzt immer den Messwert des Thermostats.",
+          "thermostat_recalibration_guard": "Manche Thermostate zeigen bis zu etwa 40 Minuten lang mehrere Grad zu viel an, nachdem sich die Heizung selbst abgeschaltet hat (ihr Überhitzungsschutz hat ausgelöst), obwohl der Raum noch unter dem Sollwert liegt. Ein (Standard): Climate Advisor erkennt den Sprung, protokolliert eine Warnung, zeigt einen Reparatur-Hinweis, den du ignorieren kannst, lässt diese Werte bei dem weg, was es über das Haus lernt, und liest den Raum von deinem Schlafsensor oder eigenen Innensensor, bis sich das Thermostat beruhigt hat. Gilt nur, wenn die Innenquelle der eingebaute Sensor des Thermostats ist. Aus ignoriert den Sprung."
         }
       },
       "sensors": {
@@ -613,6 +615,14 @@
     "ai_settings_unified": {
       "title": "KI-Einstellungen gelten jetzt für alle Zonen",
       "description": "KI-Einstellungen gelten jetzt gemeinsam für alle Zonen. Deine Zonen hatten unterschiedliche KI-Einstellungen, daher hat Climate Advisor die Einstellungen von {zone} behalten und für jede Zone übernommen. Die täglichen Limits für KI-Anfragen zählen jetzt über alle Zonen hinweg.\n\nZum Ändern öffne die KI-Einstellungen in den Optionen einer beliebigen Zone."
+    },
+    "thermostat_recalibration": {
+      "title": "Thermostat zeigt nach dem Heizstopp zu viel an",
+      "description": "Um {time} hat die Heizung in {zone} gestoppt, bevor der Raum den Sollwert erreicht hat, und {thermostat} ist auf einen Wert gesprungen, der mehrere Grad zu hoch ist. Meist bedeutet das, dass die Heizung überhitzt ist und ihr Überhitzungsschutz sie abgeschaltet hat; danach kalibriert sich das Thermostat 10 bis 40 Minuten lang neu. Bis es sich beruhigt hat, liest Climate Advisor den Raum von {sensor} und lässt die falschen Werte bei dem weg, was es lernt.\n\nWenn das oft passiert, lass die Heizung prüfen: ein verschmutzter Filter oder verdeckte Lüftungsgitter sind häufige Ursachen. Ignoriere diesen Hinweis, um ihn nicht mehr zu sehen; Climate Advisor behandelt den Fall weiter genauso."
+    },
+    "thermostat_recalibration_no_alternate": {
+      "title": "Thermostat zeigt nach dem Heizstopp zu viel an",
+      "description": "Um {time} hat die Heizung in {zone} gestoppt, bevor der Raum den Sollwert erreicht hat, und {thermostat} ist auf einen Wert gesprungen, der mehrere Grad zu hoch ist. Meist bedeutet das, dass die Heizung überhitzt ist und ihr Überhitzungsschutz sie abgeschaltet hat; danach kalibriert sich das Thermostat 10 bis 40 Minuten lang neu. Climate Advisor lässt die falschen Werte bei dem weg, was es lernt, aber diese Zone hat keinen anderen Temperatursensor, um den Raum in der Zwischenzeit zu lesen: Füge unter Temperaturquellen einen Schlafsensor oder einen eigenen Innensensor hinzu.\n\nWenn das oft passiert, lass die Heizung prüfen: ein verschmutzter Filter oder verdeckte Lüftungsgitter sind häufige Ursachen. Ignoriere diesen Hinweis, um ihn nicht mehr zu sehen."
     }
   },
   "common": {

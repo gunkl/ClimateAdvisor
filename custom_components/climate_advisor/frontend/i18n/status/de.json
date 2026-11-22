@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "Messwert des feineren Sensors ungültig — Thermostat wird verwendet",
   "status.indoor_source.reason_non_numeric": "Messwert des feineren Sensors keine Zahl — Thermostat wird verwendet",
   "status.indoor_source.reason_not_proven": "feinerer Sensor noch nicht bewährt — Thermostat wird verwendet",
+  "status.indoor_source.reason_recal_settled": "Thermostat nach der Neukalibrierung beruhigt",
+  "status.indoor_source.reason_recal_started": "Thermostat kalibriert sich nach dem Heizstopp neu",
   "status.indoor_source.reason_setting_changed": "Einstellung für den Innensensor geändert",
   "status.indoor_source.reason_setting_off": "Einstellung aus",
   "status.indoor_source.reason_sleep_ended": "Schlafphase beendet",

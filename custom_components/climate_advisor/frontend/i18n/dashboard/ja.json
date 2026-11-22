@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "状態はまだ不明です",
   "dashboard.status.ran_today": "本日の運転時間：{n, plural, other {# 分}}",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor は寝室のセンサーを参照します（睡眠時間帯）",
+  "dashboard.status.thermostat_recal_reading": "暖房停止後にサーモスタットが再校正中 — 落ち着くまで Climate Advisor は {name} を読み取ります",
+  "dashboard.status.thermostat_recal_no_alt": "暖房停止後にサーモスタットが再校正中 — 現在の表示は高すぎます",
   "dashboard.status.reads_in_sleep": "Climate Advisor は睡眠時間帯にこれを参照します",
   "dashboard.status.reads_this_sensor": "Climate Advisor はこのセンサーを参照します",
   "dashboard.status.says_cooler": "{who}は{theirs}、{name}より{gap}°低い",

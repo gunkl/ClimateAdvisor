@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "daha hassas sensör okuması geçersiz — termostat kullanılıyor",
   "status.indoor_source.reason_non_numeric": "daha hassas sensör okuması sayı değil — termostat kullanılıyor",
   "status.indoor_source.reason_not_proven": "daha hassas sensör henüz doğrulanmadı — termostat kullanılıyor",
+  "status.indoor_source.reason_recal_settled": "termostat yeniden kalibrasyondan sonra oturdu",
+  "status.indoor_source.reason_recal_started": "ısıtma durduktan sonra termostat yeniden kalibre oluyor",
   "status.indoor_source.reason_setting_changed": "iç sensör ayarı değişti",
   "status.indoor_source.reason_setting_off": "ayar kapalı",
   "status.indoor_source.reason_sleep_ended": "uyku penceresi sona erdi",

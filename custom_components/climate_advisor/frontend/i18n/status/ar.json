@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "قراءة المستشعر الأدق غير صالحة — يُستخدم الثرموستات",
   "status.indoor_source.reason_non_numeric": "قراءة المستشعر الأدق ليست رقمًا — يُستخدم الثرموستات",
   "status.indoor_source.reason_not_proven": "لم يتم التحقق من المستشعر الأدق — يُستخدم الثرموستات",
+  "status.indoor_source.reason_recal_settled": "استقر الثرموستات بعد إعادة المعايرة",
+  "status.indoor_source.reason_recal_started": "الثرموستات يعيد المعايرة بعد توقف التدفئة",
   "status.indoor_source.reason_setting_changed": "تم تغيير إعداد المستشعر الداخلي",
   "status.indoor_source.reason_setting_off": "الإعداد متوقف",
   "status.indoor_source.reason_sleep_ended": "انتهت فترة النوم",

@@ -266,7 +266,8 @@
           "indoor_humidity_entity": "Czujnik wilgotności wewnętrznej",
           "sleep_indoor_temp_entity": "Czujnik temperatury wewnętrznej (sen)",
           "sleep_indoor_humidity_entity": "Czujnik wilgotności (sen)",
-          "thermostat_companion_sensor": "Dokładniejszy czujnik termostatu"
+          "thermostat_companion_sensor": "Dokładniejszy czujnik termostatu",
+          "thermostat_recalibration_guard": "Ochrona kalibracji"
         },
         "data_description": {
           "outdoor_temp_source": "Skąd odczytywać temperaturę na zewnątrz. „Usługa pogodowa” korzysta z integracji pogodowej; dedykowany czujnik lub pomocnik wejściowy pozwala użyć konkretnej encji. Powrót do „Usługi pogodowej” usuwa wybraną encję.",
@@ -277,7 +278,8 @@
           "indoor_humidity_entity": "Czujnik wilgotności w pomieszczeniu, które Climate Advisor odczytuje w ciągu dnia, pokazywany na wykresie Status razem z temperaturą odczuwalną w pomieszczeniu. Tylko do wykresu: żadna decyzja o ogrzewaniu ani chłodzeniu go nie używa. Zostaw puste, aby wykryć automatycznie.",
           "sleep_indoor_temp_entity": "Opcjonalny czujnik w sypialni używany do decyzji o komforcie i automatyzacji, gdy aktywny jest harmonogram snu (model termiczny zawsze używa czujnika głównego). Gdy jest niedostępny, używany jest czujnik główny. Zostaw puste, aby wyłączyć.",
           "sleep_indoor_humidity_entity": "Czujnik wilgotności w sypialni, pokazywany na wykresie Status, gdy aktywny jest harmonogram snu. Tylko do wykresu: żadna decyzja o ogrzewaniu ani chłodzeniu go nie używa. Zostaw puste, aby wykryć automatycznie.",
-          "thermostat_companion_sensor": "Wiele termostatów podaje w głównej encji pełne stopnie, ale ma na tym samym urządzeniu także dokładniejszy czujnik temperatury. Tryb Auto używa tego dokładniejszego czujnika, gdy okaże się, że pokazuje ten sam odczyt (w granicach 1 °F, z ułamkami, gdy termostat pokazuje pełne stopnie), a gdy go zabraknie lub się rozjedzie, wraca do odczytu samego termostatu. Dotyczy tylko źródła „wbudowany czujnik termostatu”. Tryb Wył. zawsze używa odczytu samego termostatu."
+          "thermostat_companion_sensor": "Wiele termostatów podaje w głównej encji pełne stopnie, ale ma na tym samym urządzeniu także dokładniejszy czujnik temperatury. Tryb Auto używa tego dokładniejszego czujnika, gdy okaże się, że pokazuje ten sam odczyt (w granicach 1 °F, z ułamkami, gdy termostat pokazuje pełne stopnie), a gdy go zabraknie lub się rozjedzie, wraca do odczytu samego termostatu. Dotyczy tylko źródła „wbudowany czujnik termostatu”. Tryb Wył. zawsze używa odczytu samego termostatu.",
+          "thermostat_recalibration_guard": "Niektóre termostaty przez mniej więcej 40 minut pokazują wartość zawyżoną o kilka stopni, gdy piec sam się wyłączy (zadziała jego zabezpieczenie przed przegrzaniem), a pomieszczenie jest wciąż poniżej nastawy. Włączone (domyślnie): Climate Advisor wykrywa skok, zapisuje ostrzeżenie, pokazuje powiadomienie w Naprawach, które można zignorować, pomija te odczyty w tym, czego uczy się o domu, i odczytuje pomieszczenie z czujnika snu lub osobnego czujnika wewnętrznego, aż termostat się ustabilizuje. Dotyczy tylko sytuacji, gdy źródłem wewnętrznym jest wbudowany czujnik termostatu. Wyłączone ignoruje skok."
         }
       },
       "sensors": {
@@ -613,6 +615,14 @@
     "ai_settings_unified": {
       "title": "Ustawienia AI dotyczą teraz wszystkich stref",
       "description": "Ustawienia AI są teraz wspólne dla wszystkich stref. Twoje strefy miały różne ustawienia AI, więc Climate Advisor zachował ustawienia strefy {zone} i użył ich dla każdej strefy. Dzienne limity żądań AI liczą się teraz łącznie dla wszystkich stref.\n\nAby je zmienić, otwórz Ustawienia AI w opcjach dowolnej strefy."
+    },
+    "thermostat_recalibration": {
+      "title": "Termostat pokazuje za dużo po zatrzymaniu ogrzewania",
+      "description": "O {time} ogrzewanie w strefie {zone} zatrzymało się, zanim pomieszczenie osiągnęło nastawę, a {thermostat} skoczył do wartości zawyżonej o kilka stopni. Zwykle oznacza to, że piec się przegrzał i zabezpieczenie przed przegrzaniem go wyłączyło; potem termostat kalibruje się przez 10–40 minut. Do czasu stabilizacji Climate Advisor odczytuje pomieszczenie z {sensor} i pomija fałszywe odczyty w nauce.\n\nJeśli zdarza się to często, zleć przegląd pieca: brudny filtr lub zasłonięte kratki to częste przyczyny. Zignoruj to powiadomienie, aby przestać je widzieć; Climate Advisor nadal postępuje tak samo."
+    },
+    "thermostat_recalibration_no_alternate": {
+      "title": "Termostat pokazuje za dużo po zatrzymaniu ogrzewania",
+      "description": "O {time} ogrzewanie w strefie {zone} zatrzymało się, zanim pomieszczenie osiągnęło nastawę, a {thermostat} skoczył do wartości zawyżonej o kilka stopni. Zwykle oznacza to, że piec się przegrzał i zabezpieczenie przed przegrzaniem go wyłączyło; potem termostat kalibruje się przez 10–40 minut. Climate Advisor pomija fałszywe odczyty w nauce, ale ta strefa nie ma innego czujnika temperatury, z którego można w tym czasie odczytać pomieszczenie: dodaj czujnik snu lub osobny czujnik wewnętrzny w sekcji Źródła temperatury.\n\nJeśli zdarza się to często, zleć przegląd pieca: brudny filtr lub zasłonięte kratki to częste przyczyny. Zignoruj to powiadomienie, aby przestać je widzieć."
     }
   },
   "common": {

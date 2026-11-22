@@ -266,7 +266,8 @@
           "indoor_humidity_entity": "Sensor de humedad interior",
           "sleep_indoor_temp_entity": "Sensor de temperatura interior para dormir",
           "sleep_indoor_humidity_entity": "Sensor de humedad para dormir",
-          "thermostat_companion_sensor": "Sensor más preciso del termostato"
+          "thermostat_companion_sensor": "Sensor más preciso del termostato",
+          "thermostat_recalibration_guard": "Protección de recalibrado"
         },
         "data_description": {
           "outdoor_temp_source": "De dónde leer la temperatura exterior. «Servicio meteorológico» usa tu integración meteorológica; un sensor dedicado o un ayudante de entrada te permite usar una entidad concreta. Volver a «Servicio meteorológico» elimina la entidad elegida.",
@@ -277,7 +278,8 @@
           "indoor_humidity_entity": "El sensor de humedad de la habitación que Climate Advisor lee de día, mostrado en el gráfico de estado junto con la sensación térmica de la habitación. Solo para el gráfico: ninguna decisión de calefacción o refrigeración lo usa. Déjalo en blanco para detectarlo automáticamente.",
           "sleep_indoor_temp_entity": "Sensor opcional del dormitorio que se usa para las decisiones de confort y automatización mientras tu horario de sueño está activo (el modelo térmico siempre usa el sensor principal). Si no está disponible, se usa el sensor principal. Déjalo en blanco para desactivarlo.",
           "sleep_indoor_humidity_entity": "El sensor de humedad del dormitorio, mostrado en el gráfico de estado mientras tu horario de sueño está activo. Solo para el gráfico: ninguna decisión de calefacción o refrigeración lo usa. Déjalo en blanco para detectarlo automáticamente.",
-          "thermostat_companion_sensor": "Muchos termostatos indican grados enteros en la entidad principal, pero también tienen un sensor de temperatura más fino en el mismo dispositivo. «Auto» usa ese sensor más fino en cuanto demuestra dar la misma lectura (con 1 grado F de margen, mostrando fracciones mientras el termostato muestra grados enteros) y vuelve a la lectura del propio termostato si desaparece o discrepa. Solo se aplica a la fuente del sensor integrado del termostato. «Desactivado» usa siempre la lectura del propio termostato."
+          "thermostat_companion_sensor": "Muchos termostatos indican grados enteros en la entidad principal, pero también tienen un sensor de temperatura más fino en el mismo dispositivo. «Auto» usa ese sensor más fino en cuanto demuestra dar la misma lectura (con 1 grado F de margen, mostrando fracciones mientras el termostato muestra grados enteros) y vuelve a la lectura del propio termostato si desaparece o discrepa. Solo se aplica a la fuente del sensor integrado del termostato. «Desactivado» usa siempre la lectura del propio termostato.",
+          "thermostat_recalibration_guard": "Algunos termostatos marcan varios grados de más durante hasta unos 40 minutos después de que la caldera se apague sola (salta su seguridad por sobretemperatura) mientras la habitación sigue por debajo de la consigna. Activado (por defecto), Climate Advisor detecta el salto, registra una advertencia, muestra un aviso de Reparaciones que puedes ignorar, deja esas lecturas fuera de lo que aprende sobre la casa y lee la habitación desde tu sensor de noche o tu sensor interior dedicado hasta que el termostato se estabilice. Solo se aplica cuando la fuente interior es el sensor integrado del termostato. Desactivado ignora el salto."
         }
       },
       "sensors": {
@@ -613,6 +615,14 @@
     "ai_settings_unified": {
       "title": "Los ajustes de IA ahora se aplican a todas las zonas",
       "description": "Los ajustes de IA ahora son comunes a todas las zonas. Tus zonas tenían ajustes de IA distintos, así que Climate Advisor conservó los de {zone} y los usó para todas las zonas. Los límites diarios de solicitudes de IA ahora cuentan para todas las zonas en conjunto.\n\nPara cambiarlos, abre Ajustes de la IA en las opciones de cualquier zona."
+    },
+    "thermostat_recalibration": {
+      "title": "Lectura del termostato demasiado alta tras parar la calefacción",
+      "description": "A las {time} la calefacción de {zone} se paró antes de que la habitación llegara a la consigna, y {thermostat} saltó a una lectura varios grados demasiado alta. Esto suele significar que la caldera se sobrecalentó y su seguridad por sobretemperatura la apagó; después, el termostato se recalibra durante 10 a 40 minutos. Hasta que se estabilice, Climate Advisor lee la habitación desde {sensor} y deja las lecturas falsas fuera de lo que aprende.\n\nSi ocurre a menudo, haz revisar la caldera: un filtro sucio o rejillas tapadas son causas habituales. Ignora este aviso para dejar de verlo; Climate Advisor lo seguirá gestionando igual."
+    },
+    "thermostat_recalibration_no_alternate": {
+      "title": "Lectura del termostato demasiado alta tras parar la calefacción",
+      "description": "A las {time} la calefacción de {zone} se paró antes de que la habitación llegara a la consigna, y {thermostat} saltó a una lectura varios grados demasiado alta. Esto suele significar que la caldera se sobrecalentó y su seguridad por sobretemperatura la apagó; después, el termostato se recalibra durante 10 a 40 minutos. Climate Advisor deja las lecturas falsas fuera de lo que aprende, pero esta zona no tiene otro sensor de temperatura para leer la habitación mientras tanto: añade un sensor de noche o un sensor interior dedicado en Fuentes de temperatura.\n\nSi ocurre a menudo, haz revisar la caldera: un filtro sucio o rejillas tapadas son causas habituales. Ignora este aviso para dejar de verlo."
     }
   },
   "common": {

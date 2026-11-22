@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "показания более точного датчика недействительны — используется термостат",
   "status.indoor_source.reason_non_numeric": "показания более точного датчика не являются числом — используется термостат",
   "status.indoor_source.reason_not_proven": "более точный датчик не подтверждён — используется термостат",
+  "status.indoor_source.reason_recal_settled": "термостат стабилизировался после калибровки",
+  "status.indoor_source.reason_recal_started": "термостат калибруется после остановки отопления",
   "status.indoor_source.reason_setting_changed": "изменена настройка внутреннего датчика",
   "status.indoor_source.reason_setting_off": "настройка отключена",
   "status.indoor_source.reason_sleep_ended": "период сна закончился",

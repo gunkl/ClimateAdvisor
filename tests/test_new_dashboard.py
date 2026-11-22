@@ -257,6 +257,14 @@ PARITY = [
         "",
     ),
     (
+        ["status-thermostat-recal"],
+        "status-thermostat-recal",
+        "Thermostat recalibration note (Issue #1676): reading falsely high, which sensor is read meanwhile",
+        ['id="status-thermostat-recal"', "thermostat_recal_reading", "thermostat_recal_no_alt"],
+        "placed",
+        "",
+    ),
+    (
         [],
         "sleep_indoor_sensor_active",
         "Sleep sensor note on the Bedroom card",

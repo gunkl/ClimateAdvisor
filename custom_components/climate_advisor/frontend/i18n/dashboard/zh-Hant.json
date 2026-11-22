@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "狀態尚不明",
   "dashboard.status.ran_today": "系統今天運轉了 {n, plural, other {# 分鐘}}",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor 讀取臥室感測器（睡眠時段）",
+  "dashboard.status.thermostat_recal_reading": "暖氣停止後溫控器正在重新校準 — 在其穩定之前，Climate Advisor 讀取 {name}",
+  "dashboard.status.thermostat_recal_no_alt": "暖氣停止後溫控器正在重新校準 — 目前其讀數過高",
   "dashboard.status.reads_in_sleep": "Climate Advisor 在睡眠時段讀取此感測器",
   "dashboard.status.reads_this_sensor": "Climate Advisor 讀取此感測器",
   "dashboard.status.says_cooler": "{who}顯示 {theirs}，比{name}低 {gap}°",

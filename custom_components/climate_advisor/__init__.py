@@ -104,6 +104,7 @@ from .const import (
     FAN_MODE_WHOLE_HOUSE,
     ISSUE_AI_SETTINGS_UNIFIED,
     ISSUE_BUILTIN_CLAUDE_DEPRECATED,
+    ISSUE_THERMOSTAT_RECALIBRATION,
     PANEL_FRONTEND_PATH,
     PANEL_URL,
     TEMP_SOURCE_CLIMATE_FALLBACK,
@@ -823,7 +824,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     HA calls this after ``async_unload_entry`` (which already ran the final save), and only on deletion, not
     on a reload or settings save. Never raises: a failed delete is logged and must not block the removal.
     """
-    for issue_id in (f"weather_entity_not_found_{entry.entry_id}", f"reload_needed_{entry.entry_id}"):
+    for issue_id in (
+        f"weather_entity_not_found_{entry.entry_id}",
+        f"reload_needed_{entry.entry_id}",
+        f"{ISSUE_THERMOSTAT_RECALIBRATION}_{entry.entry_id}",  # Issue #1676
+    ):
         ir.async_delete_issue(hass, DOMAIN, issue_id)
     try:
         await hass.async_add_executor_job(

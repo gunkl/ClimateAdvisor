@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "الحالة غير معروفة بعد",
   "dashboard.status.ran_today": "عمل النظام اليوم {n, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتين} few {# دقائق} many {# دقيقة} other {# دقيقة}}",
   "dashboard.status.reads_bedroom_sleep": "يقرأ Climate Advisor مستشعر غرفة النوم (فترة النوم)",
+  "dashboard.status.thermostat_recal_reading": "الثرموستات يعيد المعايرة بعد توقف التدفئة — يقرأ Climate Advisor {name} حتى يستقر",
+  "dashboard.status.thermostat_recal_no_alt": "الثرموستات يعيد المعايرة بعد توقف التدفئة — قراءته مرتفعة جدًا حاليًا",
   "dashboard.status.reads_in_sleep": "يقرؤه Climate Advisor في فترة النوم",
   "dashboard.status.reads_this_sensor": "يقرأ Climate Advisor هذا المستشعر",
   "dashboard.status.says_cooler": "{who} يشير إلى {theirs}، أبرد من {name} بمقدار {gap}°",

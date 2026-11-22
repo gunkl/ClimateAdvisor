@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "odczyt dokładniejszego czujnika jest nieprawidłowy — używany jest termostat",
   "status.indoor_source.reason_non_numeric": "odczyt dokładniejszego czujnika nie jest liczbą — używany jest termostat",
   "status.indoor_source.reason_not_proven": "dokładniejszy czujnik niepotwierdzony — używany jest termostat",
+  "status.indoor_source.reason_recal_settled": "termostat ustabilizowany po kalibracji",
+  "status.indoor_source.reason_recal_started": "termostat kalibruje się po zatrzymaniu ogrzewania",
   "status.indoor_source.reason_setting_changed": "zmieniono ustawienie czujnika wewnętrznego",
   "status.indoor_source.reason_setting_off": "ustawienie wyłączone",
   "status.indoor_source.reason_sleep_ended": "okno snu zakończone",

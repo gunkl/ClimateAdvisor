@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "高精度感測器讀數無效，改用溫控器",
   "status.indoor_source.reason_non_numeric": "高精度感測器讀數不是數字，改用溫控器",
   "status.indoor_source.reason_not_proven": "高精度感測器尚未通過驗證，改用溫控器",
+  "status.indoor_source.reason_recal_settled": "溫控器重新校準後已穩定",
+  "status.indoor_source.reason_recal_started": "暖氣停止後溫控器正在重新校準",
   "status.indoor_source.reason_setting_changed": "室內感測器設定已變更",
   "status.indoor_source.reason_setting_off": "設定已關閉",
   "status.indoor_source.reason_sleep_ended": "睡眠時段結束",

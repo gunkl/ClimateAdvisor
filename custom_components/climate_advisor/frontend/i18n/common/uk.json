@@ -1,4 +1,5 @@
 {
+  "common.date_time": "{date}, {time}",
   "common.duration.hours": "{n, plural, one {# год} few {# год} many {# год} other {# год}}",
   "common.duration.hours_frac": "{n, number, ::.0} год",
   "common.duration.min": "{n, plural, one {# хв} few {# хв} many {# хв} other {# хв}}",

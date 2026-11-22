@@ -534,6 +534,7 @@ class TestSmallSinks:
             sleep_reason=None,
             companion_entity="sensor.finer",
             companion_reason="inconsistent",
+            recal_entity=None,
         )
         coord._companion_for_resolver = lambda: object()
         msg = coord._indoor_source_reason(reading, "climate.t", "finer_sensor")

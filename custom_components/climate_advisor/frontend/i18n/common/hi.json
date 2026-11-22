@@ -1,4 +1,5 @@
 {
+  "common.date_time": "{date}, {time}",
   "common.duration.hours": "{n, plural, one {# घंटा} other {# घंटे}}",
   "common.duration.hours_frac": "{n, number, ::.0} घंटे",
   "common.duration.min": "{n, plural, one {# मिनट} other {# मिनट}}",

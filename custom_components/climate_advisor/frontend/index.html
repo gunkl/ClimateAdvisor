@@ -1222,6 +1222,15 @@
   // The reading cards (Issue #1230 R2): one card per indoor sensor, outdoor sensor against the weather service, today,
   // doors / windows with the fan, occupancy with the comfort score, and the automation Status. Every reading the old
   // grid showed is still here.
+  // Issue #1676: the thermostat reads falsely high after a heating stop (classic dashboard: English).
+  function _recalNote(data) {
+    const r = data && data.thermostat_recalibration;
+    if (!r) return '';
+    return '<div class="note" id="status-thermostat-recal">' + escapeHtml(r.name
+      ? `Thermostat recalibrating after the heating stopped — Climate Advisor reads ${r.name} until it settles`
+      : 'Thermostat recalibrating after the heating stopped — its reading is too high for now') + '</div>';
+  }
+
   function renderReadingCards() {
     const data = _lastStatus;
     const grid = document.getElementById('status-grid');
@@ -1240,17 +1249,20 @@
     const metas = ((CAChartV2.data() || {}).indoor_sensors || []).filter(m => _latestSensorReading(m.id));
     if (metas.length === 0) {
       cards.push(`<div class="status-item"><div class="label">Indoor · HVAC</div><div class="value">${indoorDisplay}</div>${hvacNote}` +
-        (data.sleep_indoor_sensor_active ? '<div class="note">Climate Advisor reads the bedroom sensor (sleep window)</div>' : '') + '</div>');
+        (data.sleep_indoor_sensor_active ? '<div class="note">Climate Advisor reads the bedroom sensor (sleep window)</div>' : '') +
+        _recalNote(data) + '</div>');
     } else {
       const holder = metas.find(m => m.role === 'thermostat') || metas.find(m => m.primary) || metas[0];
       metas.forEach(m => {
         const r = _latestSensorReading(m.id);
         const isBedroom = m.role === 'bedroom sensor';
-        const reads = isBedroom ? !!data.sleep_indoor_sensor_active : (m.primary && !data.sleep_indoor_sensor_active);
+        const recal = data.thermostat_recalibration;
+        const reads = recal && recal.entity ? m.id === recal.entity
+          : isBedroom ? !!data.sleep_indoor_sensor_active : (m.primary && !data.sleep_indoor_sensor_active);
         const role = m.role === 'thermostat' ? 'thermostat' : m.role;
         cards.push(`<div class="status-item" title="Logged ${escapeHtml(fmtTime(r.time))}"><div class="label">${escapeHtml(m.name)} · ${escapeHtml(role)}</div>` +
           `<div class="value">${r.temp.toFixed(1)}${unitSym}</div>` +
-          (m === holder ? hvacNote : '') +
+          (m === holder ? hvacNote + _recalNote(data) : '') +
           (reads ? '<div class="note">Climate Advisor reads this sensor</div>' : isBedroom ? '<div class="note">Climate Advisor reads it in the sleep window</div>' : '') + '</div>');
       });
     }

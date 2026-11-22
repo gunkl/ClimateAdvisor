@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "status nog onbekend",
   "dashboard.status.ran_today": "Systeem draaide vandaag {n, plural, one {# min} other {# min}}",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor leest de slaapkamersensor (slaapperiode)",
+  "dashboard.status.thermostat_recal_reading": "Thermostaat kalibreert opnieuw na het stoppen van de verwarming — Climate Advisor leest {name} tot hij tot rust komt",
+  "dashboard.status.thermostat_recal_no_alt": "Thermostaat kalibreert opnieuw na het stoppen van de verwarming — de waarde is voorlopig te hoog",
   "dashboard.status.reads_in_sleep": "Climate Advisor leest hem in de slaapperiode",
   "dashboard.status.reads_this_sensor": "Climate Advisor leest deze sensor",
   "dashboard.status.says_cooler": "{who} meldt {theirs}, {gap}° koeler dan {name}",

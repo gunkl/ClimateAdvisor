@@ -1,4 +1,5 @@
 {
+  "common.date_time": "{date}, {time}",
   "common.duration.hours": "{n, plural, one {# Std.} other {# Std.}}",
   "common.duration.hours_frac": "{n, number, ::.0} Std.",
   "common.duration.min": "{n, plural, one {# Min.} other {# Min.}}",

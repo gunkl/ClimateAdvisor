@@ -2818,8 +2818,15 @@ def samples_from_chart_log(
                     sp_row = _num(e.get("setpoint"))
                     if sp_row is not None:
                         last_active_sp["heat" if hv.lower() == _ACTIVE_HEAT else "cool"] = (ep, sp_row)
+            false_ids = _recal_false_ids(e)
             for key in ("indoor", "outdoor", "pred_outdoor", "setpoint", "lower", "upper"):
                 v = _num(e.get(key))
+                if (
+                    key == "indoor"
+                    and false_ids
+                    and (e.get("band_sensor") is None or e.get("band_sensor") in false_ids)
+                ):
+                    v = None  # Issue #1676: the row's comfort reading was the recalibrating thermostat's own
                 if v is not None:
                     state[key] = (ep, v)
             for key in ("windows_open",):
@@ -2834,9 +2841,9 @@ def samples_from_chart_log(
             if isinstance(sens, Mapping):
                 for sid, val in sens.items():
                     v = _num(val)
-                    if v is not None:
+                    if v is not None and str(sid) not in false_ids:
                         sensor_state[str(sid)] = (ep, v)
-            if primary:
+            if primary and not ({primary, *primary_aliases} & false_ids):
                 pv = _row_primary_value(e, primary, primary_aliases, in_sleep, tz)
                 if pv is not None:
                     sensor_state[primary] = (ep, pv)
@@ -2918,6 +2925,18 @@ def _commanded_setpoint(edge: float, commanded: float | None, other_edge: float 
     if other_edge is not None and (commanded >= other_edge if heat else commanded <= other_edge):
         return edge
     return commanded
+
+
+def _recal_false_ids(row: Mapping[str, Any]) -> frozenset[str]:
+    """The entities a chart_log row marks as reading falsely (thermostat recalibrating, Issue #1676), else empty.
+
+    The fit never learns from them on that row: their ``indoor_sensors`` values, the primary node when it is one of
+    them, and ``indoor`` when the row's comfort reading came from one of them (``band_sensor``) are left out, exactly
+    as a missing reading would be."""
+    ids = row.get("recal_false")
+    if not isinstance(ids, list):
+        return frozenset()
+    return frozenset(str(i) for i in ids if isinstance(i, str) and i)
 
 
 def _row_primary_value(

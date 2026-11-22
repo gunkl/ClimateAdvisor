@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "高精度传感器读数无效 — 改用恒温器",
   "status.indoor_source.reason_non_numeric": "高精度传感器读数不是数字 — 改用恒温器",
   "status.indoor_source.reason_not_proven": "高精度传感器尚未验证 — 改用恒温器",
+  "status.indoor_source.reason_recal_settled": "温控器重新校准后已稳定",
+  "status.indoor_source.reason_recal_started": "暖气停止后温控器正在重新校准",
   "status.indoor_source.reason_setting_changed": "室内传感器设置已更改",
   "status.indoor_source.reason_setting_off": "设置已关闭",
   "status.indoor_source.reason_sleep_ended": "睡眠时段已结束",

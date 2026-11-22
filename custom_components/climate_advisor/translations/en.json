@@ -266,7 +266,8 @@
           "indoor_humidity_entity": "Indoor Humidity Sensor",
           "sleep_indoor_temp_entity": "Sleep Indoor Temp Sensor",
           "sleep_indoor_humidity_entity": "Sleep Humidity Sensor",
-          "thermostat_companion_sensor": "Thermostat Finer Sensor"
+          "thermostat_companion_sensor": "Thermostat Finer Sensor",
+          "thermostat_recalibration_guard": "Recalibration Guard"
         },
         "data_description": {
           "outdoor_temp_source": "Where to read outside temperature. 'Weather service' uses your weather integration; a dedicated sensor or input helper lets you use a specific entity. Switching back to 'Weather service' removes the chosen entity.",
@@ -277,7 +278,8 @@
           "indoor_humidity_entity": "The humidity sensor in the room Climate Advisor reads by day, shown on the Status chart with how warm the room feels. Chart only: no heating or cooling decision uses it. Leave blank to detect automatically.",
           "sleep_indoor_temp_entity": "Optional bedroom sensor used for comfort and automation decisions while your sleep schedule is active (the thermal model always uses the primary sensor). Falls back to the primary sensor if unavailable. Leave blank to disable.",
           "sleep_indoor_humidity_entity": "The humidity sensor in the bedroom, shown on the Status chart while your sleep schedule is active. Chart only: no heating or cooling decision uses it. Leave blank to detect automatically.",
-          "thermostat_companion_sensor": "Many thermostats report whole degrees on the main entity but also have a finer temperature sensor on the same device. Auto uses that finer sensor once it proves to be the same reading (within 1 degree F, showing fractions while the thermostat shows whole degrees) and falls back to the thermostat's own reading if it goes missing or disagrees. Only applies to the thermostat's built-in sensor source. Off always uses the thermostat's own reading."
+          "thermostat_companion_sensor": "Many thermostats report whole degrees on the main entity but also have a finer temperature sensor on the same device. Auto uses that finer sensor once it proves to be the same reading (within 1 degree F, showing fractions while the thermostat shows whole degrees) and falls back to the thermostat's own reading if it goes missing or disagrees. Only applies to the thermostat's built-in sensor source. Off always uses the thermostat's own reading.",
+          "thermostat_recalibration_guard": "Some thermostats report a reading several degrees too high for up to about 40 minutes after the furnace shuts itself off (its high-limit safety trips) while the room is still below the setpoint. When on (default), Climate Advisor spots the jump, logs a warning, shows a Repairs notice you can ignore, keeps those readings out of what it learns about the house, and reads the room from your sleep sensor or dedicated indoor sensor until the thermostat settles. Only applies when the indoor source is the thermostat's built-in sensor. Off ignores the jump."
         }
       },
       "sensors": {
@@ -613,6 +615,14 @@
     "ai_settings_unified": {
       "title": "AI settings now apply to all zones",
       "description": "AI settings are now shared by all zones. Your zones had different AI settings, so Climate Advisor kept the settings of {zone} and used them for every zone. The daily AI request limits now count across all zones.\n\nTo change them, open AI settings in any zone's options."
+    },
+    "thermostat_recalibration": {
+      "title": "Thermostat reading too high after the heating stopped",
+      "description": "At {time} the heating in {zone} stopped before the room reached the setpoint, and {thermostat} jumped to a reading several degrees too high. This usually means the furnace overheated and its high-limit safety switched it off; the thermostat then recalibrates for 10 to 40 minutes. Until it settles, Climate Advisor reads the room from {sensor} and keeps the false readings out of what it learns.\n\nIf this happens often, have the furnace checked: a dirty filter or blocked vents are common causes. Ignore this notice to stop seeing it; Climate Advisor keeps handling it the same way."
+    },
+    "thermostat_recalibration_no_alternate": {
+      "title": "Thermostat reading too high after the heating stopped",
+      "description": "At {time} the heating in {zone} stopped before the room reached the setpoint, and {thermostat} jumped to a reading several degrees too high. This usually means the furnace overheated and its high-limit safety switched it off; the thermostat then recalibrates for 10 to 40 minutes. Climate Advisor keeps the false readings out of what it learns, but this zone has no other temperature sensor to read the room from meanwhile: add a sleep sensor or a dedicated indoor sensor in Temperature Sources.\n\nIf this happens often, have the furnace checked: a dirty filter or blocked vents are common causes. Ignore this notice to stop seeing it."
     }
   },
   "common": {

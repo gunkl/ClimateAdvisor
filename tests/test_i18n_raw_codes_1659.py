@@ -279,7 +279,7 @@ class TestIndoorSourceSleepReason:
     def test_every_language(self, reason):
         mod, coord = _coord()
         coord._indoor_source_left_sleep_failed = False
-        reading = SimpleNamespace(remote_context=None, sleep_reason=reason)
+        reading = SimpleNamespace(remote_context=None, sleep_reason=reason, recal_entity=None)
         msg = coord._indoor_source_reason(reading, "climate.t", "sleep_sensor")
         assert i18n.render_en(msg) == f"sleep sensor not usable ({reason.replace('_', ' ')})"
         for lang in OTHER:
@@ -291,7 +291,7 @@ class TestIndoorSourceSleepReason:
         mod, coord = _coord()
         coord._indoor_source_left_sleep_failed = False
         msg = coord._indoor_source_reason(
-            SimpleNamespace(remote_context=None, sleep_reason="new_code"), "c", "sleep_sensor"
+            SimpleNamespace(remote_context=None, sleep_reason="new_code", recal_entity=None), "c", "sleep_sensor"
         )
         assert i18n.render_en(msg) == "sleep sensor not usable (new code)"
         assert "new code" in i18n.render(msg, "de")

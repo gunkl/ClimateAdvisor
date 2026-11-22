@@ -266,7 +266,8 @@
           "indoor_humidity_entity": "Capteur d’humidité intérieure",
           "sleep_indoor_temp_entity": "Capteur de température intérieure de nuit",
           "sleep_indoor_humidity_entity": "Capteur d’humidité de nuit",
-          "thermostat_companion_sensor": "Capteur plus précis du thermostat"
+          "thermostat_companion_sensor": "Capteur plus précis du thermostat",
+          "thermostat_recalibration_guard": "Garde de recalibrage"
         },
         "data_description": {
           "outdoor_temp_source": "D’où lire la température extérieure. « Service météo » utilise votre intégration météo ; un capteur dédié ou une aide de saisie permet d’utiliser une entité précise. Revenir à « Service météo » supprime l’entité choisie.",
@@ -277,7 +278,8 @@
           "indoor_humidity_entity": "Le capteur d’humidité de la pièce que Climate Advisor lit en journée, affiché sur le graphique d’état avec la température ressentie dans la pièce. Graphique uniquement : aucune décision de chauffage ou de climatisation ne l’utilise. Laissez vide pour une détection automatique.",
           "sleep_indoor_temp_entity": "Capteur facultatif de la chambre utilisé pour les décisions de confort et d’automatisation tant que votre planning de nuit est actif (le modèle thermique utilise toujours le capteur principal). Retour au capteur principal s’il n’est pas disponible. Laissez vide pour désactiver.",
           "sleep_indoor_humidity_entity": "Le capteur d’humidité de la chambre, affiché sur le graphique d’état tant que votre planning de nuit est actif. Graphique uniquement : aucune décision de chauffage ou de climatisation ne l’utilise. Laissez vide pour une détection automatique.",
-          "thermostat_companion_sensor": "De nombreux thermostats indiquent des degrés entiers sur l’entité principale mais disposent aussi d’un capteur de température plus précis sur le même appareil. « Auto » utilise ce capteur plus précis dès qu’il s’avère donner la même mesure (à 1 degré F près, en affichant les fractions quand le thermostat affiche des degrés entiers) et revient à la mesure du thermostat s’il disparaît ou diverge. S’applique uniquement à la source « capteur intégré du thermostat ». « Désactivé » utilise toujours la mesure du thermostat."
+          "thermostat_companion_sensor": "De nombreux thermostats indiquent des degrés entiers sur l’entité principale mais disposent aussi d’un capteur de température plus précis sur le même appareil. « Auto » utilise ce capteur plus précis dès qu’il s’avère donner la même mesure (à 1 degré F près, en affichant les fractions quand le thermostat affiche des degrés entiers) et revient à la mesure du thermostat s’il disparaît ou diverge. S’applique uniquement à la source « capteur intégré du thermostat ». « Désactivé » utilise toujours la mesure du thermostat.",
+          "thermostat_recalibration_guard": "Certains thermostats affichent une valeur trop élevée de plusieurs degrés pendant jusqu’à environ 40 minutes après que la chaudière s’est arrêtée d’elle-même (sa sécurité de surchauffe s’est déclenchée) alors que la pièce est encore sous la consigne. Activé (par défaut), Climate Advisor repère ce saut, enregistre un avertissement, affiche un avis Réparations que vous pouvez ignorer, exclut ces valeurs de ce qu’il apprend sur la maison et lit la pièce depuis votre capteur de nuit ou votre capteur intérieur dédié jusqu’à ce que le thermostat se stabilise. Ne s’applique que si la source intérieure est le capteur intégré du thermostat. Désactivé ignore le saut."
         }
       },
       "sensors": {
@@ -613,6 +615,14 @@
     "ai_settings_unified": {
       "title": "Les paramètres d’IA s’appliquent désormais à toutes les zones",
       "description": "Les paramètres d’IA sont désormais partagés par toutes les zones. Vos zones avaient des paramètres d’IA différents ; Climate Advisor a donc conservé ceux de {zone} et les a appliqués à chaque zone. Les limites quotidiennes de requêtes d’IA comptent désormais pour l’ensemble des zones.\n\nPour les modifier, ouvrez Paramètres de l’IA dans les options de n’importe quelle zone."
+    },
+    "thermostat_recalibration": {
+      "title": "Thermostat trop élevé après l’arrêt du chauffage",
+      "description": "À {time}, le chauffage de {zone} s’est arrêté avant que la pièce atteigne la consigne, et {thermostat} a sauté à une valeur trop élevée de plusieurs degrés. Cela signifie généralement que la chaudière a surchauffé et que sa sécurité de surchauffe l’a coupée ; le thermostat se recalibre ensuite pendant 10 à 40 minutes. Jusqu’à ce qu’il se stabilise, Climate Advisor lit la pièce depuis {sensor} et exclut les fausses valeurs de ce qu’il apprend.\n\nSi cela arrive souvent, faites vérifier la chaudière : un filtre encrassé ou des bouches obstruées en sont des causes fréquentes. Ignorez cet avis pour ne plus le voir ; Climate Advisor continue à gérer la situation de la même façon."
+    },
+    "thermostat_recalibration_no_alternate": {
+      "title": "Thermostat trop élevé après l’arrêt du chauffage",
+      "description": "À {time}, le chauffage de {zone} s’est arrêté avant que la pièce atteigne la consigne, et {thermostat} a sauté à une valeur trop élevée de plusieurs degrés. Cela signifie généralement que la chaudière a surchauffé et que sa sécurité de surchauffe l’a coupée ; le thermostat se recalibre ensuite pendant 10 à 40 minutes. Climate Advisor exclut les fausses valeurs de ce qu’il apprend, mais cette zone n’a pas d’autre capteur de température pour lire la pièce entre-temps : ajoutez un capteur de nuit ou un capteur intérieur dédié dans Sources de température.\n\nSi cela arrive souvent, faites vérifier la chaudière : un filtre encrassé ou des bouches obstruées en sont des causes fréquentes. Ignorez cet avis pour ne plus le voir."
     }
   },
   "common": {

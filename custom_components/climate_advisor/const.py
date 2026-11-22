@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.66"
+VERSION = "0.9.67"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -687,6 +687,27 @@ DEFAULT_THERMOSTAT_COMPANION_SENSOR = COMPANION_SENSOR_AUTO
 # the rounded companion); anything wider is a different sensor or room.
 COMPANION_CONSISTENCY_F = 1.0
 
+# Issue #1676: a thermostat that reports a false high reading right after the furnace shuts itself off (its high-limit
+# safety trips; the Ecobee on the reference home then recalibrates). Thresholds from 9 days of the owner's history
+# (Nov 13-21, 83 heating runs): all 10 episodes jumped +6.66 to +7.38 F within 0-3 s of the thermostat's heating ->
+# idle (runs of 12.4-15.1 min ended below the setpoint with no blower purge; the 73 normal runs were 10.5 min or less
+# and 71 of them ended with a purge). The finer sensor's largest normal step is 0.36 F per update, its largest normal
+# 5-minute rise 1.44 F. Replayed over those 9 days these rules flag the 10 episodes and nothing else, even with the
+# jump lowered to 1.0 F and no heating gate; each settled 8.8-41.8 min after the jump (the 5-minute hold included).
+# Times are seconds.
+RECAL_JUMP_F: float = 2.5  # a rise of at least this much between two readings of the thermostat ...
+RECAL_JUMP_WINDOW_S: float = 300.0  # ... at most this far apart ...
+RECAL_HEATING_RECENT_S: float = 600.0  # ... with the thermostat reporting heating within this long
+RECAL_SETTLE_MARGIN_F: float = 1.0  # settled: back within this much of the reading before the jump ...
+RECAL_SETTLE_HOLD_S: float = 300.0  # ... for this long
+RECAL_MAX_S: float = 3600.0  # never treated as recalibrating for longer than this (longest seen: 41.8 min)
+# Options > Temperature Sources: watch for it (default on) or not (off = exactly the behavior before 0.9.67).
+CONF_THERMOSTAT_RECAL_GUARD = "thermostat_recalibration_guard"
+DEFAULT_THERMOSTAT_RECAL_GUARD = True
+# Per-zone Repairs notice (``<this>_<entry_id>``, ignorable); the "no other sensor" wording is its own translation key.
+ISSUE_THERMOSTAT_RECALIBRATION = "thermostat_recalibration"
+ISSUE_THERMOSTAT_RECALIBRATION_NO_ALTERNATE = "thermostat_recalibration_no_alternate"
+
 # Issue #1194 (a): remote-sensor outer loop. While the comfort-facing indoor reading comes from a REMOTE
 # sensor (today: the bedroom sensor in the sleep window) CA nudges the thermostat's setpoint so the
 # thermostat -- which only sees its own sensor -- produces the target at the remote sensor.
@@ -924,6 +945,19 @@ CONFIG_METADATA = {
         ),
         "category": "sensors",
         "default": DEFAULT_THERMOSTAT_COMPANION_SENSOR,
+    },
+    "thermostat_recalibration_guard": {
+        "label": "Recalibration Guard",
+        "description": (
+            "Some thermostats report a reading several degrees too high for up to about 40 minutes after the furnace"
+            " shuts itself off (its high-limit safety trips) while the room is still below the setpoint. When on"
+            " (default), Climate Advisor spots the jump, logs a warning, shows a Repairs notice you can ignore, keeps"
+            " those readings out of what it learns about the house, and reads the room from your sleep sensor or"
+            " dedicated indoor sensor until the thermostat settles. Only applies when the indoor source is the"
+            " thermostat's built-in sensor. Off ignores the jump."
+        ),
+        "category": "sensors",
+        "default": DEFAULT_THERMOSTAT_RECAL_GUARD,
     },
     "sleep_indoor_temp_entity": {
         "label": "Sleep Indoor Temp Sensor",

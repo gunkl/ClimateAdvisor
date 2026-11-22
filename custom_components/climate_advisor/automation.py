@@ -70,6 +70,7 @@ from .const import (
     CONF_SLEEP_COOL,
     CONF_SLEEP_HEAT,
     CONF_THERMOSTAT_COMPANION_SENSOR,
+    CONF_THERMOSTAT_RECAL_GUARD,
     CONF_THRESHOLD_HOT,
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_COLD,
@@ -98,6 +99,7 @@ from .const import (
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
     DEFAULT_THERMOSTAT_COMPANION_SENSOR,
+    DEFAULT_THERMOSTAT_RECAL_GUARD,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     ECONOMIZER_EVENING_END_HOUR,
@@ -332,6 +334,7 @@ from .temperature import (
     to_fahrenheit,
 )
 from .thermostat_profile import FanProfile, live_fan_profile
+from .thermostat_recal import ThermostatRecal
 from .time_utils import instant_after, seconds_since
 from .whf_safety_decision import (
     WHF_ACTIVE_HVAC_MODES,
@@ -1792,6 +1795,8 @@ class AutomationEngine:
     # Issue #1230 R1b: class-level default so an engine built via object.__new__ (tests) still resolves; the
     # coordinator assigns its shared holder in __init__.
     indoor_companion: CompanionSensors | None = None
+    # Issue #1676: the coordinator's thermostat-recalibration state (same sharing as ``indoor_companion``).
+    indoor_recal: ThermostatRecal | None = None
 
     # Issue #1474: today's DailyRecord. The coordinator owns it and replaces it (new day, restore, end of day), so the
     # engine reads it live through its inputs (Issue #1443: the coordinator never writes an engine private); a held
@@ -1991,6 +1996,8 @@ class AutomationEngine:
         # Issue #1230 R1b: the coordinator's thermostat-companion candidates + 'finer' latch, set by the coordinator
         # after construction. None (headless harness, no registry) = the resolver behaves exactly as before.
         self.indoor_companion: CompanionSensors | None = None
+        # Issue #1676: the coordinator's thermostat-recalibration state, shared like ``indoor_companion``; None = never.
+        self.indoor_recal: ThermostatRecal | None = None
         # Issue #604: label only, for logging/future observability — never branched on
         # inside this class or the 9 coordinator callback methods. Isolation between a
         # production and a future shadow engine is structural (which callables get wired
@@ -21350,6 +21357,13 @@ class AutomationEngine:
                 if self.config.get(CONF_THERMOSTAT_COMPANION_SENSOR, DEFAULT_THERMOSTAT_COMPANION_SENSOR)
                 == COMPANION_SENSOR_OFF
                 else self.indoor_companion
+            ),
+            # Issue #1676: while the thermostat recalibrates after a heating shutdown, the room is read from another
+            # configured sensor; the same shared state the coordinator resolves with (None headless / when off).
+            "recal": (
+                self.indoor_recal
+                if self.config.get(CONF_THERMOSTAT_RECAL_GUARD, DEFAULT_THERMOSTAT_RECAL_GUARD) is not False
+                else None
             ),
         }
 

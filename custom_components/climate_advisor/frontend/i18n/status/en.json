@@ -84,6 +84,8 @@
   "status.indoor_source.reason_non_finite": "finer sensor reading invalid — using the thermostat",
   "status.indoor_source.reason_non_numeric": "finer sensor reading not a number — using the thermostat",
   "status.indoor_source.reason_not_proven": "finer sensor not proven — using the thermostat",
+  "status.indoor_source.reason_recal_settled": "thermostat settled after recalibrating",
+  "status.indoor_source.reason_recal_started": "thermostat recalibrating after the heating stopped",
   "status.indoor_source.reason_setting_changed": "indoor sensor setting changed",
   "status.indoor_source.reason_setting_off": "setting off",
   "status.indoor_source.reason_sleep_ended": "sleep window ended",

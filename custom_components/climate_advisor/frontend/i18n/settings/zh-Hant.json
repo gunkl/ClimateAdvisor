@@ -246,6 +246,8 @@
   "settings.temp_unit.label": "溫度單位",
   "settings.thermostat_companion_sensor.description": "許多溫控器在主要實體上只以整數度回報室溫，但同一裝置還另有高精度溫度感測器。「自動」（預設）會在確認該高精度感測器確實是同一讀數、只是解析度更高時（與溫控器讀數相差在 1 °F 內，且溫控器顯示整數時它會顯示小數），將其用於舒適決策；每當它遺失、不可用、資料過舊或讀數不一致時，就改回溫控器本身的讀數。僅在室內溫度來源為溫控器內建感測器時適用。「關閉」則一律使用溫控器本身的讀數。",
   "settings.thermostat_companion_sensor.label": "溫控器高精度感測器",
+  "settings.thermostat_recalibration_guard.description": "有些溫控器在房間仍低於設定溫度時、暖爐自行關閉（其過熱安全保護跳脫）之後，會在大約 40 分鐘內顯示高出幾度的讀數。開啟（預設）時，Climate Advisor 會辨識這次跳升、記錄警告、顯示一則可忽略的修復通知、把這些讀數排除在對房屋的學習之外，並在溫控器穩定之前改用睡眠感測器或專用室內感測器讀取房間溫度。僅在室內來源為溫控器內建感測器時適用。關閉則忽略跳升。",
+  "settings.thermostat_recalibration_guard.label": "重新校準保護",
   "settings.threshold_cool.description": "預報最高溫達到或高於此溫度（但低於溫和日門檻）的日子歸類為涼爽日；低於此溫度則為寒冷日。預設：45°F / 7°C。",
   "settings.threshold_cool.label": "涼爽日臨界值",
   "settings.threshold_hot.description": "預報最高溫達到或高於此溫度的日子歸類為炎熱日。預設：85°F / 29°C。",

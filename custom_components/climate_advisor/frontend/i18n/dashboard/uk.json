@@ -867,6 +867,8 @@
   "dashboard.status.phrase_unknown": "стан ще невідомий",
   "dashboard.status.ran_today": "Система працювала сьогодні {n, plural, one {# хв} few {# хв} many {# хв} other {# хв}}",
   "dashboard.status.reads_bedroom_sleep": "Climate Advisor зчитує датчик у спальні (період сну)",
+  "dashboard.status.thermostat_recal_reading": "Термостат калібрується після зупинки опалення — Climate Advisor читає {name}, доки він не стабілізується",
+  "dashboard.status.thermostat_recal_no_alt": "Термостат калібрується після зупинки опалення — поки що його значення завищене",
   "dashboard.status.reads_in_sleep": "Climate Advisor зчитує його в період сну",
   "dashboard.status.reads_this_sensor": "Climate Advisor зчитує цей датчик",
   "dashboard.status.says_cooler": "{who} показує {theirs}, на {gap}° прохолодніше, ніж {name}",

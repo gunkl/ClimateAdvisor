@@ -67,6 +67,7 @@ from .const import (
     is_unavailable_state,
 )
 from .temperature import is_sensor_stale, read_attribute_temp_f, read_sensor_state_f
+from .thermostat_recal import ThermostatRecal
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +105,10 @@ class IndoorTempReading(NamedTuple):
     # ``ambiguous``. The sleep swap never changes these: they describe the primary reading.
     companion_entity: str | None = None
     companion_reason: str | None = None
+    # Issue #1676: the other configured sensor that supplied ``value`` because the thermostat is recalibrating after
+    # a heating shutdown (its reading is false for 10-40 minutes), else None. ``primary_value`` stays the thermostat's
+    # own (false) reading; thermal learning does not sample while the recalibration lasts.
+    recal_entity: str | None = None
 
 
 class CompanionSensors:
@@ -251,6 +256,32 @@ def _resolve_sleep_indoor_temp_f(
     return checked, None
 
 
+def _resolve_recal_alternate_f(
+    *,
+    hass: Any,
+    unit: str,
+    climate_entity: str,
+    candidates: Iterable[str | None],
+    companion: CompanionSensors | None,
+    now: datetime,
+) -> tuple[float | None, str | None]:
+    """The first configured sensor that is NOT on the thermostat and reads now: ``(value_f, entity)`` (Issue #1676).
+
+    Candidates in order (the sleep sensor, then a dedicated indoor sensor left in the config); the thermostat and the
+    sensors on its own device are skipped, because they report the same false reading. Each is read under the
+    sleep-sensor rules (parse, 40-110 F, 12 h stale, ``input_number`` exempt). ``(None, None)`` when none reads.
+    """
+    skip = {climate_entity, *(companion.entities if companion is not None else ())}
+    for entity_id in candidates:
+        if not entity_id or entity_id in skip:
+            continue
+        skip.add(entity_id)
+        val_f, _reason = _resolve_sleep_indoor_temp_f(hass=hass, unit=unit, sleep_indoor_temp_entity=entity_id, now=now)
+        if val_f is not None:
+            return val_f, entity_id
+    return None, None
+
+
 def resolve_indoor_temp_with_provenance(
     *,
     hass: Any,
@@ -262,6 +293,7 @@ def resolve_indoor_temp_with_provenance(
     sleep_indoor_temp_entity: str | None = None,
     now: datetime | None = None,
     companion: CompanionSensors | None = None,
+    recal: ThermostatRecal | None = None,
 ) -> IndoorTempReading:
     """Resolve indoor temperature: comfort-facing value + provenance + always-primary value.
 
@@ -279,6 +311,13 @@ def resolve_indoor_temp_with_provenance(
     thermostat's reading as the PRIMARY value when ``_resolve_companion_f`` proves it is the same reading at finer
     resolution. ``sensor``/``input_number`` sources are explicit user choices and are never overridden. The sleep
     sensor still takes priority over both for the comfort-facing value.
+
+    ``recal`` (Issue #1676; default None = all of the above unchanged): while ``recal.active`` (the thermostat is
+    recalibrating after a heating shutdown and reads several degrees high) on the ``climate_fallback`` source, the
+    comfort-facing ``value`` comes from another configured sensor that is not on the thermostat's device
+    (``_resolve_recal_alternate_f``), named in ``recal_entity``, also when the thermostat itself reads nothing at that
+    moment. The sleep-window swap above still comes first. With no such sensor reading, ``value`` stays the
+    thermostat's. ``primary_value`` is never replaced (thermal learning asks the coordinator, which skips it).
     """
     now = now or dt_util.utcnow()
     primary_val, primary_entity, primary_reason = _resolve_primary_indoor_temp_f(
@@ -325,6 +364,29 @@ def resolve_indoor_temp_with_provenance(
                 REMOTE_CONTEXT_SLEEP,
                 companion_entity,
                 companion_reason,
+            )
+
+    if recal is not None and recal.active and source not in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+        alt_val, alt_entity = _resolve_recal_alternate_f(
+            hass=hass,
+            unit=unit,
+            climate_entity=climate_entity,
+            candidates=(sleep_indoor_temp_entity, indoor_temp_entity),
+            companion=companion,
+            now=now,
+        )
+        if alt_val is not None:
+            _LOGGER.debug("Thermostat recalibrating: room reading from %s value=%.1f°F", alt_entity, alt_val)
+            return IndoorTempReading(
+                alt_val,
+                alt_entity,
+                primary_val,
+                primary_reason,
+                sleep_reason,
+                None,
+                companion_entity,
+                companion_reason,
+                alt_entity,
             )
 
     return IndoorTempReading(
@@ -495,6 +557,7 @@ def resolve_indoor_temp_f(
     in_sleep_window: bool = False,
     sleep_indoor_temp_entity: str | None = None,
     companion: CompanionSensors | None = None,
+    recal: ThermostatRecal | None = None,
 ) -> float | None:
     """Read the current comfort-facing indoor temperature in Fahrenheit, or None.
 
@@ -510,6 +573,7 @@ def resolve_indoor_temp_f(
         in_sleep_window=in_sleep_window,
         sleep_indoor_temp_entity=sleep_indoor_temp_entity,
         companion=companion,
+        recal=recal,
     ).value
 
 

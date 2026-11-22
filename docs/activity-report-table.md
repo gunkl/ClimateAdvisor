@@ -46,7 +46,7 @@ when `investigation_fallback()` (the deterministic fallback) is what actually ru
 
 | Column | What it contains |
 |---|---|
-| **Time** | Local HH:MM of the event |
+| **Time** | Local day and time of the event, `Sat 11-21 10:31` (Issue #1674: a 7-day window spans days, so a bare HH:MM named no day). The dashboard shows the row's `ts` in the viewer's language |
 | **Event** | What happened — a human-readable label for the trigger or action type |
 | **Settings** | The concrete HVAC action performed — setpoint, mode change, fan state, or skip reason |
 | **Indoor** | Indoor temperature at the moment the event was emitted, from `coordinator._get_indoor_temp()`. Displays `—` for events recorded before Issue #352 enrichment. |
@@ -278,6 +278,9 @@ Consecutive rows with the **same event type** are collapsed into a single row:
 ```
 {friendly name} ×{N} ({first_HH:MM}–{last_HH:MM})
 ```
+
+The row's Time cell carries the day (`Sat 11-21 16:48`), so the range keeps bare clocks; when
+the run crosses midnight the end names its own day (`(23:50-Sat 11-21 00:10)`, Issue #1674).
 
 **The Settings cell is preserved** — all collapsed rows share the same band parameters
 (they represent the same comfort state being re-armed), so the Settings text from the

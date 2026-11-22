@@ -313,8 +313,8 @@ def _build_known_override_false_positives(events: list, hours: float, now: datet
             delta_s = abs((evt_dt - auto_dt).total_seconds())
             if delta_s <= _OVERRIDE_FALSE_POSITIVE_WINDOW_S:
                 matches.append(
-                    f"  override_detected at {evt_dt.strftime('%H:%M:%S')} is {delta_s:.0f}s from"
-                    f" {auto_evt.get('type')} at {auto_dt.strftime('%H:%M:%S')} — known false override"
+                    f"  override_detected at {fmt_day_stamp(evt_dt, seconds=True)} is {delta_s:.0f}s from"
+                    f" {auto_evt.get('type')} at {fmt_clock_near(auto_dt, evt_dt, seconds=True)} — known false override"
                     " detection (Issue #205), not a genuine incongruity"
                 )
                 break
@@ -466,15 +466,17 @@ def _build_timing_correlations(events: list, hours: float, now: datetime.datetim
         # nearest prior automation event (mirrors the old max(prior_auto)).
         idx = bisect.bisect_left(auto_times_sorted, evt_dt)
         if idx == 0:
-            lines.append(f"  [OK] {evt_dt.strftime('%H:%M')} — {etype}: no prior automation event in window")
+            lines.append(f"  [OK] {fmt_day_stamp(evt_dt)} — {etype}: no prior automation event in window")
             found_any = True
             continue
 
         nearest_adt, nearest_ae = auto_events_sorted[idx - 1]
         delta_s = (evt_dt - nearest_adt).total_seconds()
-        time_str = evt_dt.strftime("%H:%M")
+        # Issue #1674: the window spans days, so each line names its day (and the prior event its own day when it
+        # falls before midnight); both in local time (the stored zone was printed before).
+        time_str = fmt_day_stamp(evt_dt)
         prior_type = str(nearest_ae.get("type", "?"))
-        prior_time_str = nearest_adt.strftime("%H:%M")
+        prior_time_str = fmt_clock_near(nearest_adt, evt_dt)
 
         # Check against known intervals
         matched_interval: str | None = None
@@ -1845,14 +1847,52 @@ def _parse_event_time(raw_time: Any) -> datetime.datetime | None:
     return dt_util.as_local(dt)
 
 
+# Issue #1674: every multi-day section of the investigator context stamps a time with its weekday and date
+# ("Sat 11-21 10:31"). A bare "10:31" in a 7-day window names no day, the AI copied it, and the occupant could not
+# tell which morning "6:15 AM" was. English names on purpose (not strftime's locale-dependent %a): the context is
+# English text and its byte form must not change with the host's locale.
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _as_local_aware(dt: datetime.datetime) -> datetime.datetime:
+    """The instant in Home Assistant local time; a naive datetime is read as UTC, like ``_parse_event_time``."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.UTC)
+    return dt_util.as_local(dt)
+
+
+def fmt_day_stamp(dt: datetime.datetime, *, seconds: bool = False) -> str:
+    """``Sat 11-21 10:31`` (or ``Sat 11-21 10:31:05``): weekday, month-day and 24-hour local time (Issue #1674)."""
+    local = _as_local_aware(dt)
+    clock = local.strftime("%H:%M:%S" if seconds else "%H:%M")
+    return f"{_WEEKDAYS[local.weekday()]} {local.month:02d}-{local.day:02d} {clock}"
+
+
+def fmt_clock_near(dt: datetime.datetime, ref: datetime.datetime, *, seconds: bool = False) -> str:
+    """A time printed right after ``ref``'s stamp: the bare clock when both fall on the same local day, else the full
+    stamp, so a second time across midnight still names its own day (Issue #1674)."""
+    local, local_ref = _as_local_aware(dt), _as_local_aware(ref)
+    if local.date() == local_ref.date():
+        return local.strftime("%H:%M:%S" if seconds else "%H:%M")
+    return fmt_day_stamp(local, seconds=seconds)
+
+
+def fmt_day_span(start: datetime.datetime, end: datetime.datetime) -> str:
+    """``Sat 11-21 10:46-11:21``; a single stamp when both are the same minute; ``Fri 11-20 23:50-Sat 11-21 00:10``
+    across midnight (Issue #1674)."""
+    first = fmt_day_stamp(start)
+    second = fmt_clock_near(end, start)
+    return first if first.endswith(" " + second) else f"{first}-{second}"
+
+
 def _fmt_time(raw_time: Any) -> str:
-    """Format a raw timestamp from the event log as HH:MM (local)."""
+    """Format a raw event-log / log-record timestamp as ``Sat 11-21 10:31`` (local; Issue #1674 added the day)."""
     if raw_time is None:
         return "??:??"
     parsed = _parse_event_time(raw_time)
     if parsed is None:
         return str(raw_time)
-    return parsed.strftime("%H:%M")
+    return fmt_day_stamp(parsed)
 
 
 def _humanize_type(event_type: str) -> str:
@@ -2634,10 +2674,13 @@ def _render_outdoor_sensor_recovered(p: dict, unit: str) -> tuple[Cell, Cell]:
 
 
 def _local_hhmm(iso: Any) -> str:
-    """``HH:MM`` in the occupant's local time for an ISO instant, or "" when it cannot be read."""
+    """``Sat 11-21 10:31`` in the occupant's local time for an ISO instant, or "" when it cannot be read.
+
+    Issue #1674: a "since" time can be days before the row that prints it, so it names its own day.
+    """
     try:
         t = dt_util.parse_datetime(iso) if isinstance(iso, str) and iso else None
-        return dt_util.as_local(t).strftime("%H:%M") if isinstance(t, datetime.datetime) else ""
+        return fmt_day_stamp(t) if isinstance(t, datetime.datetime) else ""
     except TypeError, ValueError, AttributeError:
         return ""
 
@@ -3167,7 +3210,8 @@ def _render_fan_cancel(p: dict, unit: str) -> tuple[Cell, Cell]:
         raw_started = p.get("manual_origin_started")
         if raw_started:
             with contextlib.suppress(TypeError, ValueError):
-                started = datetime.datetime.fromisoformat(str(raw_started)).strftime("%H:%M")
+                # Issue #1674: the earlier manual fan-on can be on a previous day; name it.
+                started = fmt_day_stamp(datetime.datetime.fromisoformat(str(raw_started)))
         kind = p.get("manual_origin_kind")
         return (
             _m(
@@ -4236,6 +4280,20 @@ class _TimelineRow(NamedTuple):
     outdoor: str
     event_cell: Cell
     settings_cell: Cell
+    dt: datetime.datetime | None = None  # Issue #1674: the row's first event, for the dashboard's localized date
+
+
+def _run_clock_range(first: _RenderedEvent, last: _RenderedEvent) -> str:
+    """The ``(16:48-17:36)`` range of a collapsed run, printed after the row's own day stamp (Issue #1674).
+
+    Bare clocks while the run stays on the row's day; the end names its own day when the run crosses midnight
+    (``23:50-Sun 11-22 00:10``). Falls back to the rendered stamps when a timestamp cannot be read.
+    """
+    if first.dt is None or last.dt is None:
+        return f"{first.time_str}-{last.time_str}" if first.time_str != last.time_str else first.time_str
+    start_clock = _as_local_aware(first.dt).strftime("%H:%M")
+    end_clock = fmt_clock_near(last.dt, first.dt)
+    return start_clock if start_clock == end_clock else f"{start_clock}-{end_clock}"
 
 
 def _collapse_timeline_rows(
@@ -4280,10 +4338,11 @@ def _collapse_timeline_rows(
                     first.outdoor,
                     first.ev_cell,
                     run_settings[1],
+                    first.dt,
                 )
             )
         else:
-            time_range = f"{first.time_str}-{last.time_str}" if first.time_str != last.time_str else first.time_str
+            time_range = _run_clock_range(first, last)
             collapsed = _m(
                 "event_run_collapsed", type=_humanize_type(first.event_type), count=len(run), range=time_range
             )
@@ -4297,6 +4356,7 @@ def _collapse_timeline_rows(
                     first.outdoor,
                     collapsed,
                     run_settings[1],
+                    first.dt,
                 )
             )
         run = []
@@ -4317,6 +4377,7 @@ def _collapse_timeline_rows(
                         ev.outdoor,
                         ev.ev_cell,
                         ev.settings_cell,
+                        ev.dt,
                     )
                 )
             else:
@@ -4374,6 +4435,9 @@ def build_event_timeline_wire(
         "rows": [
             {
                 "time": r.time_str,
+                # Issue #1674: the instant itself, so the dashboard shows the row's date in the viewer's language
+                # (``time`` is the English ``Sat 11-21 10:31`` stamp the markdown table and the AI read).
+                "ts": r.dt.isoformat() if r.dt is not None else None,
                 "event": r.event_text,
                 "settings": r.settings_text,
                 "source": r.source,
@@ -4428,6 +4492,7 @@ class _TimelineSession(NamedTuple):
     outdoor_end: str
     event_lines: list[str]  # humanized event text, in chronological order
     event_count: int
+    time_range: str = ""  # Issue #1674: "Sat 11-21 10:46-11:21" (one stamp for a single moment)
 
 
 def _group_timeline_sessions(
@@ -4472,6 +4537,12 @@ def _group_timeline_sessions(
             facts = _extract_plain_facts(ev.settings_text) if ev.settings_text else []
             return f"{ev.ev_text} ({', '.join(facts)})" if facts else ev.ev_text
 
+        dated = [e.dt for e in current if e.dt is not None]
+        if dated:
+            time_range = fmt_day_span(dated[0], dated[-1])
+        else:
+            first_s, last_s = current[0].time_str, current[-1].time_str
+            time_range = f"{first_s}-{last_s}" if first_s != last_s else first_s
         sessions.append(
             _TimelineSession(
                 start_time_str=current[0].time_str,
@@ -4482,6 +4553,7 @@ def _group_timeline_sessions(
                 outdoor_end=outdoor_vals[-1] if outdoor_vals else "—",
                 event_lines=[_line_for(e) for e in current],
                 event_count=len(current),
+                time_range=time_range,
             )
         )
 
@@ -4516,13 +4588,8 @@ async def build_activity_sessions_context(hass: Any, coordinator: Any, **kwargs:
 
     lines = [f"=== ACTIVITY SESSIONS (for Activity Summary only, last {hours:g}h) ==="]
     for i, session in enumerate(sessions, start=1):
-        time_range = (
-            f"{session.start_time_str}-{session.end_time_str}"
-            if session.start_time_str != session.end_time_str
-            else session.start_time_str
-        )
         lines.append(
-            f"SESSION {i}: {time_range} (indoor {session.indoor_start}->{session.indoor_end}, "
+            f"SESSION {i}: {session.time_range} (indoor {session.indoor_start}->{session.indoor_end}, "
             f"outdoor {session.outdoor_start}->{session.outdoor_end})"
         )
         for ev_text in session.event_lines:
@@ -4594,7 +4661,7 @@ def build_activity_summary_narrative(
     available) so `activity_summary` is always populated on both paths without
     calling Claude from the no-AI path or duplicating the LLM's phrasing logic.
     Terse by design — not meant to read as polished prose, just present and
-    jargon-free — e.g. "10:53-10:58: 6 event(s)."
+    jargon-free — e.g. "Sat 11-21 10:53-10:58: 6 event(s)."
     """
     sessions, limited = _group_timeline_sessions(raw_event_log, config, hours, now)
 
@@ -4603,12 +4670,7 @@ def build_activity_summary_narrative(
 
     lines: list[str] = []
     for session in sessions:
-        time_range = (
-            f"{session.start_time_str}-{session.end_time_str}"
-            if session.start_time_str != session.end_time_str
-            else session.start_time_str
-        )
-        lines.append(f"- {time_range}: {session.event_count} event(s).")
+        lines.append(f"- {session.time_range}: {session.event_count} event(s).")
 
     narrative = "\n".join(lines)
     if limited:
@@ -4800,7 +4862,7 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
                     duration_min = max(0, round(duration_seconds / 60))
                     local_start = dt_util.as_local(override_dt) if override_dt.tzinfo else override_dt
                     lines.append(
-                        f"  Current override:  active since {local_start.strftime('%H:%M')}, "
+                        f"  Current override:  active since {fmt_day_stamp(local_start)}, "
                         f"duration {duration_min} min (ongoing)"
                     )
                 except Exception:

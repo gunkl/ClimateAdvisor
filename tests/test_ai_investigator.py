@@ -339,11 +339,12 @@ class TestActivitySummaryParsing:
         assert "real hypothesis" in result["hypotheses"]
 
     def test_compliant_activity_summary_does_not_warn(self, caplog):
+        # Issue #1674: each line opens with its weekday and date, then the time.
         raw = (
             "## ACTIVITY SUMMARY\n"
-            "10:53 AM – 10:58 AM: Automation restarted after an update and classified "
+            "Sat 11-21 10:53 AM – 10:58 AM: Automation restarted after an update and classified "
             "today as warm.\n"
-            "12:31 PM: You turned on the whole-house fan by remote for 1 hour.\n"
+            "Sat 11-21 12:31 PM: You turned on the whole-house fan by remote for 1 hour.\n"
         )
         with caplog.at_level("WARNING"):
             parse_investigation_response(raw)

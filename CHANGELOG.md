@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.63] — 2026-11-21
+
+### Fixed
+- **AI Investigator reports say which day things happened:** a 7-day report used to list times like "6:15 AM" with no day, so events from different days blurred together. Every time in a multi-day report now carries its weekday and date (for example `Sat 11-21 10:31`), the AI is told to keep them in its Activity Summary and findings, and the dashboard's Activity record shows each row's date (#1674).
+
 ## [0.9.62] — 2026-11-21
 
 ### Added

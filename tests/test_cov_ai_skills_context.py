@@ -111,12 +111,12 @@ _RENDER_CASES = [
     (
         "entity_unavailable",
         {"entity_id": "sensor.a", "status": "missing", "down_since": "2026-06-17T10:00:00+00:00", "detail": "gone"},
-        ("sensor.a not found", "since 10:00, gone"),
+        ("sensor.a not found", "since Wed 06-17 10:00, gone"),
     ),
     (
         "entity_recovered",
         {"friendly_name": "Thermostat", "outage_minutes": 12, "down_since": "2026-06-17T10:00:00+00:00"},
-        ("Thermostat available again", "out 12 min, since 10:00"),
+        ("Thermostat available again", "out 12 min, since Wed 06-17 10:00"),
     ),
     (
         "indoor_source_changed",

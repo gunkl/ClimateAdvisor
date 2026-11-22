@@ -4347,6 +4347,8 @@ refines the wait. The hold comes from the live `hvac_action`: no raise while the
 2026-11-02 ("fired -> hold", as built): once that cycle ends, a remote reading still below target - swing allows the next
 raise after the startup wait; the offset is not frozen at the step that fired. Restart: in-memory only, clean slate.
 
+**Comfort detectors (Issue #1678).** The loop's trigger reading is up to one sensor step past the measured swing and stays until the sensor's next report, so the comfort gate treats the loop's own band (measured swing + one learned sensor step) and its in-progress correction (offset raised below its cap, equipment starting inside the startup wait or running, at most 45 min) as tolerated: no incident, no violation minute, no stall clock. Read-only view: `AutomationEngine.remote_loop_comfort_view()` (fresh context, gate `PROCEED` only); rule `remote_offset.loop_tolerates_deviation`. See [Incident Classes](incident-classes.md#remote-loop-and-wake-step-tolerance-issue-1678).
+
 **Freshness.** The remote reading is used only if `last_reported` (falling back to `last_updated`, via
 `temperature.is_sensor_stale`) is within `REMOTE_OFFSET_FRESHNESS_MINUTES` = 120 min (`indoor_temp.remote_reading_fresh()`);
 `input_number` helpers are exempt. Older -> the offset is dropped and the next check rewrites the plain setpoint

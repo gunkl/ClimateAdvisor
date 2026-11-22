@@ -108,7 +108,13 @@ def _make_coordinator_stub(config: dict | None = None):
         "_thermostat_hvac_mode",
         "_is_within_thermostat_hysteresis",
         "_is_tolerated_comfort_deviation",
+        "_is_expected_control_deviation",  # Issue #1678
+        "_is_loop_tolerated_deviation",
+        "_remote_loop_view",
+        "_is_wake_step_recovery",
+        "_thermostat_setpoint_f",
         "_hysteresis_incident_context",
+        "_indoor_incident_context",  # Issue #1678
     ):
         setattr(coord, _name, types.MethodType(getattr(ClimateAdvisorCoordinator, _name), coord))
     return coord
@@ -320,7 +326,13 @@ def _make_boundary_coordinator_stub(config: dict | None = None):
         "_thermostat_hvac_mode",
         "_is_within_thermostat_hysteresis",
         "_is_tolerated_comfort_deviation",
+        "_is_expected_control_deviation",  # Issue #1678
+        "_is_loop_tolerated_deviation",
+        "_remote_loop_view",
+        "_is_wake_step_recovery",
+        "_thermostat_setpoint_f",
         "_hysteresis_incident_context",
+        "_indoor_incident_context",  # Issue #1678
     ):
         setattr(coord, _name, types.MethodType(getattr(ClimateAdvisorCoordinator, _name), coord))
     # Real methods under test for this class — the whole point is to exercise the

@@ -33,7 +33,9 @@ from typing import Any, NamedTuple
 
 from . import i18n
 from .const import (
+    COMFORT_SWING_TOLERANCE_MAX_F,
     REMOTE_CONTEXT_SLEEP,
+    REMOTE_CORRECTION_TOLERANCE_MAX_S,
     REMOTE_OFFSET_CAP_C,
     REMOTE_OFFSET_CAP_F,
     REMOTE_OFFSET_DEFAULT_WAIT_S,
@@ -41,6 +43,8 @@ from .const import (
     REMOTE_OFFSET_STEP_C,
     REMOTE_OFFSET_STEP_F,
     REMOTE_OFFSET_WAIT_MARGIN_S,
+    REMOTE_SENSOR_STEP_MAX_F,
+    REMOTE_SENSOR_STEP_MIN_F,
 )
 from .temperature import convert_delta, display_delta, display_temp
 
@@ -560,3 +564,91 @@ def remote_offset_lines(view: dict[str, Any]) -> list[str]:
         "text",
     )
     return [f"    {k}: {view.get(k)!r}" for k in keys]
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# Issue #1678: the loop as the comfort detectors see it.
+# --------------------------------------------------------------------------------------------------------------------
+
+
+class RemoteLoopComfortView(NamedTuple):
+    """What the outer loop is doing right now, for the comfort detectors (Issue #1678). Internal degF; magnitudes >= 0.
+
+    Built by ``AutomationEngine.remote_loop_comfort_view()`` only while a FRESH remote reading supplies the indoor
+    value and the loop's gate is ``PROCEED`` -- a gated, frozen or stale loop has no view, so the plain
+    thermostat-swing rule judges the room.
+    """
+
+    mode: str  # "heat" | "cool": the mode of the loop's target
+    remote_value_f: float  # the remote reading the loop acts on
+    swing_f: float  # the measured swing at the remote sensor (the loop's own trigger, ``_remote_swing_f``)
+    sensor_step_f: float  # the remote sensor's reading step (0.0 until three distinct readings were seen)
+    offset_f: float  # magnitude the thermostat holds beyond the target (0.0 = none or unknown)
+    cap_f: float  # the largest magnitude allowed for this target (+cap or the opposite band edge)
+    seconds_since_raise: float | None  # since the loop's last raise that was really sent; None = no raise
+    wait_s: float  # the startup wait after a raise
+    equipment_active: bool  # the thermostat reports heating (heat) / cooling (cool)
+
+
+def sensor_step_from_values(values: Any) -> float:
+    """The reading step of a sensor from its distinct recent readings (degF), 0.0 when not yet known (Issue #1678).
+
+    The smallest gap between neighbouring distinct readings (rounded to 0.01 F), bounded to
+    ``[REMOTE_SENSOR_STEP_MIN_F, REMOTE_SENSOR_STEP_MAX_F]``. Needs three distinct readings; fewer prove nothing.
+    A 0.1 C sensor shown in F gives 0.18; a whole-degree sensor 1.0.
+    """
+    vals = sorted({round(float(v), 2) for v in values or () if isinstance(v, (int, float)) and math.isfinite(v)})
+    if len(vals) < 3:
+        return 0.0
+    step = min(b - a for a, b in zip(vals, vals[1:], strict=False))
+    return round(min(max(step, REMOTE_SENSOR_STEP_MIN_F), REMOTE_SENSOR_STEP_MAX_F), 2)
+
+
+def loop_tolerates_deviation(
+    indoor_f: float,
+    floor_f: float | None,
+    ceiling_f: float | None,
+    thermostat_mode: Any,
+    view: RemoteLoopComfortView | None,
+) -> bool:
+    """True when an out-of-band remote reading is the outer loop's own cycle, not a comfort failure (Issue #1678).
+
+    Occupant outcome: the loop deliberately lets the bedroom drift one measured swing past the band edge before it
+    raises the thermostat, and its trigger reading is up to one sensor step further out; the room then stays there
+    for the minutes the equipment needs. Neither is the system failing to hold the band. Heat (below the floor)
+    shown; cool (above the ceiling) mirrors. ALL of:
+
+    * a view exists (fresh remote reading, loop gate PROCEED), the detector's reading IS the loop's reading, the
+      thermostat mode is the loop's mode (Off, the opposite mode, heat_cool/auto: not this rule);
+    * the room is no more than ``COMFORT_SWING_TOLERANCE_MAX_F`` past the edge (owner cap, #1258);
+    * and EITHER (a) within ``swing + one sensor step`` of the edge, OR (b) the loop is correcting: offset raised and
+      below its cap, at most ``REMOTE_CORRECTION_TOLERANCE_MAX_S`` since the raise, and the equipment is running in
+      the loop's direction or the raise is still inside the startup wait.
+
+    Real failures stay visible: a loop at its cap, a gated or stale loop (no view), the thermostat Off or in the
+    other mode, a furnace that never starts after the wait, or one that runs past the bound without recovering.
+    """
+    if view is None or view.mode not in ("heat", "cool"):
+        return False
+    if not isinstance(thermostat_mode, str) or thermostat_mode.lower() != view.mode:
+        return False
+    if abs(float(indoor_f) - float(view.remote_value_f)) > 0.01:
+        return False
+    if view.mode == "heat":
+        if floor_f is None or indoor_f >= floor_f:
+            return False
+        gap = floor_f - indoor_f
+    else:
+        if ceiling_f is None or indoor_f <= ceiling_f:
+            return False
+        gap = indoor_f - ceiling_f
+    if gap > COMFORT_SWING_TOLERANCE_MAX_F + _EPS:
+        return False
+    if gap <= max(0.0, view.swing_f) + max(0.0, view.sensor_step_f) + _EPS:
+        return True
+    raised = view.offset_f > _EPS
+    at_cap = view.offset_f >= view.cap_f - _EPS
+    since = view.seconds_since_raise
+    if not raised or at_cap or since is None or not 0.0 <= since <= REMOTE_CORRECTION_TOLERANCE_MAX_S:
+        return False
+    return view.equipment_active or since <= view.wait_s

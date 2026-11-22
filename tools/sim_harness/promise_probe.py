@@ -40,6 +40,7 @@ from custom_components.climate_advisor.promise_journal import (  # noqa: E402
     Mark,
     PromiseJournal,
     Reading,
+    engine_comfort_target_f,
 )
 from custom_components.climate_advisor.whf_safety_decision import (  # noqa: E402
     house_is_sealed,
@@ -511,6 +512,7 @@ class FakeHassPromiseSource:
             setpoint_f=setpoint,
             setpoint_low_f=setpoint_low,
             setpoint_high_f=setpoint_high,
+            comfort_target_f=engine_comfort_target_f(s.engine),
             fan_on=fan_on,
             contacts_open=contacts_open,
             automation_enabled=self._automation_enabled(),

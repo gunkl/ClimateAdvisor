@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.64"
+VERSION = "0.9.66"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1903,6 +1903,19 @@ COMFORT_DEVIATION_FLOOR_F: float = 0.5
 # mis-learned large swing cannot silence the incident, the violation minutes and the stall alert. Caps ONLY the
 # comfort tolerance; the learned swing itself (swing_heat_f / swing_cool_f) is unchanged.
 COMFORT_SWING_TOLERANCE_MAX_F: float = 2.5
+# Issue #1678: while the remote-sensor outer loop (#1194) is correcting the room it reads (offset raised, below its
+# cap, the equipment starting inside the startup wait or running in the loop's direction), the comfort detectors
+# tolerate the deviation for at most this long after the raise. A furnace that runs this long without bringing the
+# room back still raises the incident, the violation minutes and the stall alert.
+REMOTE_CORRECTION_TOLERANCE_MAX_S: float = 45 * 60.0
+# Issue #1678: distinct remote-sensor readings kept to learn the sensor's reading step (the loop's trigger reading is
+# up to one step past the swing), and the bounds of the learned step (degF). Fewer than 3 distinct readings: step 0.
+REMOTE_SENSOR_STEP_SAMPLES: int = 24
+REMOTE_SENSOR_STEP_MIN_F: float = 0.05
+REMOTE_SENSOR_STEP_MAX_F: float = 1.8
+# Issue #1678: after the band steps toward the room at wake time (sleep floor -> awake floor), the comfort detectors
+# allow the planned recovery for at most this long while the thermostat holds that side and is set to the new edge.
+WAKE_STEP_GRACE_S: float = 30 * 60.0
 THERMAL_SWING_MIN_F: float = 0.1
 THERMAL_SWING_MAX_F: float = 5.0
 # An on-transition within this many seconds after a setpoint (or HVAC mode) change is a jump

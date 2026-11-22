@@ -1237,14 +1237,18 @@ def _p7_thermostat_deadband(r: Reading, side: str, edge: float) -> bool:
     if (r.hvac_action or "").lower() != "idle":
         return False
     dual = mode in ("heat_cool", "auto")
+    # Issue #1678: while the remote-sensor loop holds an offset the thermostat is set to target + offset; the excuse
+    # judges the comfort TARGET (the setpoint without the loop's raise), so the loop's own raise -- and the seconds
+    # between that raise and the equipment starting -- never turn a deadband reading into a miss.
+    single = r.comfort_target_f if r.comfort_target_f is not None else r.setpoint_f
     if side == "below":
-        sp = r.setpoint_low_f if dual else r.setpoint_f
+        sp = r.setpoint_low_f if dual else single
         if sp is None or sp < edge - _P7_EDGE_EPS_F:
             return False
         past = edge - r.indoor_f
         past_sp = sp - r.indoor_f
     else:
-        sp = r.setpoint_high_f if dual else r.setpoint_f
+        sp = r.setpoint_high_f if dual else single
         if sp is None or sp > edge + _P7_EDGE_EPS_F:
             return False
         past = r.indoor_f - edge
@@ -1366,6 +1370,7 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
                 "start": r.ts,
                 "side": side,
                 "worst": 0.0,
+                "depth": 0.0,  # Issue #1678: the deepest reading past the UN-slackened band edge (what P7 reports)
                 "cross": None,
                 "last": r.ts,
                 "excused": {},  # excused_by -> {"min": minutes, "iv": [(start, end), ...]}
@@ -1374,6 +1379,7 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
         cur["last"] = r.ts
         cur["worst"] = max(cur["worst"], dist)
         edge = cfg.floor_lo(r.ts) if side == "below" else cfg.ceiling_hi(r.ts)
+        cur["depth"] = max(cur["depth"], (edge - r.indoor_f) if side == "below" else (r.indoor_f - edge))
         if _p7_thermostat_deadband(r, side, edge):
             pending = (cur, r.ts, EXCUSED_BY_THERMOSTAT_DEADBAND)
             continue
@@ -1385,6 +1391,7 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
         if cur["cross"] is None and _mins(cur["start"], r.ts) > NUMBERS.P7_MAX_MIN:
             cur["cross"] = r.ts
             cur["worst_at_cross"] = cur["worst"]
+            cur["depth_at_cross"] = cur["depth"]
     return runs
 
 
@@ -1403,6 +1410,9 @@ def check_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
             continue
         minutes = _mins(run["start"], run["cross"])
         worst = run["worst_at_cross"]
+        # Issue #1678: the occupant is told how far past the comfort range the room went (the band edge), not the
+        # distance past P7's own 1 F slack, which read as "0.6 F outside" for a room 1.6 F below its floor.
+        depth = run.get("depth_at_cross", worst)
         hits.append(
             Hit(
                 promise="comfort_kept",
@@ -1412,11 +1422,11 @@ def check_p7_comfort_kept(inp: PromiseInput, cfg: PromiseConfig) -> list[Hit]:
                 **_detail(
                     i18n.Msg(
                         "notify.promise_p7_comfort_kept",
-                        worst=i18n.TempDelta(worst, cfg.temp_unit, 1),
+                        worst=i18n.TempDelta(depth, cfg.temp_unit, 1),
                         minutes=round(minutes),
                     )
                 ),
-                evidence=_ev(minutes=minutes, worst_f=worst, side=run["side"]),
+                evidence=_ev(minutes=minutes, worst_f=worst, depth_f=depth, side=run["side"]),
             )
         )
     return hits

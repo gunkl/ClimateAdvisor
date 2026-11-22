@@ -3689,11 +3689,26 @@ def _render_incident_detected(p: dict, unit: str) -> tuple[Cell, Cell]:
             settings_parts.append(
                 _m(
                     "fact_indoor_vs_band",
-                    indoor=_tp(float(indoor_f), unit),
+                    indoor=_tp(float(indoor_f), unit, 1),  # Issue #1678: 64.4, not 64
                     floor=_tp(float(comfort_heat), unit),
                     ceiling=_tp(float(comfort_cool), unit),
                 )
             )
+    # Issue #1678: which sensor was judged (the bedroom at night) and the tolerance that judged it.
+    source_name = p.get("indoor_source_name")
+    if source_name:
+        settings_parts.append(
+            _m("fact_indoor_sensor", name=str(source_name), role=str(p.get("indoor_source_role") or "other"))
+        )
+    tolerance_f = p.get("tolerance_f")
+    if isinstance(tolerance_f, (int, float)) and not isinstance(tolerance_f, bool):
+        settings_parts.append(
+            _m(
+                "fact_tolerance",
+                tolerance=_tdp(float(tolerance_f), unit, 1),
+                kind=str(p.get("tolerance_kind") or "other"),
+            )
+        )
     occupancy = p.get("occupancy_mode")
     if occupancy:
         settings_parts.append(_m("fact_occupancy", occupancy=occupancy_w(str(occupancy))))
@@ -3727,6 +3742,15 @@ def _render_incident_detected(p: dict, unit: str) -> tuple[Cell, Cell]:
                 result=str(result or ""),
             )
         )
+        # Issue #1678: the remote-sensor loop sets the thermostat above (heat) / below (cool) the comfort target.
+        target_f = p.get("comfort_target_f")
+        numbers = (
+            isinstance(target_f, (int, float)) and not isinstance(target_f, bool) and isinstance(last_sp, (int, float))
+        )
+        if numbers and abs(float(target_f) - float(last_sp)) > 0.05:
+            settings_parts.append(
+                _m("fact_target_commanded", target=_tp(float(target_f), unit), commanded=_tp(float(last_sp), unit))
+            )
     if cls == "grace_churn":
         last_fan = p.get("last_fan_event")
         settings_parts.append(

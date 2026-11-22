@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "請在 {t} 前關窗",
   "timeline.card.close_hold_heat": "請關窗保暖——外面比較冷（戶外 {outdoor}，室內 {indoor}）。",
+  "timeline.card.close_humid": "請關窗——戶外潮濕（露點 {dew_point}）。",
   "timeline.card.close_not_helping": "請關窗——目前戶外空氣幫不上忙（戶外 {outdoor}，室內 {indoor}）。",
   "timeline.card.open_at": "請在 {t} 開窗",
   "timeline.card.open_briefly": "請短暫開窗——外面比較暖（戶外 {outdoor}，室內 {indoor}）。",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}：CA 傳送每日簡報。",
   "timeline.step.ceiling_guard.default": "{t}：CA 開啟冷氣，守住 {ceiling} 的上限。",
   "timeline.step.held.direction_veto.heat": "請保持窗戶關閉以保暖——戶外（{outdoor}）會讓室內降到 {floor} 下限以下。",
+  "timeline.step.held.direction_veto.humid": "請暫時保持窗戶關閉——戶外潮濕（露點 {dew_point}）。",
   "timeline.step.held.direction_veto.warm": "請暫時保持窗戶關閉——戶外（{outdoor}）還沒有比室內（{indoor}）涼。",
   "timeline.step.held.pause": "{base}門窗關閉後才會套用。",
   "timeline.step.held.suffix": "{base}CA 在 {until} 恢復排程時才會套用。",

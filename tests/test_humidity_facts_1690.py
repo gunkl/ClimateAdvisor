@@ -705,9 +705,8 @@ def test_a_reserved_event_must_be_mapped_when_production_first_emits_it():
         "tools/sim_harness/outcomes.py or re-justify it under rule 8, and drop it from RESERVED_EVENT_TYPES"
     )
     # the scanner itself sees every emit shape (so the guard cannot pass vacuously)
-    probe = {
-        "a.py": 'self._emit_event("overcool_started", {})',
-        "b.py": 'self._exit_nat_vent(event_type="overcool_ended")',  # #1691 took nat_vent_humid_skip off the list
-        "c.py": 'events.append({"type": "humid_windows_close_notice"})',
-    }
-    assert _emitted_reserved(probe) == {"overcool_started", "overcool_ended", "humid_windows_close_notice"}
+    # #1691 / #1692 took nat_vent_humid_skip / humid_windows_close_notice off the list: each shape is probed on its own
+    # with a name still reserved, so a shape the scanner misses fails here.
+    assert _emitted_reserved({"a.py": 'self._emit_event("overcool_started", {})'}) == {"overcool_started"}
+    assert _emitted_reserved({"b.py": 'self._exit_nat_vent(event_type="overcool_ended")'}) == {"overcool_ended"}
+    assert _emitted_reserved({"c.py": 'events.append({"type": "overcool_ended"})'}) == {"overcool_ended"}

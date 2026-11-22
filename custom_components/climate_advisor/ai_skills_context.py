@@ -654,6 +654,52 @@ State contradiction warning:
 # ---------------------------------------------------------------------------
 
 
+def _moisture_lines(coordinator: Any) -> list[str]:
+    """CURRENT STATE lines for moisture (Issue #1696): the indoor and outdoor decision dew point with its relative
+    humidity, the humid-air guard, and today's decisions it changed (window advice withdrawn, notices sent, fan starts
+    held). Temperatures in the user's unit. Empty when the coordinator has no humidity facts (older stubs)."""
+    display = getattr(coordinator, "humidity_display", None)
+    if not callable(display):
+        return []
+    try:
+        shown = display()
+        counts_fn = getattr(coordinator, "humid_decisions_today", None)
+        counts = counts_fn() if callable(counts_fn) else {}
+        unit = (getattr(coordinator, "config", None) or {}).get("temp_unit", "fahrenheit")
+    except Exception:  # noqa: BLE001 - the context goes out without these lines rather than fail
+        return []
+    if not isinstance(shown, dict):
+        return []
+    counts = counts if isinstance(counts, dict) else {}
+
+    def _reading(sig: dict[str, Any]) -> str:
+        dp = sig.get("dp_f")
+        if not isinstance(dp, (int, float)):
+            return "unknown"
+        rh = sig.get("rh")
+        rh_text = f" (RH {rh:.0f}%)" if isinstance(rh, (int, float)) else ""
+        return f"{format_temp(dp, unit, 1)}{rh_text}"
+
+    guard = shown.get("guard") or {}
+    ceiling = guard.get("ceiling_f")
+    if not isinstance(ceiling, (int, float)):
+        guard_text = "off"
+    elif guard.get("blocks"):
+        guard_text = (
+            f"blocking ({guard.get('reason')}; ceiling {format_temp(ceiling, unit, 1)}): open-window advice withdrawn,"
+            " planned window period ended, no new fan / nat-vent starts"
+        )
+    else:
+        guard_text = f"clear (ceiling {format_temp(ceiling, unit, 1)})"
+    return [
+        f"  indoor_dew_point:    {_reading(shown.get('indoor') or {})}",
+        f"  outdoor_dew_point:   {_reading(shown.get('outdoor') or {})}",
+        f"  humid_air_guard:     {guard_text}",
+        f"  humid_decisions_today: close-window notices={int(counts.get('close_notices', 0))}"
+        f" fan starts held={int(counts.get('fan_starts_held', 0))}",
+    ]
+
+
 async def build_current_state_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
     """Build CURRENT STATE section from coordinator.data."""
     try:
@@ -671,6 +717,7 @@ async def build_current_state_context(hass: Any, coordinator: Any, **kwargs: Any
         occupancy_mode = data.get(ATTR_OCCUPANCY_MODE, "unknown")
         fan_status = data.get(ATTR_FAN_STATUS, "unknown")
         contact_status = data.get(ATTR_CONTACT_STATUS, "unknown")
+        moisture = _moisture_lines(coordinator)
 
         lines = [
             "=== CURRENT STATE ===",
@@ -686,6 +733,7 @@ async def build_current_state_context(hass: Any, coordinator: Any, **kwargs: Any
             f"  occupancy_mode:      {occupancy_mode}",
             f"  fan_status:          {fan_status}",
             f"  contact_status:      {contact_status}",
+            *moisture,
             "",
         ]
         return "\n".join(lines)
@@ -2813,6 +2861,20 @@ def _render_thermostat_recalibration_ended(p: dict, unit: str) -> tuple[Cell, Ce
 
 
 @_msg_renderer
+def _render_humid_windows_close_notice(p: dict, unit: str) -> tuple[Cell, Cell]:
+    """Issue #1692: humid outdoor air with the windows open; the occupant was asked to close them (advice only)."""
+    dp = p.get("outdoor_dp_f")
+    shown: Any = _tp(dp, unit, 1) if isinstance(dp, (int, float)) else _m("unknown_paren")
+    label = _m("humid_windows_close_notice", dew_point=shown)
+    parts: list[Cell] = []
+    if p.get("reason") == "ceiling" and isinstance(p.get("ceiling_f"), (int, float)):
+        parts.append(_m("fact_humid_ceiling", limit=_tp(p.get("ceiling_f"), unit, 1)))
+    elif p.get("reason") == "wetter_than_house" and isinstance(p.get("indoor_dp_f"), (int, float)):
+        parts.append(_m("fact_humid_wetter", indoor=_tp(p.get("indoor_dp_f"), unit, 1)))
+    return label, _join(parts)
+
+
+@_msg_renderer
 def _render_humidity_source_changed(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1455: the source a chart humidity line (room, bedroom, outdoor) is read from changed. Chart only."""
     subject = str(p.get("subject") or "humidity")
@@ -4090,6 +4152,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "thermostat_recalibration_started": _render_thermostat_recalibration_started,
     "thermostat_recalibration_ended": _render_thermostat_recalibration_ended,
     "humidity_source_changed": _render_humidity_source_changed,
+    "humid_windows_close_notice": _render_humid_windows_close_notice,
     "forecast_model_changed": _render_forecast_model_changed,
     "fan_blind_started": _render_fan_blind_started,
     "fan_blind_stopped": _render_fan_blind_stopped,

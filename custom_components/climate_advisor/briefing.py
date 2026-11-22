@@ -11,6 +11,7 @@ Voice rules for the conversational body:
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -187,6 +188,71 @@ class _BriefingFacts:
     window_veto: str | None = None
     # Issue #1404: the time-of-use bank holding the house right now (``automation.CurrentHold`` with a bank), or None.
     current_hold: Any = None
+    # Issue #1692: the outdoor dew point while the humid-air guard withholds outdoor air (None: not blocking), so the
+    # Windows row says why the windows stay closed.
+    humid_dp: float | None = None
+
+
+@dataclass(frozen=True)
+class BriefingHumidity:
+    """What the briefing says about moisture (Issue #1696): the facts the decisions read, gathered by the coordinator.
+
+    Dew points (internal °F) are the decision dew points (``EngineFacts``: same-device pairing, glitch / freshness
+    checks, 15-minute median), with the relative humidity of the same reading; None = unknown (not shown).
+    ``blocking`` is the humid-air guard's reason while it withholds outdoor air now (``ceiling`` or
+    ``wetter_than_house``). The counts are today's decisions the guard changed: fan / nat-vent starts it held
+    (``nat_vent_humid_skip``, emitted by the #1691 fan-start guard) and close-the-windows notices
+    (``humid_windows_close_notice``).
+    """
+
+    indoor_dp_f: float | None = None
+    indoor_rh: float | None = None
+    outdoor_dp_f: float | None = None
+    outdoor_rh: float | None = None
+    blocking: str | None = None
+    ceiling_f: float | None = None
+    fan_starts_held_today: int = 0
+    close_notices_today: int = 0
+
+
+def _rh_param(value: float | None) -> int | str:
+    return int(round(value)) if isinstance(value, (int, float)) else ""
+
+
+def _humidity_msg(h: BriefingHumidity | None, temp_unit: str) -> i18n.Msg | None:
+    """The "Humidity" section (Issue #1696): indoor and outdoor dew point (and relative humidity), and each decision
+    the humid-air guard changed. None when no dew point is known and nothing was changed (the section is left out)."""
+    if h is None:
+        return None
+    lines: list[str | i18n.Msg] = []
+    for where, dp, rh in (("indoor", h.indoor_dp_f, h.indoor_rh), ("outdoor", h.outdoor_dp_f, h.outdoor_rh)):
+        if dp is None:
+            continue
+        lines.append(
+            i18n.Msg(
+                "briefing.humidity.reading",
+                where=where,
+                dew_point=i18n.Temp(dp, temp_unit),
+                has_rh="yes" if rh is not None else "no",
+                rh=_rh_param(rh),
+            )
+        )
+    if h.blocking is not None and h.outdoor_dp_f is not None:
+        lines.append(
+            i18n.Msg(
+                "briefing.humidity.withheld",
+                why="ceiling" if h.blocking == "ceiling" else "wetter",
+                dew_point=i18n.Temp(h.outdoor_dp_f, temp_unit),
+                limit=i18n.Temp(h.ceiling_f, temp_unit) if h.ceiling_f is not None else "",
+            )
+        )
+    if h.fan_starts_held_today > 0:
+        lines.append(i18n.Msg("briefing.humidity.fan_held", count=h.fan_starts_held_today))
+    if h.close_notices_today > 0:
+        lines.append(i18n.Msg("briefing.humidity.close_notices", count=h.close_notices_today))
+    if not lines:
+        return None
+    return i18n.Msg("briefing.humidity", items=_bullet_lines(lines))
 
 
 def _local(moment: datetime, now: datetime) -> datetime:
@@ -434,6 +500,7 @@ def generate_briefing_msg(
     now: datetime | None = None,
     timeline: Any | None = None,
     current_hold: Any | None = None,
+    humidity: BriefingHumidity | None = None,
 ) -> i18n.Msg:
     """Build the daily climate briefing as ONE message (``briefing.full.<day type>``; ``briefing.tldr`` for
     ``verbosity="tldr_only"``). ``generate_briefing()`` renders it.
@@ -513,6 +580,15 @@ def generate_briefing_msg(
     """
     ensure_catalogs()
     c = classification
+    if humidity is not None and humidity.blocking is not None:
+        # Issue #1692: the humid-air guard withholds outdoor air as the briefing is written, so the day's plan is not
+        # a window plan (the same verdict the fan starts, the windows gate and the Next Action card read). A copy:
+        # the shared classification keeps the classifier's answer for the automation.
+        c = copy.copy(classification)
+        c.windows_recommended = False
+        c.forecast_windows_recommended = False
+        c.window_opportunity_morning = False
+        c.window_opportunity_evening = False
 
     _LOGGER.debug(
         "Generating briefing — day_type=%s, trend=%s, comfort_heat=%.0f\u00b0F, comfort_cool=%.0f\u00b0F, verbosity=%s",
@@ -637,6 +713,8 @@ def generate_briefing_msg(
     )
     if current_hold is not None and hasattr(current_hold, "band"):
         facts = replace(facts, current_hold=current_hold)
+    if humidity is not None and humidity.blocking is not None and humidity.outdoor_dp_f is not None:
+        facts = replace(facts, humid_dp=humidity.outdoor_dp_f)  # Issue #1692: the Windows row says why
     tldr = _tldr_msg(c, config, temp_unit=temp_unit, facts=facts)
 
     if verbosity == "tldr_only":
@@ -712,6 +790,7 @@ def generate_briefing_msg(
             steps = _slots("briefing.steps", now=now_msg, ops=_bullet_lines(ops))
 
     tonight = _tonight_msg(c, facts, temp_unit=temp_unit, adaptive_thermal_active=adaptive_thermal_active)
+    humid_section = _humidity_msg(humidity, temp_unit)  # Issue #1696
 
     # Learning suggestions (kept structured for accept/dismiss clarity): the learner's own sentences as bullets.
     suggestions = None
@@ -726,6 +805,7 @@ def generate_briefing_msg(
         body=body,
         leaving=leaving,
         fresh_air=fresh_air,
+        humidity=humid_section,
         grace=grace,
         steps=steps,
         tonight=tonight,
@@ -907,6 +987,13 @@ def _tldr_msg(
         windows_row = i18n.Msg("briefing.tldr.windows_hot_morning", when=facts.close.msg, threshold=threshold)
     elif facts.hot_evening and facts.hot_evening_open is not None:
         windows_row = i18n.Msg("briefing.tldr.windows_hot_evening", open=_clock(facts.hot_evening_open))
+    elif facts.window_veto == "humid" or (facts.humid_dp is not None and not facts.unoccupied):
+        # Issue #1692: withdrawn because the outdoor air is humid (the live veto on a running period, or the gate)
+        windows_row = i18n.Msg(
+            "briefing.tldr.windows_humid",
+            has_dp="yes" if facts.humid_dp is not None else "no",
+            dew_point=i18n.Temp(facts.humid_dp, temp_unit) if facts.humid_dp is not None else "",
+        )
     elif facts.window_veto == "heat":
         windows_row = i18n.Msg("briefing.tldr.windows_veto_heat")
     elif facts.window_veto == "warm":

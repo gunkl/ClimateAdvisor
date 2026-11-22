@@ -650,6 +650,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 **_text_fields("pre_cool_status", data.get("pre_cool_status"), _lang),
                 # Issue #1699: "Cooling off: outdoor 3 °C (below 16 °C)" while a lockout / the season takes a side away.
                 **_text_fields("zone_lockout_status", data.get("zone_lockout_status"), _lang),
+                # Issue #1692: the Status line while window advice is withheld on humid outdoor air (null otherwise)
+                **_text_fields("humid_air_status", data.get("humid_air_status"), _lang, code=True),
                 "coordinator_healthy": _coordinator_healthy,
                 # Issue #796 PR9: dashboard zone selector. loadStatus() polls every
                 # cycle regardless of which tab is active, so this is the one

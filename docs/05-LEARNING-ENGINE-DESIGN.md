@@ -59,7 +59,7 @@ Suggestions are generated when `generate_suggestions()` is called (typically dur
 
 ### Pattern: Low Window Compliance
 
-**Detection:** Of days where windows were recommended, compliance < 30%.
+**Detection:** Of days where windows were recommended, compliance < 30%. A day the humid-air guard withdraws the window advice all day (Issue #1692) is not a window day, so it counts neither way (intended: a humid night is not a window night).
 **Suggestion (advice):** "Opening them is optional: with the windows closed, Climate Advisor keeps the house comfortable with the HVAC, which uses slightly more energy."
 **If accepted ("Got it"):** nothing changes (Issue #1652). Before, accepting set `disable_window_recommendations`, which no code reads: the text promised that window tips would stop and they never did. There is no setting that turns the window tips off.
 

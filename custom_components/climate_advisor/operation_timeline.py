@@ -471,6 +471,15 @@ SENTENCES: dict[str, Sentence] = dict(
             "applied by timeline_surfaces.apply_direction_veto on every read; never stored in the latched plan",
         ),
         _s(
+            "held.direction_veto.humid",
+            "Keep windows closed for now — it's humid outside (dew point {dew_point}).",
+            {"dew_point": "temp"},
+            "the humid-air guard's verdict on the live dew points (Issue #1692, R3b surface layer)",
+            "a window period is running, the windows are shut, and the outdoor air is too humid to bring in "
+            "(dew point at or above the ceiling, or wetter than the house)",
+            "applied by timeline_surfaces.apply_direction_veto on every read; never stored in the latched plan",
+        ),
+        _s(
             "held.pause",
             "{base} It applies when the door or window closes.",
             {"base": "text"},

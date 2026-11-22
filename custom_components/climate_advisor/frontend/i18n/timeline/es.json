@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Cierra las ventanas antes de las {t}",
   "timeline.card.close_hold_heat": "Cierra las ventanas para conservar el calor: fuera hace más fresco ({outdoor} frente a {indoor}).",
+  "timeline.card.close_humid": "Cierra las ventanas — hace humedad fuera (punto de rocío {dew_point}).",
   "timeline.card.close_not_helping": "Cierra las ventanas: ahora el exterior no ayuda ({outdoor} frente a {indoor}).",
   "timeline.card.open_at": "Abre las ventanas: {t}",
   "timeline.card.open_briefly": "Abre las ventanas un momento: fuera hace más calor ({outdoor} frente a {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA envía el resumen diario.",
   "timeline.step.ceiling_guard.default": "{t}: CA enciende el aire acondicionado para mantener el límite máximo de {ceiling}.",
   "timeline.step.held.direction_veto.heat": "Mantén las ventanas cerradas para conservar el calor: el exterior ({outdoor}) enfriaría la casa por debajo de su límite inferior de {floor}.",
+  "timeline.step.held.direction_veto.humid": "Mantén las ventanas cerradas por ahora — hace humedad fuera (punto de rocío {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Mantén las ventanas cerradas por ahora: el exterior ({outdoor}) aún no está más fresco que el interior ({indoor}).",
   "timeline.step.held.pause": "{base} Se aplica cuando se cierre la puerta o la ventana.",
   "timeline.step.held.suffix": "{base} Se aplica cuando CA reanude la programación a las {until}.",

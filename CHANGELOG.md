@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.76] — 2026-11-22
+
+### Added
+- #1692, #1696 (humidity, part of #1507): on a humid night Climate Advisor stops telling you to open the windows. When the outdoor dew point is at or above the Humid-Air Guard ceiling (65 °F by default), or the outdoor air is humid and wetter than the house, the window advice is withdrawn everywhere at once: the Next Action card says "Keep windows closed — it's humid outside (dew point X)", the plan list and the briefing drop the open-window step, and the bedroom night strategy no longer offers the windows or the whole-house fan tonight. The same verdict stops the fan starts (#1691), so the fan and the advice never disagree. If the windows are already open, you get one notice: "Humid outside (dew point X): close the windows and the AC will take over." (once per episode, at most one an hour, not while you are away); with the windows open the thermostat stays off and the fan does not start, so closing them is what lets the AC dry the house. Because the advice is withdrawn, a planned window period also ends early on a humid night, the Status page says why ("No open-window advice: humid outside ..."), and such a day is not counted for or against your window-tips record. The morning briefing has a new 💧 Humidity section with the indoor and outdoor dew point and what the guard changed today, and the AI assistant sees the same facts. A dry night, unknown humidity, or the guard switched off in Settings behaves as before.
+
 ## [0.9.75] — 2026-11-22
 
 ### Added

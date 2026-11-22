@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Зачиніть вікна до {t}",
   "timeline.card.close_hold_heat": "Зачиніть вікна, щоб зберегти тепло — надворі холодніше ({outdoor} vs {indoor}).",
+  "timeline.card.close_humid": "Зачиніть вікна — надворі волого (точка роси {dew_point}).",
   "timeline.card.close_not_helping": "Зачиніть вікна — повітря надворі більше не допомагає ({outdoor} vs {indoor}).",
   "timeline.card.open_at": "Відчиніть вікна о {t}",
   "timeline.card.open_briefly": "Відчиніть вікна ненадовго — надворі тепліше ({outdoor} vs {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA надсилає щоденний огляд.",
   "timeline.step.ceiling_guard.default": "{t}: CA вмикає кондиціонер, щоб утримати верхню межу {ceiling}.",
   "timeline.step.held.direction_veto.heat": "Тримайте вікна зачиненими, щоб зберегти тепло — надворі ({outdoor}) будинок охолов би нижче нижньої межі {floor}.",
+  "timeline.step.held.direction_veto.humid": "Поки що тримайте вікна зачиненими — надворі волого (точка роси {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Поки що тримайте вікна зачиненими — надворі ({outdoor}) ще не прохолодніше, ніж усередині ({indoor}).",
   "timeline.step.held.pause": "{base} Це діє, коли двері або вікно зачиняться.",
   "timeline.step.held.suffix": "{base} Це діє, коли CA відновить розклад о {until}.",

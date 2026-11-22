@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Закройте окна до {t}",
   "timeline.card.close_hold_heat": "Закройте окна, чтобы сохранить тепло — на улице холоднее ({outdoor} vs {indoor}).",
+  "timeline.card.close_humid": "Закройте окна — на улице влажно (точка росы {dew_point}).",
   "timeline.card.close_not_helping": "Закройте окна — воздух снаружи сейчас не помогает ({outdoor} vs {indoor}).",
   "timeline.card.open_at": "Откройте окна в {t}",
   "timeline.card.open_briefly": "Откройте окна ненадолго — на улице теплее ({outdoor} vs {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA отправляет ежедневную сводку.",
   "timeline.step.ceiling_guard.default": "{t}: CA включает кондиционер, чтобы удержать верхнюю границу {ceiling}.",
   "timeline.step.held.direction_veto.heat": "Держите окна закрытыми, чтобы сохранить тепло — на улице ({outdoor}) дом остыл бы ниже нижней границы {floor}.",
+  "timeline.step.held.direction_veto.humid": "Пока держите окна закрытыми — на улице влажно (точка росы {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Пока держите окна закрытыми — на улице ({outdoor}) ещё не прохладнее, чем в доме ({indoor}).",
   "timeline.step.held.pause": "{base} Это действует, когда дверь или окно будут закрыты.",
   "timeline.step.held.suffix": "{base} Это действует, когда CA возобновит расписание в {until}.",

@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Zamknij okna do {t}",
   "timeline.card.close_hold_heat": "Zamknij okna, aby zatrzymać ciepło — na zewnątrz jest chłodniej ({outdoor} vs {indoor}).",
+  "timeline.card.close_humid": "Zamknij okna — na zewnątrz jest wilgotno (punkt rosy {dew_point}).",
   "timeline.card.close_not_helping": "Zamknij okna — powietrze z zewnątrz już nie pomaga ({outdoor} vs {indoor}).",
   "timeline.card.open_at": "Otwórz okna o {t}",
   "timeline.card.open_briefly": "Otwórz okna na chwilę — na zewnątrz jest cieplej ({outdoor} vs {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA wysyła codzienne podsumowanie.",
   "timeline.step.ceiling_guard.default": "{t}: CA włącza klimatyzację, aby utrzymać górną granicę {ceiling}.",
   "timeline.step.held.direction_veto.heat": "Trzymaj okna zamknięte, aby zatrzymać ciepło — na zewnątrz ({outdoor}) dom wychłodziłby się poniżej dolnej granicy {floor}.",
+  "timeline.step.held.direction_veto.humid": "Na razie zostaw okna zamknięte — na zewnątrz jest wilgotno (punkt rosy {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Na razie trzymaj okna zamknięte — na zewnątrz ({outdoor}) nie jest jeszcze chłodniej niż w środku ({indoor}).",
   "timeline.step.held.pause": "{base} Obowiązuje to po zamknięciu drzwi lub okna.",
   "timeline.step.held.suffix": "{base} Obowiązuje to od chwili, gdy CA wznowi harmonogram o {until}.",

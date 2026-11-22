@@ -194,6 +194,19 @@ regenerate-on-change.
 
 `generate_briefing(timeline=...)` (the coordinator passes `_surface_timeline()`): the window close/open times in the TLDR "Windows" row and the conversational body are the operation timeline's window steps for today (`timeline_surfaces.timeline_windows`), not a re-derivation; on a warm/mild day with no window period the briefing gives no window advice; a period whose open step is held by the live direction veto reads `Windows: Closed for now - outdoor air would cool the house below its floor` (or `... isn't cooler than indoor yet`) instead of `Close by T`; while a period's open is still ahead the warm/mild Windows row gives both times (`Open 10:00 AM - close by 5:00 PM`, owner redesign 2026-11-06, superseding the #876 close-only row for the timeline-read case), and only `Close by T` once the open is behind; a "Today's Steps" section lists the timeline's step sentences up to midnight (the daily briefing send itself excluded). Without a timeline (direct calls, tests, a degraded coordinator) every fact is gathered as before. See [Operation Timeline Spec](operation-timeline-spec.md#authoritative-surfaces-r3b).
 
+## Humidity (Issues #1692, #1696)
+
+`generate_briefing(humidity=BriefingHumidity(...))` (the coordinator passes `_briefing_humidity()`): the decision dew
+points indoors and outdoors with the relative humidity of the same reading, the humid-air guard's reason while it
+blocks, and today's decisions it changed (fan / nat-vent starts held, `nat_vent_humid_skip` from #1691;
+close-the-windows notices). Rendered as the `briefing.humidity` section after the fresh-air section (omitted when no
+dew point is known and nothing changed). While the guard blocks as the briefing is written, the day's plan is not a
+window plan: the body and the Windows row are built from a copy of the classification with the window flags off and
+the row reads `Windows: Closed — humid outside (dew point X)` (also for a running period the live veto holds as
+`humid`). The shown text regenerates when the guard engages or releases (`_briefing_humid_blocking`, one of the
+`_maybe_regenerate_briefing_for_drift` triggers). See
+[Computation Reference](08-COMPUTATION-REFERENCE.md#humid-air-window-advice-issue-1692).
+
 ## Coherence Validation (Issue #518)
 
 `tools/briefing_review.py` renders `generate_briefing()` across a `day_type` x `hvac_mode` x

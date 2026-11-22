@@ -931,6 +931,42 @@ def plan_night(inp: NightInputs) -> NightStrategy:
     )
 
 
+def withhold_outdoor_air(strategy: NightStrategy, dew_point_f: float | None) -> NightStrategy:
+    """``strategy`` without its open-window options while the humid-air guard blocks (Issue #1692). Pure.
+
+    Occupant view: on a muggy evening the bedroom advice never says "open the windows" or "run the fan" (which opens
+    them): the same verdict that stops the fan starts and withdraws the window advice (``dew_point_f``: the outdoor
+    dew point while it blocks, None when it does not). Closed and the blower (windows shut) stay; the recommendation
+    is re-picked from what is left by the same rule as ``plan_night``. Applied on every read of the planned night with
+    the LIVE latch only: tonight's future hours have no humidity forecast (deferred with the other forecast layers).
+    """
+    if dew_point_f is None:
+        return strategy
+    keep = tuple(o for o in strategy.options if not (o.key in _SPECS and _SPECS[o.key].windows))
+    if len(keep) == len(strategy.options):
+        return strategy
+    withheld = tuple(
+        {
+            "key": o.key,
+            "label": o.label,
+            "class": o.cls,
+            "reasons": [f"outdoor air too humid (dew point {dew_point_f:.1f} F)"],
+            "humid_air": True,
+        }
+        for o in strategy.options
+        if o.key in _SPECS and _SPECS[o.key].windows
+    )
+    pick_pool = [o for o in keep if o.runs or o.key == OPT_CLOSED]
+    recommended = pick_pool[0].key if pick_pool else (keep[0].key if keep else None)
+    return dataclasses.replace(
+        strategy,
+        options=keep,
+        recommended=recommended,
+        hidden=tuple(strategy.hidden) + withheld,
+        debug={**dict(strategy.debug), "humid_air_dp_f": round(float(dew_point_f), 2)},
+    )
+
+
 # ---------------------------------------------------------------------------------------------- the payload
 FIGURE_KEYS = (
     "bedroom_low_f",

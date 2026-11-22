@@ -391,3 +391,26 @@ class TestTemplatesMatchTheScript:
         step = next(s for s in jobs["ai-review"]["steps"] if "claude-code-action" in s.get("uses", ""))
         assert '--allowedTools "Read,Glob,Grep,Write"' in step["with"]["claude_args"]
         assert "${{" not in step["with"]["prompt"]  # no event text interpolated into the prompt
+
+
+def test_artifact_paths_are_not_hidden_1685():
+    """Issue #1685: upload-artifact skips hidden files by default, so a dot-folder uploaded nothing."""
+    wf = yaml.safe_load((_ROOT / ".github/workflows/submission-check.yml").read_text(encoding="utf-8"))
+    uploads = []
+    for job in wf["jobs"].values():
+        for step in job["steps"]:
+            uses = step.get("uses", "")
+            if "upload-artifact" in uses or "download-artifact" in uses:
+                path = step["with"]["path"]
+                assert not any(part.startswith(".") for part in path.split("/") if part), path
+                if "upload-artifact" in uses:
+                    uploads.append(step["with"])
+    # the inputs every later job needs must fail loudly when missing, not warn
+    submission = next(u for u in uploads if u["name"] == "submission")
+    assert submission["if-no-files-found"] == "error"
+    # the AI writes exactly where its upload looks
+    ai = next(u for u in uploads if u["name"] == "ai-review")
+    review = next(s for s in wf["jobs"]["ai-review"]["steps"] if "claude-code-action" in s.get("uses", ""))
+    assert f"Write ONLY the file {ai['path']}" in review["with"]["prompt"]
+    env = next(s for s in wf["jobs"]["post"]["steps"] if "env" in s)["env"]
+    assert env["AI_FILE"] == ai["path"]

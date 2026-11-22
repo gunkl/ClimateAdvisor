@@ -463,7 +463,7 @@ def cmd_gate() -> None:
 
 def cmd_prepare() -> None:
     repo, number = os.environ["GH_REPO"], int(os.environ["NUMBER"])
-    trigger, out_dir = os.environ["TRIGGER"], Path(os.environ.get("OUT_DIR", ".submission"))
+    trigger, out_dir = os.environ["TRIGGER"], Path(os.environ.get("OUT_DIR", "submission-data"))
     out_dir.mkdir(parents=True, exist_ok=True)
     now = dt.datetime.now(dt.UTC)
 

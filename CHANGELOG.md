@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.70] — 2026-11-22
+
+### Fixed
+- Fix #1685: the automatic submission check (0.9.69) posted nothing. It kept its files in a hidden folder, which GitHub's artifact upload skips, so its later jobs found nothing to read. The folders are no longer hidden, and a missing upload now fails loudly. Nothing changes in your house.
+
 ## [0.9.69] — 2026-11-22
 
 ### Changed

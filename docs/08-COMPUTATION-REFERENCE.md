@@ -4311,6 +4311,32 @@ The indoor path already rejects 32 °F (`MIN_PLAUSIBLE_INDOOR_F` = 40).
 
 Tests: `tests/test_humidity_facts_1690.py`, `tests_ha/test_humidity_facts_realha_1690.py`.
 
+### Humid-air guard predicate (Issue #1691)
+
+**Occupant view:** on a muggy night the whole-house fan or open windows would pull wetter air into the house, and
+short AC runs barely dry it again; on a dry night the same fan is free cooling. One pure predicate decides which,
+so the fan starts and the window advice can never disagree.
+
+- `humidity_facts.humid_air_verdict(indoor_dp_f, outdoor_dp_f, *, ceiling_f, latched)` (and the bool
+  `humid_air_blocks`, and `humid_air_verdict_from_facts(facts, ceiling_f)` on an `EngineFacts`) blocks when:
+  - **ceiling:** outdoor DP >= the ceiling (option `humid_air_guard_ceiling_f`, 55-70 °F, default 65 °F); released at
+    or below the ceiling - 1 °F (latch `humid_air_ceiling`); or
+  - **wetter than the house:** outdoor DP >= 55 °F AND outdoor DP >= indoor DP + 2 °F; released once outdoor DP
+    <= 54 °F or the gap <= 1 °F (latch `humid_air_wetter`, one `latch_above` on the derived signal
+    `outdoor_wetter_margin` = min(outdoor - 55, outdoor - indoor - 2), on at 0, off at -1).
+  - Reason `ceiling` wins over `wetter_than_house` when both hold.
+- **Latches live in the facts, the veto is stateless.** `step_humid_latches(dew_points, state, ceiling_f=...)` is
+  the one step (`LATCH_SPECS` plus the configured ceiling spec from `humid_air_latch_specs`); the coordinator's
+  5-minute tick keeps its result in `EngineFacts.humid_latches`, and each decision takes the same step from those
+  latches with the decision's dew points, so a decision between ticks keeps the hysteresis.
+- **Missing inputs** (the table above): the ceiling needs only the outdoor DP; the relative clause needs both;
+  unknown never blocks (today's behaviour). Option `humid_air_guard_enabled` Off (`ceiling_f` None) never blocks.
+- **Option** (`humid_air_ceiling_from_config`): On at 65 °F by default; a stored value outside 55-70 °F is clamped,
+  a non-number falls back to 65 °F. The options form shows and takes it in the configured unit (°C: 12.8-21.1 in
+  0.1 steps), stored as an absolute °F dew point; an untouched value never drifts.
+
+Tests: `tests/test_humid_air_guard_1691.py`.
+
 ### Indoor sensor failure reasons and announcements (Issue #1033)
 
 Mirror of the outdoor-sensor fallback (Issue #1032) for the indoor side. There is no

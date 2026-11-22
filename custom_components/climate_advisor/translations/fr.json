@@ -305,7 +305,9 @@
           "fan_state_feedback": "Retour d’état du ventilateur fiable",
           "fan_remote_entity": "Entité d’événement de la télécommande RF du ventilateur",
           "fan_min_runtime_per_hour": "Durée minimale de fonctionnement du ventilateur par heure",
-          "nat_vent_soft_start_enabled": "Démarrage progressif en ventilation naturelle"
+          "nat_vent_soft_start_enabled": "Démarrage progressif en ventilation naturelle",
+          "humid_air_guard_enabled": "Protection contre l’air humide",
+          "humid_air_guard_ceiling_f": "Plafond de point de rosée"
         },
         "data_description": {
           "door_window_sensors": "Sélectionnez les entités de capteurs binaires à surveiller, y compris les groupes de capteurs binaires qui en réunissent plusieurs.",
@@ -321,7 +323,9 @@
           "fan_state_feedback": "Activez si votre entité de ventilateur ou votre capteur d’état indique l’état réel du moteur (et pas seulement la dernière commande envoyée). Laissez désactivé en cas de doute : CA commandera le ventilateur vers l’état voulu à chaque cycle.",
           "fan_remote_entity": "Entité d’événement facultative qui se déclenche lors d’un appui sur la télécommande murale RF physique (p. ex. avec le firmware gunkl/quietcool-house-fan). Le choix d’une minuterie sur la télécommande (1/2/4/8/12 heures) définit la durée de pause du ventilateur après une commande manuelle. Laissez vide pour désactiver.",
           "fan_min_runtime_per_hour": "Minutes de fonctionnement du ventilateur par heure (0 = désactivé, 60 = toujours allumé). Le cycle n’est pas aligné sur l’horloge : il se décale naturellement selon le démarrage de HA.",
-          "nat_vent_soft_start_enabled": "Si activé, le ventilateur de toute la maison peut démarrer lorsque les températures extérieure et intérieure sont égales (sans attendre que l’extérieur soit nettement plus frais), dès que la température extérieure du jour a passé son maximum et baisse : pour brasser l’air et évacuer la chaleur des combles et de l’inertie thermique, pas pour refroidir massivement. Activé par défaut ; désactivez-le si vous voulez que le ventilateur ne tourne que lorsque l’extérieur est nettement plus frais que l’intérieur. Aucun capteur d’humidité/point de rosée ne protège ce cas aujourd’hui."
+          "nat_vent_soft_start_enabled": "Si activé, le ventilateur de toute la maison peut démarrer lorsque les températures extérieure et intérieure sont égales (sans attendre que l’extérieur soit nettement plus frais), dès que la température extérieure du jour a passé son maximum et baisse : pour brasser l’air et évacuer la chaleur des combles et de l’inertie thermique, pas pour refroidir massivement. Activé par défaut ; désactivez-le si vous voulez que le ventilateur ne tourne que lorsque l’extérieur est nettement plus frais que l’intérieur. Aucun capteur d’humidité/point de rosée ne protège ce cas aujourd’hui.",
+          "humid_air_guard_enabled": "Activé, le ventilateur de toute la maison et la ventilation naturelle ne démarrent pas, et l’ouverture des fenêtres n’est pas suggérée, tant que l’air extérieur est trop humide : son point de rosée atteint ou dépasse le plafond, ou l’air extérieur est humide et nettement plus humide que celui de la maison. La maison reste fermée et la climatisation maintient vos températures. Une session en cours n’est pas arrêtée. Sans mesure d’humidité extérieure, rien ne change. Activé par défaut.",
+          "humid_air_guard_ceiling_f": "Point de rosée extérieur à partir duquel la protection contre l’air humide ne démarre jamais le ventilateur et ne suggère pas d’ouvrir les fenêtres, quelle que soit l’humidité de la maison. Plus bas bloque plus de nuits. La protection se relâche juste en dessous."
         }
       },
       "occupancy": {

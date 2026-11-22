@@ -305,7 +305,9 @@
           "fan_state_feedback": "Ventilatorstatus betrouwbaar",
           "fan_remote_entity": "Gebeurtenisentiteit RF-afstandsbediening ventilator",
           "fan_min_runtime_per_hour": "Minimale ventilatorlooptijd per uur",
-          "nat_vent_soft_start_enabled": "Zachte start natuurlijke ventilatie"
+          "nat_vent_soft_start_enabled": "Zachte start natuurlijke ventilatie",
+          "humid_air_guard_enabled": "Bescherming tegen vochtige lucht",
+          "humid_air_guard_ceiling_f": "Dauwpuntgrens vochtige lucht"
         },
         "data_description": {
           "door_window_sensors": "Selecteer de binaire-sensorentiteiten die je wilt bewaken, ook binaire-sensorgroepen die meerdere sensoren bundelen.",
@@ -321,7 +323,9 @@
           "fan_state_feedback": "Zet aan als je ventilatorentiteit of statussensor de werkelijke motorstatus meldt (niet alleen de laatst verstuurde opdracht). Laat uit als je het niet zeker weet — CA stuurt dan elke cyclus de gewenste status naar de ventilator.",
           "fan_remote_entity": "Optionele gebeurtenisentiteit die afgaat als de fysieke RF-wandafstandsbediening wordt ingedrukt (bijv. van de firmware gunkl/quietcool-house-fan). Een timerkeuze op de afstandsbediening (1/2/4/8/12 uur) bepaalt hoe lang de ventilatoroverride wordt gerespecteerd. Laat leeg om uit te schakelen.",
           "fan_min_runtime_per_hour": "Minuten ventilatorlooptijd per uur (0 = uitgeschakeld, 60 = altijd aan). De cyclus is niet aan de klok gekoppeld — hij verschuift vanzelf afhankelijk van wanneer HA is gestart.",
-          "nat_vent_soft_start_enabled": "Indien ingeschakeld mag de huisventilator al starten als de buiten- en binnentemperatuur gelijk zijn (zonder te wachten tot het buiten meetbaar koeler is), zodra is bevestigd dat de buitentemperatuur van vandaag haar piek voorbij is en daalt — voor luchtbeweging en het doorspoelen van zolder en thermische massa, niet voor grootschalig koelen. Standaard aan; schakel uit als de ventilator pas mag draaien als het buiten meetbaar koeler is dan binnen. Momenteel bewaakt geen vochtigheids-/dauwpuntsensor dit."
+          "nat_vent_soft_start_enabled": "Indien ingeschakeld mag de huisventilator al starten als de buiten- en binnentemperatuur gelijk zijn (zonder te wachten tot het buiten meetbaar koeler is), zodra is bevestigd dat de buitentemperatuur van vandaag haar piek voorbij is en daalt — voor luchtbeweging en het doorspoelen van zolder en thermische massa, niet voor grootschalig koelen. Standaard aan; schakel uit als de ventilator pas mag draaien als het buiten meetbaar koeler is dan binnen. Momenteel bewaakt geen vochtigheids-/dauwpuntsensor dit.",
+          "humid_air_guard_enabled": "Indien ingeschakeld starten de huisventilator en natuurlijke ventilatie niet, en wordt ramen openen niet voorgesteld, zolang de buitenlucht te vochtig is: het dauwpunt ligt op of boven de grens, of de buitenlucht is vochtig en duidelijk vochtiger dan in huis. Het huis blijft dicht en de airco houdt uw temperaturen aan. Een lopende sessie wordt niet gestopt. Zonder buitenvochtmeting verandert er niets. Standaard ingeschakeld.",
+          "humid_air_guard_ceiling_f": "Buitendauwpunt vanaf waar de bescherming tegen vochtige lucht de ventilator nooit start en geen ramen openen voorstelt, hoe vochtig het in huis ook is. Lager blokkeert meer nachten. De bescherming laat net eronder los."
         }
       },
       "occupancy": {

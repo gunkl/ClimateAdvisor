@@ -22,6 +22,9 @@ Pieces (all pure; the coordinator owns the only state):
 * ``DewPointHistory`` and ``smoothed_dew_point`` - the 15-minute median (samples written by the coordinator's 5-minute
   tick, the reading at the decision added).
 * ``latch_above`` - the one hysteresis helper for every later humid rule (on at ``on``, off at or below ``off``).
+* ``humid_air_verdict`` / ``humid_air_blocks`` - the H1 humid-air guard (Issue #1691): the one predicate every fan
+  start and every open-window advice calls, on the facts' dew points and latches (``step_humid_latches`` is the one
+  latch step, shared with the coordinator's 5-minute tick). ``humid_air_ceiling_from_config`` reads the option.
 
 Reasons a dew point is unknown (``DewPoint.reason``). Seven from the indoor/outdoor sensor vocabulary:
 ``not_configured`` (no humidity source), ``entity_missing``, ``unavailable``, ``non_numeric``, ``non_finite``,
@@ -41,7 +44,13 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .const import (
+    CONF_HUMID_AIR_GUARD_CEILING_F,
+    CONF_HUMID_AIR_GUARD_ENABLED,
+    DEFAULT_HUMID_AIR_GUARD_CEILING_F,
+    DEFAULT_HUMID_AIR_GUARD_ENABLED,
+    MAX_HUMID_AIR_GUARD_CEILING_F,
     MAX_PLAUSIBLE_OUTDOOR_F,
+    MIN_HUMID_AIR_GUARD_CEILING_F,
     MIN_PLAUSIBLE_OUTDOOR_F,
     SENSOR_RECONNECT_SETTLE_S,
     is_availability_recovery,
@@ -411,8 +420,19 @@ class LatchSpec:
     off: float
 
 
-# No humid rule exists yet (wave 1 only carries the facts); later lanes append their specs here.
-LATCH_SPECS: tuple[LatchSpec, ...] = ()
+# H1 humid-air guard (Issue #1691, plan #1507 H1): the relative clause "outdoor air wetter than the house" as one
+# latch on a derived signal (see ``humid_air_signals``). The configurable ceiling latch is not a fixed spec: it is
+# built from the option by ``humid_air_latch_specs``. Later lanes (H2, H3) append their fixed specs here.
+HUMID_AIR_CEILING_LATCH = "humid_air_ceiling"
+HUMID_AIR_WETTER_LATCH = "humid_air_wetter"
+SIGNAL_OUTDOOR_WETTER_MARGIN = "outdoor_wetter_margin"
+HUMID_AIR_HYSTERESIS_F = 1.0  # every H1 latch releases 1 °F below where it engaged
+HUMID_AIR_RELATIVE_FLOOR_F = 55.0  # below this outdoor dew point, wetter-than-house air never blocks (it is dry air)
+HUMID_AIR_RELATIVE_MARGIN_F = 2.0  # outdoor dew point at least this far above the house's = wetter than the house
+
+LATCH_SPECS: tuple[LatchSpec, ...] = (
+    LatchSpec(HUMID_AIR_WETTER_LATCH, SIGNAL_OUTDOOR_WETTER_MARGIN, 0.0, -HUMID_AIR_HYSTERESIS_F),
+)
 
 
 def update_latches(
@@ -423,3 +443,125 @@ def update_latches(
         spec.name: latch_above(dew_points.get(spec.signal), spec.on, spec.off, bool(state.get(spec.name, False)))
         for spec in specs
     }
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# H1 humid-air guard (Issue #1691, plan #1507 H1): one pure predicate for every consumer (fan starts, window advice).
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def humid_air_signals(indoor_dp_f: float | None, outdoor_dp_f: float | None) -> dict[str, float | None]:
+    """The derived latch signals of the H1 guard (pure).
+
+    ``outdoor_wetter_margin`` = min(outdoor DP - 55 °F, outdoor DP - indoor DP - 2 °F): at or above 0 the outdoor air
+    is humid (DP >= 55 °F) AND at least 2 °F wetter than the house; at or below -1 one of the two let go by 1 °F (the
+    hysteresis of both conditions in one latch). Needs both dew points: None (= not blocking) when either is unknown.
+    """
+    if indoor_dp_f is None or outdoor_dp_f is None:
+        margin = None
+    else:
+        margin = min(
+            outdoor_dp_f - HUMID_AIR_RELATIVE_FLOOR_F,
+            outdoor_dp_f - indoor_dp_f - HUMID_AIR_RELATIVE_MARGIN_F,
+        )
+    return {SIGNAL_OUTDOOR_WETTER_MARGIN: margin}
+
+
+def humid_air_latch_specs(ceiling_f: float | None) -> tuple[LatchSpec, ...]:
+    """The ceiling latch for the configured ceiling (on at ``ceiling_f``, off 1 °F below); none when the guard is
+    off (``ceiling_f`` None)."""
+    if ceiling_f is None:
+        return ()
+    return (LatchSpec(HUMID_AIR_CEILING_LATCH, SIGNAL_OUTDOOR, ceiling_f, ceiling_f - HUMID_AIR_HYSTERESIS_F),)
+
+
+def step_humid_latches(
+    dew_points: Mapping[str, float | None], state: Mapping[str, bool], *, ceiling_f: float | None
+) -> dict[str, bool]:
+    """The next state of every humid latch (``LATCH_SPECS`` plus the configured ceiling) from the decision dew points
+    (``{SIGNAL_INDOOR: dp, SIGNAL_OUTDOOR: dp}``). Pure; the coordinator's 5-minute tick keeps the result, and
+    ``humid_air_verdict`` takes the same step at each decision from it (so the veto itself is stateless)."""
+    signals: dict[str, float | None] = dict(dew_points)
+    signals.update(humid_air_signals(dew_points.get(SIGNAL_INDOOR), dew_points.get(SIGNAL_OUTDOOR)))
+    return update_latches((*LATCH_SPECS, *humid_air_latch_specs(ceiling_f)), signals, state)
+
+
+HUMID_AIR_REASON_CEILING = "ceiling"
+HUMID_AIR_REASON_WETTER = "wetter_than_house"
+
+
+@dataclass(frozen=True)
+class HumidAirVerdict:
+    """The H1 guard's answer for one decision: ``blocks`` and why, with the dew points it judged (for Activity text,
+    the Status line and the log)."""
+
+    blocks: bool
+    reason: str | None  # HUMID_AIR_REASON_CEILING / HUMID_AIR_REASON_WETTER (ceiling wins when both), None = clear
+    indoor_dp_f: float | None
+    outdoor_dp_f: float | None
+    ceiling_f: float | None  # None = the guard is off
+    latches: frozenset[str] = frozenset()  # the H1 latch names on after this step
+
+
+def humid_air_verdict(
+    indoor_dp_f: float | None,
+    outdoor_dp_f: float | None,
+    *,
+    ceiling_f: float | None,
+    latched: Iterable[str] = (),
+) -> HumidAirVerdict:
+    """Is the outdoor air too humid to bring into the house (fan start, open-window advice)? Pure, never raises.
+
+    Blocks when outdoor DP >= ``ceiling_f`` (released at or below ``ceiling_f`` - 1 °F), OR outdoor DP >= 55 °F AND
+    outdoor DP >= indoor DP + 2 °F (released once outdoor DP <= 54 °F or the gap <= 1 °F). ``latched`` are the latch
+    names on from the facts (``EngineFacts.humid_latches``), so a decision between two ticks keeps the hysteresis.
+    Missing inputs (plan #1507 table): the ceiling needs only the outdoor dew point, the relative clause needs both;
+    an unknown input never blocks (today's behaviour). ``ceiling_f`` None = the guard is off: never blocks.
+    """
+    if ceiling_f is None:
+        return HumidAirVerdict(False, None, indoor_dp_f, outdoor_dp_f, None)
+    was = frozenset(latched)
+    state = {name: name in was for name in (HUMID_AIR_CEILING_LATCH, HUMID_AIR_WETTER_LATCH)}
+    nxt = step_humid_latches({SIGNAL_INDOOR: indoor_dp_f, SIGNAL_OUTDOOR: outdoor_dp_f}, state, ceiling_f=ceiling_f)
+    ceiling = nxt.get(HUMID_AIR_CEILING_LATCH, False)
+    wetter = nxt.get(HUMID_AIR_WETTER_LATCH, False)
+    reason = HUMID_AIR_REASON_CEILING if ceiling else HUMID_AIR_REASON_WETTER if wetter else None
+    on = frozenset(name for name in (HUMID_AIR_CEILING_LATCH, HUMID_AIR_WETTER_LATCH) if nxt.get(name))
+    return HumidAirVerdict(reason is not None, reason, indoor_dp_f, outdoor_dp_f, ceiling_f, on)
+
+
+def humid_air_blocks(
+    indoor_dp_f: float | None,
+    outdoor_dp_f: float | None,
+    *,
+    ceiling_f: float | None,
+    latched: Iterable[str] = (),
+) -> bool:
+    """``humid_air_verdict(...).blocks``: the one humid-air predicate every H1 consumer calls."""
+    return humid_air_verdict(indoor_dp_f, outdoor_dp_f, ceiling_f=ceiling_f, latched=latched).blocks
+
+
+def humid_air_verdict_from_facts(facts: Any, ceiling_f: float | None) -> HumidAirVerdict:
+    """``humid_air_verdict`` on an ``EngineFacts`` (duck-typed: its dew points and ``humid_latches``)."""
+    return humid_air_verdict(
+        getattr(facts, "indoor_dew_point_f", None),
+        getattr(facts, "outdoor_dew_point_f", None),
+        ceiling_f=ceiling_f,
+        latched=getattr(facts, "humid_latches", None) or (),
+    )
+
+
+def humid_air_ceiling_from_config(config: Mapping[str, Any] | None) -> float | None:
+    """The H1 ceiling (°F) from the options, None when the guard is off. Defaults: On, 65 °F; a stored value outside
+    55-70 °F (or not a number) is clamped / falls back to the default, so a bad entry never switches the guard off."""
+    cfg = config or {}
+    if not cfg.get(CONF_HUMID_AIR_GUARD_ENABLED, DEFAULT_HUMID_AIR_GUARD_ENABLED):
+        return None
+    raw = cfg.get(CONF_HUMID_AIR_GUARD_CEILING_F, DEFAULT_HUMID_AIR_GUARD_CEILING_F)
+    try:
+        value = float(raw)
+    except TypeError, ValueError:
+        return DEFAULT_HUMID_AIR_GUARD_CEILING_F
+    if value != value:  # NaN
+        return DEFAULT_HUMID_AIR_GUARD_CEILING_F
+    return min(max(value, MIN_HUMID_AIR_GUARD_CEILING_F), MAX_HUMID_AIR_GUARD_CEILING_F)

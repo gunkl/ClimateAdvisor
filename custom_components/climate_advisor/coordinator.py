@@ -378,16 +378,16 @@ from .fan_status import (
 from .feels_like import feels_like_f, wind_speed_to_mph
 from .forecast_archive import ForecastArchive
 from .humidity_facts import (
-    LATCH_SPECS,
     SIGNAL_INDOOR,
     SIGNAL_OUTDOOR,
     DewPoint,
     DewPointHistory,
     ReconnectWatch,
     decision_dew_point,
+    humid_air_ceiling_from_config,
     paired_glitch,
     read_dew_point,
-    update_latches,
+    step_humid_latches,
 )
 from .humidity_sources import (
     ROLE_INDOOR_DAY,
@@ -6877,7 +6877,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Warms the device lookups the pure readers use, notes sensors coming back from unavailable (the
         ``paired_glitch`` "first reading after unavailable" rule for entities without a listener), stores one sample
         per signal (a lasting unknown forgets the old samples, a momentary glitch keeps them) and steps the humid
-        latches (``humidity_facts.LATCH_SPECS``; none yet). Logs at DEBUG only: nothing is decided here.
+        latches (``humidity_facts.step_humid_latches``: ``LATCH_SPECS`` plus the H1 ceiling from the options, Issue
+        #1691). Logs at DEBUG only: nothing is decided here.
         """
         watch = self._reconnect_watch_for()
         history = self.__dict__.get("_dew_point_history")
@@ -6912,7 +6913,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 reading.humidity_source,
                 reading.temp_source,
             )
-        self._humid_latch_state = update_latches(LATCH_SPECS, dew_points, self.__dict__.get("_humid_latch_state") or {})
+        self._humid_latch_state = step_humid_latches(
+            dew_points,
+            self.__dict__.get("_humid_latch_state") or {},
+            ceiling_f=humid_air_ceiling_from_config(getattr(self, "config", None)),
+        )
 
     def _humidity_source_kind(self, role: str, source: str | None, chosen: str | None) -> str | None:
         """Code of the kind of a humidity source (Issue #1455): ``chosen``, ``weather_service``, ``thermostat`` or

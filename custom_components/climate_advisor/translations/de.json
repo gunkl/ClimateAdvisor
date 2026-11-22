@@ -305,7 +305,9 @@
           "fan_state_feedback": "Lüfterstatus zuverlässig",
           "fan_remote_entity": "Ereignis-Entität der Lüfter-Funkfernbedienung",
           "fan_min_runtime_per_hour": "Minimale Lüfterlaufzeit pro Stunde",
-          "nat_vent_soft_start_enabled": "Sanfter Start der natürlichen Lüftung"
+          "nat_vent_soft_start_enabled": "Sanfter Start der natürlichen Lüftung",
+          "humid_air_guard_enabled": "Schutz vor feuchter Luft",
+          "humid_air_guard_ceiling_f": "Taupunkt-Obergrenze feuchte Luft"
         },
         "data_description": {
           "door_window_sensors": "Wähle beliebige Binärsensor-Entitäten zur Überwachung aus, auch Binärsensor-Gruppen, die mehrere Sensoren bündeln.",
@@ -321,7 +323,9 @@
           "fan_state_feedback": "Aktiviere dies, wenn deine Lüfter-Entität oder dein Statussensor den tatsächlichen Motorzustand meldet (nicht nur den zuletzt gesendeten Befehl). Lass es aus, wenn du unsicher bist — CA sendet dann in jedem Zyklus den gewünschten Zustand an den Lüfter.",
           "fan_remote_entity": "Optionale Ereignis-Entität, die auslöst, wenn die physische Funk-Wandfernbedienung gedrückt wird (z. B. von der Firmware gunkl/quietcool-house-fan). Eine Timer-Auswahl an der Fernbedienung (1/2/4/8/12 Stunden) legt die Pausendauer für die Lüfter-Übersteuerung fest. Leer lassen zum Deaktivieren.",
           "fan_min_runtime_per_hour": "Lüfterlaufzeit in Minuten pro Stunde (0 = deaktiviert, 60 = immer an). Der Zyklus ist nicht an die Uhr gebunden — er verschiebt sich natürlich, je nachdem, wann HA gestartet wurde.",
-          "nat_vent_soft_start_enabled": "Wenn aktiviert, darf der Hausventilator schon bei gleicher Außen- und Innentemperatur starten (ohne abzuwarten, bis es draußen messbar kühler ist), sobald bestätigt ist, dass die heutige Außentemperatur ihren Höhepunkt überschritten hat und sinkt — für Luftbewegung und das Ausspülen von Dachboden und Gebäudemasse, nicht zum Kühlen im großen Stil. Standardmäßig an; deaktiviere es, wenn der Lüfter erst laufen soll, wenn es draußen messbar kühler ist als drinnen. Derzeit schützt kein Feuchtigkeits-/Taupunktsensor diese Funktion."
+          "nat_vent_soft_start_enabled": "Wenn aktiviert, darf der Hausventilator schon bei gleicher Außen- und Innentemperatur starten (ohne abzuwarten, bis es draußen messbar kühler ist), sobald bestätigt ist, dass die heutige Außentemperatur ihren Höhepunkt überschritten hat und sinkt — für Luftbewegung und das Ausspülen von Dachboden und Gebäudemasse, nicht zum Kühlen im großen Stil. Standardmäßig an; deaktiviere es, wenn der Lüfter erst laufen soll, wenn es draußen messbar kühler ist als drinnen. Derzeit schützt kein Feuchtigkeits-/Taupunktsensor diese Funktion.",
+          "humid_air_guard_enabled": "Wenn aktiviert, starten der Hausventilator und die natürliche Lüftung nicht, und Fensteröffnen wird nicht empfohlen, solange die Außenluft zu feucht ist: Ihr Taupunkt liegt bei oder über der Obergrenze, oder die Außenluft ist feucht und deutlich feuchter als im Haus. Das Haus bleibt geschlossen und die Klimaanlage hält Ihre Temperaturen. Eine laufende Sitzung wird nicht beendet. Ohne Außenfeuchtewert ändert sich nichts. Standardmäßig aktiviert.",
+          "humid_air_guard_ceiling_f": "Außentaupunkt, ab dem der Schutz vor feuchter Luft den Ventilator nie startet und kein Fensteröffnen empfiehlt, unabhängig von der Feuchte im Haus. Niedriger sperrt mehr Nächte. Der Schutz endet knapp darunter."
         }
       },
       "occupancy": {

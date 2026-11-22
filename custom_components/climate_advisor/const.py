@@ -419,6 +419,17 @@ FAN_MIN_TOGGLE_INTERVAL_S = 300
 CONF_NAT_VENT_SOFT_START_ENABLED = "nat_vent_soft_start_enabled"
 DEFAULT_NAT_VENT_SOFT_START_ENABLED = True
 
+# Humid-air guard (Issue #1691, plan #1507 H1, owner decision D1): no nat-vent session or fan start brings in outdoor
+# air whose dew point is at or above the ceiling, or that is humid (>= 55 °F) and at least 2 °F wetter than the house
+# (humidity_facts.humid_air_verdict). Ships On at 65 °F; the ceiling is an absolute dew point (stored in °F, shown in
+# the configured unit). Distinct from the H2 HVAC-fan restrict threshold.
+CONF_HUMID_AIR_GUARD_ENABLED = "humid_air_guard_enabled"
+DEFAULT_HUMID_AIR_GUARD_ENABLED = True
+CONF_HUMID_AIR_GUARD_CEILING_F = "humid_air_guard_ceiling_f"
+DEFAULT_HUMID_AIR_GUARD_CEILING_F = 65.0
+MIN_HUMID_AIR_GUARD_CEILING_F = 55.0
+MAX_HUMID_AIR_GUARD_CEILING_F = 70.0
+
 # Degrees below today's observed outdoor peak required before soft-start considers the
 # day "declining" — mirrors NAT_VENT_HYSTERESIS_F's role as a noise-margin buffer.
 PEAK_DECLINE_MARGIN_F = 1.0
@@ -1194,6 +1205,26 @@ CONFIG_METADATA = {
         "category": "fan",
         "sensitive": False,
         "default": False,
+    },
+    "humid_air_guard_enabled": {
+        "label": "Humid-Air Guard",
+        "description": (
+            "When on, the whole-house fan and natural ventilation do not start, and opening the windows is not "
+            "suggested, while the outdoor air is too humid: its dew point is at or above the ceiling, or the "
+            "outdoor air is humid and clearly wetter than the house. The house stays closed and the AC holds your "
+            "temperatures. A running session is not stopped. Without an outdoor humidity reading nothing changes. "
+            "On by default."
+        ),
+        "category": "fan",
+    },
+    "humid_air_guard_ceiling_f": {
+        "label": "Humid-Air Dew Point Ceiling",
+        "description": (
+            "Outdoor dew point at or above which the Humid-Air Guard never starts the fan or suggests opening the "
+            "windows, whatever the house's humidity. Lower blocks more nights. The guard releases just below it."
+        ),
+        "category": "fan",
+        "display_transform": "temp_abs",
     },
     "fan_min_runtime_per_hour": {
         "label": "Fan Minimum Runtime Per Hour",
@@ -2462,6 +2493,8 @@ _METADATA_DEFAULTS: dict[str, Any] = {
     "automation_grace_notify": True,
     "fan_mode": DEFAULT_FAN_MODE,
     "nat_vent_soft_start_enabled": DEFAULT_NAT_VENT_SOFT_START_ENABLED,
+    "humid_air_guard_enabled": DEFAULT_HUMID_AIR_GUARD_ENABLED,
+    "humid_air_guard_ceiling_f": DEFAULT_HUMID_AIR_GUARD_CEILING_F,
     "home_toggle_invert": False,
     "vacation_toggle_invert": False,
     "guest_toggle_invert": False,

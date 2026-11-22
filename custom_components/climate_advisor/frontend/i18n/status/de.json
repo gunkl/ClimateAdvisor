@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Vorkühlen} other {Vorheizen}} auf {target} bis zur Spitzenzeit um {ends}, danach {after}",
   "status.hold.sentence_lc": "{mode, select, cool {vorkühlen} other {vorheizen}} auf {target} bis zur Spitzenzeit um {ends}, danach {after}",
+  "status.humid_air.blocking_ceiling": "Draußen feucht (Taupunkt {outdoor}, bei oder über der Obergrenze {ceiling}): Der Ventilator startet nicht und Fensteröffnen wird nicht empfohlen; die Klimaanlage hält den Bereich.",
+  "status.humid_air.blocking_wetter": "Draußen feucht (Taupunkt {outdoor}, Haus {indoor}): Die Außenluft ist feuchter als im Haus, daher startet der Ventilator nicht und Fensteröffnen wird nicht empfohlen; die Klimaanlage hält den Bereich.",
   "status.humidity_kind.chosen": "dein gewählter Sensor",
   "status.humidity_kind.device_sensor": "Sensor am Gerät",
   "status.humidity_kind.thermostat": "Thermostat",

@@ -1,0 +1,81 @@
+{
+  "name": "humid_air_1691_economizer_fan_refused",
+  "description": "Hot-day morning window cooling (economizer) with humid outdoor air (dew point ~67F): the economizer does not start the fan; the AC keeps the band",
+  "source": "synthetic",
+  "issue": 1691,
+  "notes": [
+    "Dew points: indoor 78F at 46.8% = 56.02F; outdoor 72F at 84.3% = 67.0F (at or above the 65F ceiling). The dry twin is the golden economizer-cool-down-to-maintain (same temperatures, no humidity): cool-down engages.",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: deleting the economizer guard makes 07:00 read the economizer's fan activation (cool-down) instead. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the economizer's fan would push 67F-dew-point morning air through the house while the AC tries to dry it."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "No economizer fan on humid air",
+    "observed_behavior": "nat_vent_humid_skip; economizer inactive",
+    "expected_behavior": "nat_vent_humid_skip; economizer inactive"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "economizer_temp_delta": 3.0,
+    "natural_vent_delta": 3.0,
+    "aggressive_savings": false,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 90,
+      "today_low": 70,
+      "note": "Hot day, as in the golden economizer-cool-down-to-maintain."
+    },
+    {
+      "time": "2026-07-10T06:59:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8,
+      "outdoor_humidity": 84.3,
+      "note": "Humid morning: outdoor dew point ~67F."
+    },
+    {
+      "time": "2026-07-10T07:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": true,
+      "hour": 7,
+      "note": "Morning window, direction favourable: by temperature the economizer would engage cool-down."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T06:00:00",
+      "expect": "classification_applied",
+      "reason": "Hot-day cool band."
+    },
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "nat_vent_humid_skip",
+      "reason": "The economizer's fan start is refused on humid air."
+    },
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "event_emitted",
+      "event": "nat_vent_humid_skip",
+      "payload_subset": {
+        "reason": "ceiling",
+        "starter": "economizer"
+      },
+      "reason": "Reported with the economizer starter."
+    },
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "fan_not_active",
+      "reason": "No fan."
+    }
+  ]
+}

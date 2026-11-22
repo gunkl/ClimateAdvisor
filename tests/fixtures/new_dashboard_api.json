@@ -85,6 +85,7 @@
   "pause_suppressed_classification_text": null,
   "ca_target_heat": 68.0,
   "ca_target_cool": 74.0,
+  "humid_air_guard": null,
   "remote_offset": {
    "state": "inactive",
    "detail": null,
@@ -889,7 +890,7 @@
     "key": "nat_vent_soft_start_enabled",
     "value": true,
     "label": "Nat-Vent Soft-Start",
-    "description": "When enabled, the whole-house fan may start at outdoor/indoor temperature parity (not waiting for outdoor to be measurably cooler) once today's outdoor temperature is confirmed past its peak and declining \u2014 for air movement and attic/thermal-mass purge, not bulk cooling. On by default; disable if you only want the fan to run once outdoor is measurably cooler than indoor. No humidity/dew-point sensor guards this today.",
+    "description": "When enabled, the whole-house fan may start at outdoor/indoor temperature parity (not waiting for outdoor to be measurably cooler) once today's outdoor temperature is confirmed past its peak and declining \u2014 for air movement and attic/thermal-mass purge, not bulk cooling. On by default; disable if you only want the fan to run once outdoor is measurably cooler than indoor. On humid nights the Humid-Air Guard keeps it from starting.",
     "category": "fan",
     "label_msg": {
      "key": "settings.nat_vent_soft_start_enabled.label",

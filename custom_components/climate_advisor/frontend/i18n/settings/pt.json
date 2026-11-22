@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "Profundidade máxima da redução",
   "settings.min_preheat_minutes.description": "A janela de pré-aquecimento mais curta que o sistema alguma vez agenda.",
   "settings.min_preheat_minutes.label": "Tempo mínimo de pré-aquecimento",
-  "settings.nat_vent_soft_start_enabled.description": "Se ativado, a ventoinha de toda a casa pode arrancar quando a temperatura exterior e interior são iguais (sem esperar que o exterior esteja mensuravelmente mais fresco), assim que se confirme que a temperatura exterior de hoje passou o pico e está a descer — para movimentar o ar e purgar o sótão e a massa térmica, não para arrefecer em grande escala. Ativado por predefinição; desative se só quiser que a ventoinha funcione quando o exterior estiver mensuravelmente mais fresco do que o interior. Atualmente nenhum sensor de humidade/ponto de orvalho protege esta função.",
+  "settings.nat_vent_soft_start_enabled.description": "Se ativado, a ventoinha de toda a casa pode arrancar quando a temperatura exterior e interior são iguais (sem esperar que o exterior esteja mensuravelmente mais fresco), assim que se confirme que a temperatura exterior de hoje passou o pico e está a descer — para movimentar o ar e purgar o sótão e a massa térmica, não para arrefecer em grande escala. Ativado por predefinição; desative se só quiser que a ventoinha funcione quando o exterior estiver mensuravelmente mais fresco do que o interior. Em noites húmidas, a proteção contra ar húmido impede o arranque.",
   "settings.nat_vent_soft_start_enabled.label": "Arranque suave da ventilação natural",
   "settings.no_data": "sem dados",
   "settings.no_match": "Nenhuma definição corresponde.",

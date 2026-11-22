@@ -305,6 +305,42 @@ def _text_fields(field: str, value: Any, lang: str | None, *, code: bool = False
     return out
 
 
+def humid_air_view(engine: Any, unit: str, lang: str | None = None) -> dict[str, Any] | None:
+    """The Status page line while the humid-air guard blocks fan starts (Issue #1691, #1507 H1), else None.
+
+    Read live from the engine's ``humid_air_verdict()`` (the same predicate every fan start asks), never re-decided
+    here. ``{code, outdoor_dew_point, indoor_dew_point, ceiling, text, text_msg}``; dew points in the display unit.
+    """
+    getter = getattr(engine, "humid_air_verdict", None)
+    if not callable(getter):
+        return None
+    try:
+        verdict = getter()
+    except Exception:  # noqa: BLE001 - a status read must never break the endpoint
+        return None
+    if not getattr(verdict, "blocks", False) or verdict.outdoor_dp_f is None:
+        return None
+    outdoor = i18n.Temp(float(verdict.outdoor_dp_f), unit, 1)
+    if verdict.reason == "ceiling" and verdict.ceiling_f is not None:
+        msg = i18n.Msg(
+            "status.humid_air.blocking_ceiling", outdoor=outdoor, ceiling=i18n.Temp(float(verdict.ceiling_f), unit, 1)
+        )
+    elif verdict.indoor_dp_f is not None:
+        msg = i18n.Msg(
+            "status.humid_air.blocking_wetter", outdoor=outdoor, indoor=i18n.Temp(float(verdict.indoor_dp_f), unit, 1)
+        )
+    else:
+        return None
+    return {
+        "code": verdict.reason,
+        "outdoor_dew_point": display_temp(verdict.outdoor_dp_f, unit),
+        "indoor_dew_point": display_temp(verdict.indoor_dp_f, unit) if verdict.indoor_dp_f is not None else None,
+        "ceiling": display_temp(verdict.ceiling_f, unit) if verdict.ceiling_f is not None else None,
+        "text": i18n.render(msg, lang) if lang else i18n.render_en(msg),
+        "text_msg": msg.to_wire(),
+    }
+
+
 def _ambiguous_zone_payload(hass: HomeAssistant) -> dict[str, Any]:
     """Response body for a POST request refused for ambiguous zone selection.
 
@@ -602,6 +638,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "ca_target_heat": display_temp(_ca_target_heat, unit),
                 "ca_target_cool": display_temp(_ca_target_cool, unit),
                 "remote_offset": _remote_offset,
+                # Issue #1691: the humid-air guard's line while it blocks fan starts (None otherwise)
+                "humid_air_guard": humid_air_view(ae, unit, _lang),
                 "nat_vent_active": _nat_vent_active,
                 "nat_vent_ac_assist": _nat_vent_ac_assist,
                 "nat_vent_target": _nat_vent_target_display,

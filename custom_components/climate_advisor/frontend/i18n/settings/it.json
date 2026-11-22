@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "Profondità massima della riduzione",
   "settings.min_preheat_minutes.description": "La finestra di preriscaldamento più breve che il sistema pianificherà.",
   "settings.min_preheat_minutes.label": "Durata minima del preriscaldamento",
-  "settings.nat_vent_soft_start_enabled.description": "Se attivo, la ventola di tutta la casa può partire quando temperatura esterna e interna sono uguali (senza attendere che l’esterno sia nettamente più fresco), una volta confermato che la temperatura esterna di oggi ha superato il picco e sta scendendo: per muovere l’aria e smaltire il calore di sottotetto e masse termiche, non per raffreddare in massa. Attivo per impostazione predefinita; disattivalo se vuoi che la ventola funzioni solo quando l’esterno è nettamente più fresco dell’interno. Oggi nessun sensore di umidità/punto di rugiada protegge questa funzione.",
+  "settings.nat_vent_soft_start_enabled.description": "Se attivo, la ventola di tutta la casa può partire quando temperatura esterna e interna sono uguali (senza attendere che l’esterno sia nettamente più fresco), una volta confermato che la temperatura esterna di oggi ha superato il picco e sta scendendo: per muovere l’aria e smaltire il calore di sottotetto e masse termiche, non per raffreddare in massa. Attivo per impostazione predefinita; disattivalo se vuoi che la ventola funzioni solo quando l’esterno è nettamente più fresco dell’interno. Nelle notti umide la protezione dall’aria umida ne impedisce l’avvio.",
   "settings.nat_vent_soft_start_enabled.label": "Avvio graduale in ventilazione naturale",
   "settings.no_data": "nessun dato",
   "settings.no_match": "Nessuna impostazione corrisponde.",

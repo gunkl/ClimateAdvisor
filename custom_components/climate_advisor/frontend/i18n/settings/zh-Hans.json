@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "最大节能温度幅度",
   "settings.min_preheat_minutes.description": "系统会安排的最短预热时间。",
   "settings.min_preheat_minutes.label": "最短预热时间",
-  "settings.nat_vent_soft_start_enabled.description": "启用后，一旦确认今天的室外温度已过峰值并在下降，全屋换气扇可在室外/室内温度持平时启动（不必等室外明显更凉），目的是促进空气流动并排出阁楼和建筑蓄热，而不是大量降温。默认开启；如果您只想在室外明显比室内凉时才运行风扇，请关闭。目前没有湿度/露点传感器对此进行限制。",
+  "settings.nat_vent_soft_start_enabled.description": "启用后，一旦确认今天的室外温度已过峰值并在下降，全屋换气扇可在室外/室内温度持平时启动（不必等室外明显更凉），目的是促进空气流动并排出阁楼和建筑蓄热，而不是大量降温。默认开启；如果您只想在室外明显比室内凉时才运行风扇，请关闭。潮湿的夜晚，潮湿空气保护会阻止其启动。",
   "settings.nat_vent_soft_start_enabled.label": "自然通风软启动",
   "settings.no_data": "无数据",
   "settings.no_match": "没有匹配的设置。",

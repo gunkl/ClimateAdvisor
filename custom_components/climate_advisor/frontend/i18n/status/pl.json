@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Wstępne chłodzenie} other {Podgrzewanie wstępne}} do {target} przed okresem wysokich cen od {ends}, potem {after}",
   "status.hold.sentence_lc": "{mode, select, cool {wstępne chłodzenie} other {podgrzewanie wstępne}} do {target} przed okresem wysokich cen od {ends}, potem {after}",
+  "status.humid_air.blocking_ceiling": "Wilgotno na zewnątrz (punkt rosy {outdoor}, na limicie {ceiling} lub wyżej): wentylator nie rusza, a otwarcie okien nie jest sugerowane; klimatyzacja utrzymuje zakres.",
+  "status.humid_air.blocking_wetter": "Wilgotno na zewnątrz (punkt rosy {outdoor}, dom {indoor}): powietrze na zewnątrz jest wilgotniejsze niż w domu, więc wentylator nie rusza, a otwarcie okien nie jest sugerowane; klimatyzacja utrzymuje zakres.",
   "status.humidity_kind.chosen": "wybrany czujnik",
   "status.humidity_kind.device_sensor": "czujnik w urządzeniu",
   "status.humidity_kind.thermostat": "termostat",

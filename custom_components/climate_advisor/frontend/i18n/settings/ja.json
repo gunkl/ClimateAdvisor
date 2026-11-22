@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "最大の省エネ設定幅",
   "settings.min_preheat_minutes.description": "システムがスケジュールする最短の予熱時間です。",
   "settings.min_preheat_minutes.label": "最小予熱時間",
-  "settings.nat_vent_soft_start_enabled.description": "オンにすると、本日の外気温がピークを過ぎて下降していると確認できた時点で、外気と室温が同程度でも(外気が明確に低くなるのを待たずに)全館換気ファンが始動することがあります。大量の冷却ではなく、空気の流れと屋根裏や建物の蓄熱の排出が目的です。初期設定はオンです。外気が室温より明確に低くなってからだけファンを動かしたい場合はオフにしてください。現在は、湿度や露点のセンサーによる制限はありません。",
+  "settings.nat_vent_soft_start_enabled.description": "オンにすると、本日の外気温がピークを過ぎて下降していると確認できた時点で、外気と室温が同程度でも(外気が明確に低くなるのを待たずに)全館換気ファンが始動することがあります。大量の冷却ではなく、空気の流れと屋根裏や建物の蓄熱の排出が目的です。初期設定はオンです。外気が室温より明確に低くなってからだけファンを動かしたい場合はオフにしてください。湿った夜は、湿った外気ガードが始動させません。",
   "settings.nat_vent_soft_start_enabled.label": "自然換気のソフトスタート",
   "settings.no_data": "データなし",
   "settings.no_match": "一致する設定がありません。",

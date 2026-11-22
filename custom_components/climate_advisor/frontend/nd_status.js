@@ -196,6 +196,8 @@
       outNote += '<div class="n" id="status-outdoor-vs-service" title="' + esc(t('outdoor_vs_service_title')) + '">' + ND.iso(saysVs(t('the_weather_service'), svc, d.outdoor_temp, u, t('your_outdoor_sensor'))) + '</div>';
     }
     if (corr != null) outNote += '<div class="n" title="' + esc(t('corrected_title')) + '">' + ND.iso(t('corrected_forecast', { temp: ND.num(corr, 1) + u })) + '</div>';
+    // Issue #1691: while the humid-air guard blocks fan starts, say so (and the dew points) on the outdoor card.
+    if (d.humid_air_guard && d.humid_air_guard.text) outNote += '<div class="n" id="status-humid-air">' + esc(ND.text(d.humid_air_guard, 'text')) + '</div>';
     cards.push(tile('status-card-outdoor', t('card_outdoor'), temp1(d.outdoor_temp), outNote));
     // Today
     cards.push(tile('status-card-today', t('card_today'), esc(d.day_type ? word('day_type', d.day_type, true) : ND.t('common.unknown')),

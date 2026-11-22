@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Preraffreddamento} other {Preriscaldamento}} a {target} fino alle ore di punta delle {ends}, poi {after}",
   "status.hold.sentence_lc": "{mode, select, cool {preraffreddamento} other {preriscaldamento}} a {target} fino alle ore di punta delle {ends}, poi {after}",
+  "status.humid_air.blocking_ceiling": "Umido fuori (punto di rugiada {outdoor}, pari o sopra il limite {ceiling}): la ventola non parte e non viene suggerito di aprire le finestre; il condizionatore mantiene l’intervallo.",
+  "status.humid_air.blocking_wetter": "Umido fuori (punto di rugiada {outdoor}, casa {indoor}): l’aria esterna è più umida della casa, quindi la ventola non parte e non viene suggerito di aprire le finestre; il condizionatore mantiene l’intervallo.",
   "status.humidity_kind.chosen": "il sensore scelto",
   "status.humidity_kind.device_sensor": "sensore del dispositivo",
   "status.humidity_kind.thermostat": "termostato",

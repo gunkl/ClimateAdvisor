@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "Maximale verlagingsdiepte",
   "settings.min_preheat_minutes.description": "Het kortste voorverwarmvenster dat het systeem ooit plant.",
   "settings.min_preheat_minutes.label": "Minimale voorverwarmtijd",
-  "settings.nat_vent_soft_start_enabled.description": "Indien ingeschakeld mag de huisventilator starten bij gelijke buiten- en binnentemperatuur (zonder te wachten tot het buiten meetbaar koeler is), zodra is bevestigd dat de buitentemperatuur van vandaag zijn piek heeft gehad en daalt – voor luchtbeweging en het doorspoelen van zolder en thermische massa, niet voor grootschalig koelen. Standaard aan; schakel uit als je wilt dat de ventilator pas draait als het buiten meetbaar koeler is dan binnen. Momenteel bewaakt geen vochtigheids-/dauwpuntsensor dit.",
+  "settings.nat_vent_soft_start_enabled.description": "Indien ingeschakeld mag de huisventilator starten bij gelijke buiten- en binnentemperatuur (zonder te wachten tot het buiten meetbaar koeler is), zodra is bevestigd dat de buitentemperatuur van vandaag zijn piek heeft gehad en daalt – voor luchtbeweging en het doorspoelen van zolder en thermische massa, niet voor grootschalig koelen. Standaard aan; schakel uit als je wilt dat de ventilator pas draait als het buiten meetbaar koeler is dan binnen. Op vochtige nachten voorkomt de bescherming tegen vochtige lucht dat hij start.",
   "settings.nat_vent_soft_start_enabled.label": "Zachte start natuurlijke ventilatie",
   "settings.no_data": "geen gegevens",
   "settings.no_match": "Geen instelling komt overeen.",

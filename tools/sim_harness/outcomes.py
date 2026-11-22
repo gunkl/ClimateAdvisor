@@ -182,14 +182,13 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         "humidity_source_changed",
         # Issue #1690 (plan #1507 H0): event types RESERVED for the later #1507 lanes, registered now so the lanes
         # cannot collide on names (humidity_facts.RESERVED_EVENT_TYPES; nothing emits them yet). Rule-8 justification:
-        # the previous semantics were not wrong for any event that exists; this only decides, ahead of time, how four
-        # new types are read: unmapped, the same class as their siblings. nat_vent_humid_skip is a refused start like
-        # nat_vent_forecast_skip / nat_vent_floor_imminent_skip (the start decision's outcome is the absence of
-        # natural_ventilation, which still maps); humid_windows_close_notice is advice only; overcool_started /
+        # the previous semantics were not wrong for any event that exists; this only decides, ahead of time, how the
+        # new types are read: unmapped, the same class as their siblings (nat_vent_humid_skip left this list when
+        # Issue #1691 started emitting it: it is mapped in _map_event_to_outcome); humid_windows_close_notice is
+        # advice only; overcool_started /
         # overcool_ended announce a commanded-setpoint adjustment whose effect is asserted through the action_log and
         # live engine state. Could this let a real failure pass silently? No: no existing scenario can see these
         # types, and a lane that needs one as a decision outcome must move it to a mapping with its own rule-8 note.
-        "nat_vent_humid_skip",
         "humid_windows_close_notice",
         "overcool_started",
         "overcool_ended",
@@ -440,6 +439,18 @@ def _map_event_to_outcome(
     # fails when nat-vent did not resume.
     if event_type == "nat_vent_reactivated_while_paused":
         return ProductionDecision(ts_str, event_type, "natural_ventilation")
+    # Issue #1691 (#1507 H1): nat_vent_humid_skip is the "fan start refused: the outdoor air is humid" decision
+    # (every fan starter, once per humid spell). Rule-8 justification: the previous semantics (registered unmapped
+    # as a RESERVED name, Issue #1690) were a placeholder for a type nothing emitted, chosen before any scenario could
+    # see it; now that production emits it, unmapped would make the refusal invisible to the outcome reader, so a
+    # scenario could not assert "no fan on this humid night" except through the absence of an event. Mapped to its
+    # own outcome it is the refusal's deciding event. Could this let a real failure pass silently? No: a scenario
+    # expecting natural_ventilation after the refusal reads "nat_vent_humid_skip" and fails; at a window open the
+    # pause that follows in the same minute (sensor_opened result=paused) still wins under last-decision-wins, so
+    # every existing assertion on that minute reads exactly what it read before; and no golden carries humidity, so
+    # none can emit it.
+    if event_type == "nat_vent_humid_skip":
+        return ProductionDecision(ts_str, event_type, "nat_vent_humid_skip")
     if event_type == "sensor_opened":
         result_field = payload.get("result", "")
         if result_field == "natural_ventilation":

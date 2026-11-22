@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "Maximale Absenktiefe",
   "settings.min_preheat_minutes.description": "Das kürzeste Vorheizfenster, das das System jemals plant.",
   "settings.min_preheat_minutes.label": "Minimale Vorheizzeit",
-  "settings.nat_vent_soft_start_enabled.description": "Wenn aktiviert, darf der Hausventilator bei gleicher Außen- und Innentemperatur starten (ohne abzuwarten, bis es draußen messbar kühler ist), sobald bestätigt ist, dass die Außentemperatur heute ihren Höchstwert überschritten hat und sinkt – für Luftbewegung und das Ausspülen von Dachboden und Gebäudemasse, nicht zum Kühlen im großen Stil. Standardmäßig an; deaktiviere es, wenn der Ventilator erst laufen soll, wenn es draußen messbar kühler ist als drinnen. Derzeit schützt kein Feuchte-/Taupunktsensor diese Funktion.",
+  "settings.nat_vent_soft_start_enabled.description": "Wenn aktiviert, darf der Hausventilator bei gleicher Außen- und Innentemperatur starten (ohne abzuwarten, bis es draußen messbar kühler ist), sobald bestätigt ist, dass die Außentemperatur heute ihren Höchstwert überschritten hat und sinkt – für Luftbewegung und das Ausspülen von Dachboden und Gebäudemasse, nicht zum Kühlen im großen Stil. Standardmäßig an; deaktiviere es, wenn der Ventilator erst laufen soll, wenn es draußen messbar kühler ist als drinnen. In feuchten Nächten verhindert der Schutz vor feuchter Luft den Start.",
   "settings.nat_vent_soft_start_enabled.label": "Sanfter Start der natürlichen Lüftung",
   "settings.no_data": "keine Daten",
   "settings.no_match": "Keine Einstellung passt.",

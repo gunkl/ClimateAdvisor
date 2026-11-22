@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "Azami sıcaklık düşürme derinliği",
   "settings.min_preheat_minutes.description": "Sistemin planlayacağı en kısa ön ısıtma süresi.",
   "settings.min_preheat_minutes.label": "Asgari ön ısıtma süresi",
-  "settings.nat_vent_soft_start_enabled.description": "Açıkken, bugünkü dış sıcaklığın zirveyi geçtiği ve düştüğü doğrulandıktan sonra tüm ev fanı, dış/iç sıcaklık eşitliğinde (dışın ölçülebilir şekilde daha serin olmasını beklemeden) başlayabilir; amaç toplu soğutma değil, hava hareketi ve çatı arası/ısıl kütle temizliğidir. Varsayılan olarak açıktır; fanın yalnızca dış hava iç havadan ölçülebilir şekilde serin olduğunda çalışmasını istiyorsanız kapatın. Şu anda bunu koruyan bir nem/çiy noktası sensörü yoktur.",
+  "settings.nat_vent_soft_start_enabled.description": "Açıkken, bugünkü dış sıcaklığın zirveyi geçtiği ve düştüğü doğrulandıktan sonra tüm ev fanı, dış/iç sıcaklık eşitliğinde (dışın ölçülebilir şekilde daha serin olmasını beklemeden) başlayabilir; amaç toplu soğutma değil, hava hareketi ve çatı arası/ısıl kütle temizliğidir. Varsayılan olarak açıktır; fanın yalnızca dış hava iç havadan ölçülebilir şekilde serin olduğunda çalışmasını istiyorsanız kapatın. Nemli gecelerde nemli hava koruması başlamasını engeller.",
   "settings.nat_vent_soft_start_enabled.label": "Doğal havalandırma yumuşak başlatma",
   "settings.no_data": "veri yok",
   "settings.no_match": "Eşleşen ayar yok.",

@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {预冷} other {预热}}至 {target}，直到 {ends} 的高峰时段，之后{after}",
   "status.hold.sentence_lc": "{mode, select, cool {预冷} other {预热}}至 {target}，直到 {ends} 的高峰时段，之后{after}",
+  "status.humid_air.blocking_ceiling": "室外潮湿（露点 {outdoor}，达到或超过上限 {ceiling}）：风扇不启动，也不建议开窗；由空调维持温度范围。",
+  "status.humid_air.blocking_wetter": "室外潮湿（露点 {outdoor}，室内 {indoor}）：室外空气比室内更潮湿，因此风扇不启动，也不建议开窗；由空调维持温度范围。",
   "status.humidity_kind.chosen": "您选择的传感器",
   "status.humidity_kind.device_sensor": "设备上的传感器",
   "status.humidity_kind.thermostat": "恒温器",

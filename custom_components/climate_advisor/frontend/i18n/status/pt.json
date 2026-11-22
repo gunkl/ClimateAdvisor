@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Pré-arrefecimento} other {Pré-aquecimento}} para {target} até às horas de ponta das {ends}, e depois {after}",
   "status.hold.sentence_lc": "{mode, select, cool {pré-arrefecimento} other {pré-aquecimento}} para {target} até às horas de ponta das {ends}, e depois {after}",
+  "status.humid_air.blocking_ceiling": "Húmido lá fora (ponto de orvalho {outdoor}, no limite {ceiling} ou acima): a ventoinha não arranca e abrir as janelas não é sugerido; o ar condicionado mantém o intervalo.",
+  "status.humid_air.blocking_wetter": "Húmido lá fora (ponto de orvalho {outdoor}, casa {indoor}): o ar exterior é mais húmido do que o da casa, por isso a ventoinha não arranca e abrir as janelas não é sugerido; o ar condicionado mantém o intervalo.",
   "status.humidity_kind.chosen": "o sensor escolhido",
   "status.humidity_kind.device_sensor": "sensor do dispositivo",
   "status.humidity_kind.thermostat": "termóstato",

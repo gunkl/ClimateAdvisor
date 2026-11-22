@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "Profundidad máxima de reducción",
   "settings.min_preheat_minutes.description": "La ventana de precalentamiento más corta que programará el sistema.",
   "settings.min_preheat_minutes.label": "Tiempo mínimo de precalentamiento",
-  "settings.nat_vent_soft_start_enabled.description": "Activado, el ventilador de toda la casa puede arrancar cuando la temperatura exterior e interior son iguales (sin esperar a que el exterior sea claramente más fresco) una vez confirmado que la temperatura exterior de hoy ha pasado su máximo y desciende: para mover el aire y purgar el desván y la masa térmica, no para enfriar en bloque. Activado por defecto; desactívalo si solo quieres que el ventilador funcione cuando el exterior sea claramente más fresco que el interior. Hoy ningún sensor de humedad/punto de rocío protege esta función.",
+  "settings.nat_vent_soft_start_enabled.description": "Activado, el ventilador de toda la casa puede arrancar cuando la temperatura exterior e interior son iguales (sin esperar a que el exterior sea claramente más fresco) una vez confirmado que la temperatura exterior de hoy ha pasado su máximo y desciende: para mover el aire y purgar el desván y la masa térmica, no para enfriar en bloque. Activado por defecto; desactívalo si solo quieres que el ventilador funcione cuando el exterior sea claramente más fresco que el interior. En noches húmedas, la protección contra aire húmedo impide que arranque.",
   "settings.nat_vent_soft_start_enabled.label": "Arranque suave en ventilación natural",
   "settings.no_data": "sin datos",
   "settings.no_match": "Ningún ajuste coincide.",

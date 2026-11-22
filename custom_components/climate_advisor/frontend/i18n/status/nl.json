@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Voorkoelen} other {Voorverwarmen}} naar {target} tot de periode met hoog tarief van {ends}, daarna {after}",
   "status.hold.sentence_lc": "{mode, select, cool {voorkoelen} other {voorverwarmen}} naar {target} tot de periode met hoog tarief van {ends}, daarna {after}",
+  "status.humid_air.blocking_ceiling": "Vochtig buiten (dauwpunt {outdoor}, op of boven de grens {ceiling}): de ventilator start niet en ramen openen wordt niet voorgesteld; de airco houdt het bereik aan.",
+  "status.humid_air.blocking_wetter": "Vochtig buiten (dauwpunt {outdoor}, huis {indoor}): de buitenlucht is vochtiger dan in huis, dus de ventilator start niet en ramen openen wordt niet voorgesteld; de airco houdt het bereik aan.",
   "status.humidity_kind.chosen": "je gekozen sensor",
   "status.humidity_kind.device_sensor": "sensor op het apparaat",
   "status.humidity_kind.thermostat": "thermostaat",

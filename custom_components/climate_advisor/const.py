@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.74"
+VERSION = "0.9.75"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -414,8 +414,8 @@ FAN_MIN_TOGGLE_INTERVAL_S = 300
 # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): WHF-purge/comfort activation
 # at outdoor/indoor parity once today's outdoor temp is confirmed past its peak and
 # declining. Opt-out (default on) — users who want the old strict-delta-only behavior can
-# disable it. No humidity/dew-point guard exists today; the comfort benefit itself is
-# still subjective, but the project has chosen to default this on rather than opt-in.
+# disable it. Since Issue #1691 the humid-air guard (humidity_facts.humid_air_verdict) refuses it on humid outdoor
+# air, like every other fan start; the project has chosen to default this on rather than opt-in.
 CONF_NAT_VENT_SOFT_START_ENABLED = "nat_vent_soft_start_enabled"
 DEFAULT_NAT_VENT_SOFT_START_ENABLED = True
 
@@ -1159,8 +1159,8 @@ CONFIG_METADATA = {
             " (not waiting for outdoor to be measurably cooler) once today's outdoor temperature"
             " is confirmed past its peak and declining — for air movement and attic/thermal-mass"
             " purge, not bulk cooling. On by default; disable if you only want the fan to run"
-            " once outdoor is measurably cooler than indoor. No humidity/dew-point sensor guards"
-            " this today."
+            " once outdoor is measurably cooler than indoor. On humid nights the Humid-Air Guard keeps it from"
+            " starting."
         ),
         "category": "fan",
     },

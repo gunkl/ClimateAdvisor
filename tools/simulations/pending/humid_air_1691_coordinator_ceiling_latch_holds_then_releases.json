@@ -1,0 +1,210 @@
+{
+  "name": "humid_air_1691_coordinator_ceiling_latch_holds_then_releases",
+  "description": "Real coordinator: a ceiling block holds through the 1F hysteresis band (64.5F) and releases below 64F, when the fan session starts on the still-open window",
+  "source": "synthetic",
+  "issue": 1691,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "The coordinator's 5-minute dew-point tick (_sample_humidity_facts -> step_humid_latches) keeps the latch; each decision re-steps it from the facts with the 15-minute median dew point.",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: without the latch (hysteresis) 21:00 reads natural_ventilation (64.5F < 65F); without the guard 20:10 reads natural_ventilation. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the fan would chatter on and off as the dew point hovers at the ceiling; with the latch it starts once the air has clearly dried."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Ceiling latch holds at 64.5F, releases at 63.5F",
+    "observed_behavior": "paused, paused, natural_ventilation",
+    "expected_behavior": "paused, paused, natural_ventilation"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 90.2,
+      "note": "Muggy house (dew point 66F) and muggier outdoor air (67F, at or above the 65F ceiling)."
+    },
+    {
+      "time": "2026-07-12T20:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day, cool band."
+    },
+    {
+      "time": "2026-07-12T20:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "Window opens on humid air."
+    },
+    {
+      "time": "2026-07-12T20:20:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 82.7,
+      "note": "Outdoor dew point eases to 64.5F: inside the 1F release band, the ceiling latch holds (the house at 66F is wetter, so only the ceiling could block)."
+    },
+    {
+      "time": "2026-07-12T20:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 82.7,
+      "note": "Outdoor dew point eases to 64.5F: inside the 1F release band, the ceiling latch holds (the house at 66F is wetter, so only the ceiling could block)."
+    },
+    {
+      "time": "2026-07-12T20:35:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 82.7,
+      "note": "Outdoor dew point eases to 64.5F: inside the 1F release band, the ceiling latch holds (the house at 66F is wetter, so only the ceiling could block)."
+    },
+    {
+      "time": "2026-07-12T20:40:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 82.7,
+      "note": "Outdoor dew point eases to 64.5F: inside the 1F release band, the ceiling latch holds (the house at 66F is wetter, so only the ceiling could block)."
+    },
+    {
+      "time": "2026-07-12T20:45:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 82.7,
+      "note": "Outdoor dew point eases to 64.5F: inside the 1F release band, the ceiling latch holds (the house at 66F is wetter, so only the ceiling could block)."
+    },
+    {
+      "time": "2026-07-12T20:50:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 82.7,
+      "note": "Outdoor dew point eases to 64.5F: inside the 1F release band, the ceiling latch holds (the house at 66F is wetter, so only the ceiling could block)."
+    },
+    {
+      "time": "2026-07-12T20:55:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 82.7,
+      "note": "Outdoor dew point eases to 64.5F: inside the 1F release band, the ceiling latch holds (the house at 66F is wetter, so only the ceiling could block)."
+    },
+    {
+      "time": "2026-07-12T21:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 82.7,
+      "note": "Outdoor dew point eases to 64.5F: inside the 1F release band, the ceiling latch holds (the house at 66F is wetter, so only the ceiling could block)."
+    },
+    {
+      "time": "2026-07-12T21:05:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 79.9,
+      "note": "Outdoor dew point 63.5F: below the 64F release, and drier than the house: the guard lets go."
+    },
+    {
+      "time": "2026-07-12T21:10:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 79.9,
+      "note": "Outdoor dew point 63.5F: below the 64F release, and drier than the house: the guard lets go."
+    },
+    {
+      "time": "2026-07-12T21:15:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 79.9,
+      "note": "Outdoor dew point 63.5F: below the 64F release, and drier than the house: the guard lets go."
+    },
+    {
+      "time": "2026-07-12T21:20:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 79.9,
+      "note": "Outdoor dew point 63.5F: below the 64F release, and drier than the house: the guard lets go."
+    },
+    {
+      "time": "2026-07-12T21:25:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 79.9,
+      "note": "Outdoor dew point 63.5F: below the 64F release, and drier than the house: the guard lets go."
+    },
+    {
+      "time": "2026-07-12T21:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 71.2,
+      "outdoor_humidity": 79.9,
+      "note": "Outdoor dew point 63.5F: below the 64F release, and drier than the house: the guard lets go."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T20:10:00",
+      "expect": "paused",
+      "reason": "Outdoor dew point 67F at or above the 65F ceiling: no fan start, the window pauses HVAC."
+    },
+    {
+      "at": "2026-07-12T20:10:00",
+      "expect": "event_emitted",
+      "event": "nat_vent_humid_skip",
+      "payload_subset": {
+        "reason": "ceiling"
+      },
+      "reason": "One refusal row."
+    },
+    {
+      "at": "2026-07-12T21:00:00",
+      "expect": "paused",
+      "reason": "64.5F is inside the 1F band below the ceiling: the latch holds."
+    },
+    {
+      "at": "2026-07-12T21:30:00",
+      "expect": "natural_ventilation",
+      "reason": "63.5F is below the 64F release: the paused window gets its fan session."
+    }
+  ]
+}

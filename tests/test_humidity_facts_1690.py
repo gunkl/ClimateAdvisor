@@ -707,7 +707,7 @@ def test_a_reserved_event_must_be_mapped_when_production_first_emits_it():
     # the scanner itself sees every emit shape (so the guard cannot pass vacuously)
     probe = {
         "a.py": 'self._emit_event("overcool_started", {})',
-        "b.py": 'self._exit_nat_vent(event_type="nat_vent_humid_skip")',
+        "b.py": 'self._exit_nat_vent(event_type="overcool_ended")',  # #1691 took nat_vent_humid_skip off the list
         "c.py": 'events.append({"type": "humid_windows_close_notice"})',
     }
-    assert _emitted_reserved(probe) == {"overcool_started", "nat_vent_humid_skip", "humid_windows_close_notice"}
+    assert _emitted_reserved(probe) == {"overcool_started", "overcool_ended", "humid_windows_close_notice"}

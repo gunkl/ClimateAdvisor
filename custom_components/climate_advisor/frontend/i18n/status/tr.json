@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Ön soğutma} other {Ön ısıtma}}: {ends} yüksek tarife dönemine kadar {target}, sonra {after}",
   "status.hold.sentence_lc": "{mode, select, cool {ön soğutma} other {ön ısıtma}}: {ends} yüksek tarife dönemine kadar {target}, sonra {after}",
+  "status.humid_air.blocking_ceiling": "Dışarısı nemli (çiğ noktası {outdoor}, sınır {ceiling} veya üstünde): fan başlamaz ve pencere açmak önerilmez; klima aralığı korur.",
+  "status.humid_air.blocking_wetter": "Dışarısı nemli (çiğ noktası {outdoor}, ev {indoor}): dış hava evden daha nemli, bu yüzden fan başlamaz ve pencere açmak önerilmez; klima aralığı korur.",
   "status.humidity_kind.chosen": "seçtiğiniz sensör",
   "status.humidity_kind.device_sensor": "cihazdaki sensör",
   "status.humidity_kind.thermostat": "termostat",

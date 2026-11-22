@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "Maximum Setback Depth",
   "settings.min_preheat_minutes.description": "Shortest pre-heat window the system will ever schedule.",
   "settings.min_preheat_minutes.label": "Minimum Pre-heat Time",
-  "settings.nat_vent_soft_start_enabled.description": "When enabled, the whole-house fan may start at outdoor/indoor temperature parity (not waiting for outdoor to be measurably cooler) once today's outdoor temperature is confirmed past its peak and declining — for air movement and attic/thermal-mass purge, not bulk cooling. On by default; disable if you only want the fan to run once outdoor is measurably cooler than indoor. No humidity/dew-point sensor guards this today.",
+  "settings.nat_vent_soft_start_enabled.description": "When enabled, the whole-house fan may start at outdoor/indoor temperature parity (not waiting for outdoor to be measurably cooler) once today's outdoor temperature is confirmed past its peak and declining — for air movement and attic/thermal-mass purge, not bulk cooling. On by default; disable if you only want the fan to run once outdoor is measurably cooler than indoor. On humid nights the Humid-Air Guard keeps it from starting.",
   "settings.nat_vent_soft_start_enabled.label": "Nat-Vent Soft-Start",
   "settings.no_data": "no data",
   "settings.no_match": "No setting matches.",

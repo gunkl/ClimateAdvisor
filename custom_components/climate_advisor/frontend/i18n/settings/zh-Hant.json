@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "最大節能調溫幅度",
   "settings.min_preheat_minutes.description": "系統所排定的最短預熱時間。",
   "settings.min_preheat_minutes.label": "最短預熱時間",
-  "settings.nat_vent_soft_start_enabled.description": "啟用時，一旦確認今天的戶外溫度已過最高點並開始下降，全屋換氣扇可在室內外溫度相當時就啟動（不必等到戶外明顯較涼），目的是促進空氣流動並排出閣樓與建築蓄積的熱，而非大量降溫。預設為開啟；若只希望在戶外明顯比室內涼時才運轉風扇，請停用。目前沒有濕度/露點感測器為此把關。",
+  "settings.nat_vent_soft_start_enabled.description": "啟用時，一旦確認今天的戶外溫度已過最高點並開始下降，全屋換氣扇可在室內外溫度相當時就啟動（不必等到戶外明顯較涼），目的是促進空氣流動並排出閣樓與建築蓄積的熱，而非大量降溫。預設為開啟；若只希望在戶外明顯比室內涼時才運轉風扇，請停用。潮濕的夜晚，潮濕空氣保護會阻止其啟動。",
   "settings.nat_vent_soft_start_enabled.label": "自然通風軟啟動",
   "settings.no_data": "無資料",
   "settings.no_match": "沒有符合的設定。",

@@ -1,0 +1,80 @@
+{
+  "name": "humid_air_1691_whf_dry_control_starts",
+  "description": "Dry night (outdoor dew point 50F): the same window opening starts the whole-house fan (control: the guard does not block dry air)",
+  "source": "synthetic",
+  "issue": 1691,
+  "notes": [
+    "Dew points (feels_like.dew_point_f): indoor 76.0F at 50.0% = 56.01F; outdoor 70.0F at 49.1% = 50.01F. Ceiling = default 65F (option On).",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: a guard that blocked every night (e.g. an inverted comparison) fails this control. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: a dry night keeps its free cooling; the AC does not run instead of the fan."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Dry night (outdoor dew point 50F): the same window opening starts the whole-house fan (control: the guard does not block dry air)",
+    "observed_behavior": "natural_ventilation",
+    "expected_behavior": "natural_ventilation"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "events": [
+    {
+      "time": "2026-07-12T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 50.0,
+      "outdoor_humidity": 49.1,
+      "note": "Summer evening, windows closed: outdoor cooler than the house, so free cooling is on offer by temperature."
+    },
+    {
+      "time": "2026-07-12T20:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day, cool mode: with the windows closed the AC holds the band (no fan starts in a sealed house)."
+    },
+    {
+      "time": "2026-07-12T20:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "The occupant opens a window."
+    },
+    {
+      "time": "2026-07-12T20:15:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 50.0,
+      "outdoor_humidity": 49.1,
+      "note": "Five minutes later, same air: the engine re-asks the start question (paused-reactivation / idle-open re-check)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T20:01:00",
+      "expect": "classification_applied",
+      "reason": "Windows closed: the cool band is armed and the AC holds it."
+    },
+    {
+      "at": "2026-07-12T20:10:00",
+      "expect": "natural_ventilation",
+      "reason": "Dry night (outdoor dew point 50F): the same window opening starts the whole-house fan (control: the guard does not block dry air)"
+    },
+    {
+      "at": "2026-07-12T20:15:00",
+      "expect": "nat_vent_still_active",
+      "reason": "Free cooling runs on dry air."
+    }
+  ]
+}

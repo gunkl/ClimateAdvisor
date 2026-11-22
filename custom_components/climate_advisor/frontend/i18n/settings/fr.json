@@ -199,7 +199,7 @@
   "settings.max_setback_depth_f.label": "Profondeur maximale de réduction",
   "settings.min_preheat_minutes.description": "La plus courte fenêtre de préchauffage que le système planifiera.",
   "settings.min_preheat_minutes.label": "Durée minimale de préchauffage",
-  "settings.nat_vent_soft_start_enabled.description": "Activé, le ventilateur de toute la maison peut démarrer quand les températures extérieure et intérieure sont égales (sans attendre que l’extérieur soit nettement plus frais) dès que la température extérieure du jour a passé son maximum et baisse : pour brasser l’air et purger le grenier et la masse thermique, pas pour refroidir en masse. Activé par défaut ; désactivez-le si le ventilateur ne doit tourner que lorsque l’extérieur est nettement plus frais que l’intérieur. Aucun capteur d’humidité/point de rosée ne protège cette fonction aujourd’hui.",
+  "settings.nat_vent_soft_start_enabled.description": "Activé, le ventilateur de toute la maison peut démarrer quand les températures extérieure et intérieure sont égales (sans attendre que l’extérieur soit nettement plus frais) dès que la température extérieure du jour a passé son maximum et baisse : pour brasser l’air et purger le grenier et la masse thermique, pas pour refroidir en masse. Activé par défaut ; désactivez-le si le ventilateur ne doit tourner que lorsque l’extérieur est nettement plus frais que l’intérieur. Les nuits humides, la protection contre l’air humide l’empêche de démarrer.",
   "settings.nat_vent_soft_start_enabled.label": "Démarrage progressif en ventilation naturelle",
   "settings.no_data": "aucune donnée",
   "settings.no_match": "Aucun paramètre correspondant.",

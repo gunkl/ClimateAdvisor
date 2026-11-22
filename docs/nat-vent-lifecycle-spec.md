@@ -26,6 +26,7 @@
 
 **Does NOT cover:**
 - The reactivation *gate* itself (should nat-vent (re)activate right now, given current temps) — see `nat_vent_gate.py`'s `decide_nat_vent_gate()`/`decide_nat_vent_soft_start_gate()`.
+- The start veto (Issue #1138/#1140; Issue #1691 added guard 3, the humid-air guard): evaluated by the FSM only when a gate would start (full gate or soft start), so a humid night ends in `INACTIVE` with `veto.reason == "humid_air"` and `vetoed_state` set. See [Humid-air guard on fan starts](08-COMPUTATION-REFERENCE.md#humid-air-guard-on-fan-starts-issue-1691).
 - The exit *priority chain* (which of the 5+ exit conditions fires first) — still inline in `automation.py` as of this spec; extracting it as a pure, swapped-in function is the next phase of the Block 5 arc (epic #594), not covered here.
 - Pause, override, and grace lifecycles' own internal state machines — see `grace-periods-spec.md`. This spec only documents the one real handoff seam between nat-vent and those three.
 - Economizer (`_economizer_active`/`_economizer_phase`) — a separate, mutually exclusive mechanism (explicitly gated off whenever `_natural_vent_active` is True), not a nat-vent sub-state.

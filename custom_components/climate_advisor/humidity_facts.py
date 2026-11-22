@@ -78,9 +78,9 @@ REASON_GLITCH = "glitch"
 REASON_STALE = "stale"
 
 # Event types reserved for the later #1507 lanes (registered unmapped in tools/sim_harness/outcomes.py now, so the
-# lanes cannot collide on names). Nothing emits them yet.
+# lanes cannot collide on names). Nothing emits them yet. (``nat_vent_humid_skip`` left this list when Issue #1691
+# started emitting it; it is mapped in outcomes.py.)
 RESERVED_EVENT_TYPES: tuple[str, ...] = (
-    "nat_vent_humid_skip",  # H1: a nat-vent / fan start refused on humid outdoor air (sibling of *_forecast_skip)
     "humid_windows_close_notice",  # H1: humid outside with the windows open: "close the windows, the AC takes over"
     "overcool_started",  # H3: humid overcool lowered the commanded cool setpoint
     "overcool_ended",  # H3: humid overcool released (dew point dropped, run ended, 60-minute cap, gate closed)

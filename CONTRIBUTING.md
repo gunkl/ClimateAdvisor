@@ -26,13 +26,14 @@ Every bug report is one of two kinds, and the issue form asks which.
 - Logs covering the time it happened (Debug tab → **Download logs**). For more detail, turn on **Enable debug logging**, reproduce the problem, then turn it off.
 - When it happened (date, time and time zone), what you expected, what the house did, and anything you did yourself (changed the setpoint, opened a window, switched the fan).
 - Climate Advisor and Home Assistant versions, the thermostat and fan hardware, and the fan mode.
+- **Whether it still happens on the latest version**, and what you checked. Upgrade to the [latest release or pre-release](https://github.com/gunkl/ClimateAdvisor/releases) and watch for it; or read the `CHANGELOG.md` entries since your version and run `python tools/fix_search.py "<topic>"`; or show that the code on `main` still does it (file and function), or that a harness run on `main` reproduces it. A report against an older version that a later release already fixed costs everyone time.
 - If you have them: a screenshot of the dashboard chart, the AI Investigator report, or the household-promise misses on the Analysis tab.
 - A reproduction in the [simulation harness](#golden-scenarios-and-the-simulation-harness) also counts as evidence: a generated day (`python tools/simulate.py --generate-day N`) or a scenario in `tools/simulations/pending/` that shows the behaviour through the real engine.
 
 **Hypothesis:** you think something is wrong, but have no data from a real house or the harness that shows it. Reading the code and spotting a likely bug is a hypothesis. It's welcome, but label it as one (the form's "Hypothesis" choice sets the `hypothesis` label) and include:
 
 - what you think happens, and what the person at home would experience;
-- where you read it (the doc section, file and function);
+- where you read it (the doc section, file and function), on `main` rather than an older version;
 - what data would confirm it or rule it out.
 
 Don't present a hypothesis as a finding. Many things that look like bugs from the code are deliberate decisions: check the [scope facts](claude.md#scope-facts--check-these-before-calling-anything-a-bug-issue-1197) and the closed `wontfix` issues.
@@ -43,7 +44,7 @@ Every fix in this project follows this method, whether a person or an AI assista
 
 1. **Occupant first.** Start with what the person living in the home experiences ("the AC runs while outdoor air would have cooled the house for free"), then the mechanism. A finding that changes nothing for the occupant (duplicate commands, log noise) isn't a bug here.
 2. **Evidence before hypothesis, docs before code.** Look at the logs and recorded data first. Then read the relevant docs: start at the Anchors table in [00-PROJECT-INSTRUCTIONS](docs/00-PROJECT-INSTRUCTIONS.md), then the module's brief and spec. Open source files last, to test a specific hypothesis.
-3. **Check it isn't already decided.** Read the [scope facts](claude.md#scope-facts--check-these-before-calling-anything-a-bug-issue-1197). Search open and closed issues (including `wontfix`), `CHANGELOG.md`, and `python tools/fix_search.py "<topic>"`.
+3. **Check it isn't already decided or fixed.** Read the [scope facts](claude.md#scope-facts--check-these-before-calling-anything-a-bug-issue-1197). Search open and closed issues (including `wontfix`), `CHANGELOG.md`, and `python tools/fix_search.py "<topic>"`. Note the version the problem was seen on, and confirm it still happens on current `main`: by reading the code there, or with a harness run on `main`.
 4. **Find where it came from.** Run `git log -p -S "<key fragment>" -- <file>`. Then say which it is:
    - a **regression**: name the commit or PR, and the test that would have caught it;
    - an **original design gap**: it has always worked this way.
@@ -71,6 +72,7 @@ A workflow (`.github/workflows/submission-check.yml`) reads every new issue and 
   - **A script:**
     - the form fields are filled in;
     - the issue says whether it's evidence or a hypothesis;
+    - the issue says whether it still happens on the latest version, and what was checked;
     - the PR links an issue, and for a feature that issue has `approach agreed`;
     - the PR template sections are filled in;
     - the version, changelog and fix-history entries are present.
@@ -232,6 +234,10 @@ cooling and fans in people's homes. Follow CONTRIBUTING.md, "How we diagnose, fi
   (Anchors table) and the relevant brief and spec before opening source files.
 - Check the scope facts in claude.md, closed wontfix issues and CHANGELOG.md before calling
   something a bug.
+- Record the Climate Advisor version the problem was seen on. Before filing or fixing, check
+  that it still happens on the latest release or pre-release and on current main: the
+  CHANGELOG entries since that version, `python tools/fix_search.py "<topic>"`, the code on
+  main, or a harness run on main. Say in the issue what you checked and what you found.
 - Find the origin with `git log -S`: a regression (name the commit) or an original design gap.
 - Build a state matrix of every relevant condition, including edge cases and controls.
 - Grep every changed symbol across the whole repository, and list every writer and reader.

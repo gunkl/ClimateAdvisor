@@ -4,7 +4,8 @@ Fixes #<issue>  <!-- bug fix: the bug issue. Feature or enhancement: an issue la
 <!-- Before → after, in plain words. -->
 
 ## Evidence
-<!-- The data this rests on: diagnostics, logs, times, a simulation reproduction. Or "hypothesis only", with what would confirm it. -->
+<!-- The data this rests on: diagnostics, logs, times, a simulation reproduction. Or "hypothesis only", with what would confirm it.
+     Also: the version it was reported on, and that it still happens on main (how you checked). -->
 
 ## Root cause and origin
 <!-- Regression (name the commit or PR) or original design gap, and how you found it (git log -S ...). -->

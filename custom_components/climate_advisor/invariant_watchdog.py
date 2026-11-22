@@ -1379,7 +1379,8 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
         cur["last"] = r.ts
         cur["worst"] = max(cur["worst"], dist)
         edge = cfg.floor_lo(r.ts) if side == "below" else cfg.ceiling_hi(r.ts)
-        cur["depth"] = max(cur["depth"], (edge - r.indoor_f) if side == "below" else (r.indoor_f - edge))
+        if r.indoor_f is not None:  # always true here (outside() needs a reading); narrows the type for mypy
+            cur["depth"] = max(cur["depth"], (edge - r.indoor_f) if side == "below" else (r.indoor_f - edge))
         if _p7_thermostat_deadband(r, side, edge):
             pending = (cur, r.ts, EXCUSED_BY_THERMOSTAT_DEADBAND)
             continue

@@ -2,8 +2,9 @@
 
 Records (the event log ``reason``/``detail``, ``last_action_reason``, the activity record text fed to the AI
 investigator) keep English bytes; display languages re-render the sibling ``*_key``/``*_params``. Production loads
-the catalogs once in ``async_setup_entry``. Headless callers (the simulation harness, unit tests, tools) never run
-setup; they call ``i18n.ensure_catalogs()`` once at their entry point (never raises, never loads twice).
+the catalogs once in ``async_setup``, before any zone (Issue #1673). Headless callers (the simulation harness,
+unit tests, tools) never run setup; they call ``i18n.ensure_catalogs()`` once at their entry point (never raises,
+never loads twice).
 """
 
 from __future__ import annotations

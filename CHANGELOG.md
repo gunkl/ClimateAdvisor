@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.64] — 2026-11-21
+
+### Fixed
+- After a Home Assistant restart, a multi-zone install no longer shows raw text keys (such as `status.promise.comfort_kept`) in the first timeline, status card, briefing and activity-log entries. Zones started together no longer begin before the translations finish loading, and the AI Investigator's log records no longer collect `catalogs not loaded` warnings (#1673).
+
 ## [0.9.63] — 2026-11-21
 
 ### Fixed

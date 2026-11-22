@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "ventilateur de toute la maison allumé après le CVC — CVC suspendu (la dernière action l’emporte)",
   "activity.reason_why_indoor_le_comfort_floor": "intérieur {indoor} ≤ plancher de confort {floor}",
   "activity.reason_why_outdoor_ge_indoor": "extérieur {outdoor} >= intérieur {indoor}",
+  "activity.reason_zone_no_capable_mode": "Ni chauffage ni climatisation disponibles dans cette zone pour l'instant (était {mode})",
   "activity.resumes_once_clears": "reprend dès que c’est résolu",
   "activity.resumes_once_clears_mode": "reprend dès que c’est résolu ({mode})",
   "activity.sensor_open_recheck": "Revérification : porte/fenêtre confirmée ouverte",

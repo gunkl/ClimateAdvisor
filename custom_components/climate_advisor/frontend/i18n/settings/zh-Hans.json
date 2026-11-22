@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "访客模式开关",
   "settings.guest_toggle_invert.description": "如果您的开关在没有客人时报告为 ON，请启用。",
   "settings.guest_toggle_invert.label": "反转访客开关",
-  "settings.heat_lockout_outdoor_temp.description": "室外比此温度暖时，Climate Advisor 不制热；低于此温度 2 °C (3.6 °F) 后再次允许制热。比制热温度低出超过当天容差的房屋仍会制热。必须高于制冷锁定温度。留空表示不锁定。",
+  "settings.heat_lockout_outdoor_temp.description": "室外比此温度暖时，Climate Advisor 不制热；低于此温度 2 °C (3.6 °F) 后再次允许制热。比制热温度低出超过当天容差的房屋仍会制热。必须比制冷锁定温度至少高 2 °C (3.6 °F)。留空表示不锁定。",
   "settings.heat_lockout_outdoor_temp.label": "室外高于此值不制热",
   "settings.heat_power_kw.description": "供暖运行时的平均电功率（单位 kW；查看铭牌或智能插座）。可选：与能源费率一起用于估算每日费用。留空则不显示费用。",
   "settings.heat_power_kw.label": "制热功率",

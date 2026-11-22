@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "Guest Mode Toggle",
   "settings.guest_toggle_invert.description": "Enable if your toggle reports ON when guests are NOT present.",
   "settings.guest_toggle_invert.label": "Invert Guest Toggle",
-  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor does not heat while the outdoor temperature is above this (Issue #1699). It allows heating again once it is two Celsius degrees colder. If the house gets colder than the floor by more than the day's overshoot tolerance, heating runs anyway. Must be above the cooling lockout. Leave empty for no lockout.",
+  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor does not heat while the outdoor temperature is above this (Issue #1699). It allows heating again once it is two Celsius degrees colder. If the house gets colder than the floor by more than the day's overshoot tolerance, heating runs anyway. Must be at least two Celsius degrees above the cooling lockout. Leave empty for no lockout.",
   "settings.heat_lockout_outdoor_temp.label": "No heating above outdoor",
   "settings.heat_power_kw.description": "Average electrical power your heating draws while it runs (in kW; check the nameplate or a smart plug). Optional: used with the energy rate to estimate daily cost. Left blank, no cost is shown.",
   "settings.heat_power_kw.label": "Heating Power",

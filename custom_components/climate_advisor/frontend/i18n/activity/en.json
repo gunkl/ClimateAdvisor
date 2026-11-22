@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "whole-house fan turned on after HVAC — suppressing HVAC (newest action wins)",
   "activity.reason_why_indoor_le_comfort_floor": "indoor {indoor} ≤ comfort floor {floor}",
   "activity.reason_why_outdoor_ge_indoor": "outdoor {outdoor} >= indoor {indoor}",
+  "activity.reason_zone_no_capable_mode": "Neither heating nor cooling is available in this zone now (was {mode})",
   "activity.resumes_once_clears": "resumes once it clears",
   "activity.resumes_once_clears_mode": "resumes once it clears ({mode})",
   "activity.sensor_open_recheck": "Re-check: door/window confirmed open",

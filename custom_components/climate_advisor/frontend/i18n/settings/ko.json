@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "손님 모드 토글",
   "settings.guest_toggle_invert.description": "손님이 없을 때 토글이 ON으로 보고된다면 사용하세요.",
   "settings.guest_toggle_invert.label": "손님 토글 반전",
-  "settings.heat_lockout_outdoor_temp.description": "바깥이 이 온도보다 따뜻한 동안 Climate Advisor는 난방하지 않으며, 이보다 2 °C (3.6 °F) 낮아지면 다시 난방을 허용합니다. 난방 온도보다 그날의 허용 범위 이상 추운 집은 그래도 난방됩니다. 냉방 잠금보다 높아야 합니다. 잠금이 필요 없으면 비워 두세요.",
+  "settings.heat_lockout_outdoor_temp.description": "바깥이 이 온도보다 따뜻한 동안 Climate Advisor는 난방하지 않으며, 이보다 2 °C (3.6 °F) 낮아지면 다시 난방을 허용합니다. 난방 온도보다 그날의 허용 범위 이상 추운 집은 그래도 난방됩니다. 냉방 잠금보다 2 °C (3.6 °F) 이상 높아야 합니다. 잠금이 필요 없으면 비워 두세요.",
   "settings.heat_lockout_outdoor_temp.label": "외부 온도 초과 시 난방 안 함",
   "settings.heat_power_kw.description": "난방이 작동하는 동안의 평균 소비 전력입니다(kW 단위, 명판이나 스마트 플러그로 확인). 선택 사항이며, 에너지 요금과 함께 일일 비용을 추정하는 데 사용됩니다. 비워 두면 비용이 표시되지 않습니다.",
   "settings.heat_power_kw.label": "난방 전력",

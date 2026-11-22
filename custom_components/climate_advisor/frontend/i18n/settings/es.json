@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "Interruptor del modo invitados",
   "settings.guest_toggle_invert.description": "Actívalo si tu interruptor indica ON cuando NO hay invitados.",
   "settings.guest_toggle_invert.label": "Invertir el interruptor de invitados",
-  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor no calienta mientras fuera haga más calor que esto, y vuelve a permitirlo 2 °C (3,6 °F) por debajo. Una casa más fría que la temperatura de calefacción en más de la tolerancia del día se calienta igualmente. Debe estar por encima del bloqueo de refrigeración. Déjalo vacío para no bloquear.",
+  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor no calienta mientras fuera haga más calor que esto, y vuelve a permitirlo 2 °C (3,6 °F) por debajo. Una casa más fría que la temperatura de calefacción en más de la tolerancia del día se calienta igualmente. Debe estar al menos 2 °C (3,6 °F) por encima del bloqueo de refrigeración. Déjalo vacío para no bloquear.",
   "settings.heat_lockout_outdoor_temp.label": "Sin calefacción sobre exterior",
   "settings.heat_power_kw.description": "Potencia eléctrica media que consume tu calefacción mientras funciona (en kW; mira la placa de características o un enchufe inteligente). Opcional: junto con el precio de la energía sirve para estimar el coste diario. Si se deja vacío, no se muestra coste.",
   "settings.heat_power_kw.label": "Potencia de calefacción",

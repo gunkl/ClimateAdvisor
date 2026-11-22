@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "Interruttore modalità ospiti",
   "settings.guest_toggle_invert.description": "Attiva se il tuo interruttore indica ON quando NON ci sono ospiti.",
   "settings.guest_toggle_invert.label": "Inverti l’interruttore ospiti",
-  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor non riscalda finché fuori fa più caldo di questo valore, e lo consente di nuovo 2 °C (3,6 °F) sotto. Una casa più fredda della temperatura di riscaldamento di più della tolleranza del giorno viene comunque riscaldata. Deve essere sopra il blocco del raffrescamento. Lascia vuoto per nessun blocco.",
+  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor non riscalda finché fuori fa più caldo di questo valore, e lo consente di nuovo 2 °C (3,6 °F) sotto. Una casa più fredda della temperatura di riscaldamento di più della tolleranza del giorno viene comunque riscaldata. Deve essere almeno 2 °C (3,6 °F) sopra il blocco del raffrescamento. Lascia vuoto per nessun blocco.",
   "settings.heat_lockout_outdoor_temp.label": "Niente caldo sopra esterno",
   "settings.heat_power_kw.description": "Potenza elettrica media assorbita dal tuo riscaldamento mentre funziona (in kW; guarda la targhetta o una presa smart). Facoltativo: insieme al costo dell’energia serve a stimare il costo giornaliero. Se vuoto, non viene mostrato alcun costo.",
   "settings.heat_power_kw.label": "Potenza di riscaldamento",

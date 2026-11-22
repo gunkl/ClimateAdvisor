@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "ゲストモードのトグル",
   "settings.guest_toggle_invert.description": "来客がいないときにトグルが ON になる場合は有効にしてください。",
   "settings.guest_toggle_invert.label": "ゲストトグルを反転",
-  "settings.heat_lockout_outdoor_temp.description": "外気がこの温度より高い間、Climate Advisor は暖房しません。この温度より 2 °C (3.6 °F) 低くなると再び暖房を許可します。暖房温度をその日の許容範囲より大きく下回って寒い家は、それでも暖房されます。冷房ロックアウトより高くする必要があります。ロックアウトしない場合は空欄にします。",
+  "settings.heat_lockout_outdoor_temp.description": "外気がこの温度より高い間、Climate Advisor は暖房しません。この温度より 2 °C (3.6 °F) 低くなると再び暖房を許可します。暖房温度をその日の許容範囲より大きく下回って寒い家は、それでも暖房されます。冷房ロックアウトより 2 °C (3.6 °F) 以上高くする必要があります。ロックアウトしない場合は空欄にします。",
   "settings.heat_lockout_outdoor_temp.label": "外気がこれ超で暖房なし",
   "settings.heat_power_kw.description": "暖房の運転中の平均消費電力です(kW 単位。銘板またはスマートプラグで確認できます)。任意項目です。電気料金と合わせて 1 日の費用を推定します。空欄の場合、費用は表示されません。",
   "settings.heat_power_kw.label": "暖房の電力",

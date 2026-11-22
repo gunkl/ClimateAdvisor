@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "냉난방 이후 집 전체 환기 송풍기 켜짐 — 냉난방 억제 (가장 최근 동작 우선)",
   "activity.reason_why_indoor_le_comfort_floor": "실내 {indoor} ≤ 쾌적 하한 {floor}",
   "activity.reason_why_outdoor_ge_indoor": "실외 {outdoor} >= 실내 {indoor}",
+  "activity.reason_zone_no_capable_mode": "이 구역에서는 지금 난방도 냉방도 사용할 수 없습니다 (이전 {mode})",
   "activity.resumes_once_clears": "해소되면 재개",
   "activity.resumes_once_clears_mode": "해소되면 재개 ({mode})",
   "activity.sensor_open_recheck": "재확인: 문/창문 열림 확인됨",

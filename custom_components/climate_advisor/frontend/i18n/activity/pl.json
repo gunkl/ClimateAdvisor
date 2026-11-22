@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "wentylator całego domu włączony po HVAC — wstrzymanie HVAC (wygrywa najnowsza akcja)",
   "activity.reason_why_indoor_le_comfort_floor": "w domu {indoor} ≤ dolna granica komfortu {floor}",
   "activity.reason_why_outdoor_ge_indoor": "na zewnątrz {outdoor} >= w domu {indoor}",
+  "activity.reason_zone_no_capable_mode": "W tej strefie nie jest teraz dostępne ani ogrzewanie, ani chłodzenie (było {mode})",
   "activity.resumes_once_clears": "wznowi się po ustąpieniu",
   "activity.resumes_once_clears_mode": "wznowi się po ustąpieniu ({mode})",
   "activity.sensor_open_recheck": "Ponowna kontrola: potwierdzono otwarte drzwi/okno",

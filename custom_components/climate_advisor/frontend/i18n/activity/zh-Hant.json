@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "全屋換氣扇在空調系統之後開啟 — 暫停空調系統（以最新操作為準）",
   "activity.reason_why_indoor_le_comfort_floor": "室內 {indoor} ≤ 舒適下限 {floor}",
   "activity.reason_why_outdoor_ge_indoor": "戶外 {outdoor} >= 室內 {indoor}",
+  "activity.reason_zone_no_capable_mode": "此區域目前既不能開暖氣也不能開冷氣（原為 {mode}）",
   "activity.resumes_once_clears": "狀況解除後恢復",
   "activity.resumes_once_clears_mode": "狀況解除後恢復（{mode}）",
   "activity.sensor_open_recheck": "重新檢查：確認門窗開啟",

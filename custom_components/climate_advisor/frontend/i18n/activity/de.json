@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "Hausventilator nach der HVAC eingeschaltet — HVAC wird unterdrückt (die neueste Aktion gewinnt)",
   "activity.reason_why_indoor_le_comfort_floor": "innen {indoor} ≤ Komfort-Untergrenze {floor}",
   "activity.reason_why_outdoor_ge_indoor": "außen {outdoor} >= innen {indoor}",
+  "activity.reason_zone_no_capable_mode": "In dieser Zone ist derzeit weder Heizen noch Kühlen verfügbar (war {mode})",
   "activity.resumes_once_clears": "wird fortgesetzt, sobald es sich erledigt hat",
   "activity.resumes_once_clears_mode": "wird fortgesetzt, sobald es sich erledigt hat ({mode})",
   "activity.sensor_open_recheck": "Nachprüfung: Tür/Fenster als offen bestätigt",

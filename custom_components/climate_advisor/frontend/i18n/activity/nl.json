@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "huisventilator aangezet na HVAC — HVAC wordt onderdrukt (nieuwste actie wint)",
   "activity.reason_why_indoor_le_comfort_floor": "binnen {indoor} ≤ comfortondergrens {floor}",
   "activity.reason_why_outdoor_ge_indoor": "buiten {outdoor} >= binnen {indoor}",
+  "activity.reason_zone_no_capable_mode": "In deze zone is nu verwarmen noch koelen beschikbaar (was {mode})",
   "activity.resumes_once_clears": "wordt hervat zodra het is opgelost",
   "activity.resumes_once_clears_mode": "wordt hervat zodra het is opgelost ({mode})",
   "activity.sensor_open_recheck": "Hercontrole: deur/raam bevestigd open",

@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "全屋换气扇在暖通空调之后开启 — 抑制暖通空调（以最新操作为准）",
   "activity.reason_why_indoor_le_comfort_floor": "室内 {indoor} ≤ 舒适下限 {floor}",
   "activity.reason_why_outdoor_ge_indoor": "室外 {outdoor} >= 室内 {indoor}",
+  "activity.reason_zone_no_capable_mode": "此区域当前既不能制热也不能制冷（原为 {mode}）",
   "activity.resumes_once_clears": "条件解除后恢复",
   "activity.resumes_once_clears_mode": "条件解除后恢复（{mode}）",
   "activity.sensor_open_recheck": "复查：已确认门/窗打开",

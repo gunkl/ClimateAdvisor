@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "HVAC के बाद पूरे घर का पंखा चालू हुआ — HVAC बंद किया जा रहा है (सबसे नई कार्रवाई मान्य)",
   "activity.reason_why_indoor_le_comfort_floor": "अंदर {indoor} ≤ आराम की निचली सीमा {floor}",
   "activity.reason_why_outdoor_ge_indoor": "बाहर {outdoor} >= अंदर {indoor}",
+  "activity.reason_zone_no_capable_mode": "इस ज़ोन में अभी न हीटिंग उपलब्ध है, न कूलिंग (पहले {mode})",
   "activity.resumes_once_clears": "रुकावट हटते ही फिर शुरू होगा",
   "activity.resumes_once_clears_mode": "रुकावट हटते ही फिर शुरू होगा ({mode})",
   "activity.sensor_open_recheck": "दोबारा जांच: दरवाज़ा/खिड़की खुली होने की पुष्टि",

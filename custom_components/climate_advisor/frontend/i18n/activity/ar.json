@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "تم تشغيل مروحة المنزل بالكامل بعد HVAC — كبح HVAC (الإجراء الأحدث هو الذي يسود)",
   "activity.reason_why_indoor_le_comfort_floor": "الداخل {indoor} ≤ الحد الأدنى للراحة {floor}",
   "activity.reason_why_outdoor_ge_indoor": "الخارج {outdoor} >= الداخل {indoor}",
+  "activity.reason_zone_no_capable_mode": "لا تتوفر التدفئة ولا التبريد في هذه المنطقة الآن (كان {mode})",
   "activity.resumes_once_clears": "يستأنف عند زوال السبب",
   "activity.resumes_once_clears_mode": "يستأنف عند زوال السبب ({mode})",
   "activity.sensor_open_recheck": "إعادة فحص: تأكد أن الباب/النافذة مفتوحة",

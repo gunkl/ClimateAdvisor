@@ -256,7 +256,7 @@
           "vacation_heat": "Heating temperature while the vacation switch is on. Leave blank to use away heating minus 3 °F (about 1.5 °C).",
           "vacation_cool": "Cooling temperature while the vacation switch is on. Leave blank to use away cooling plus 3 °F (about 1.5 °C).",
           "cool_lockout_outdoor_temp": "Climate Advisor does not cool while it is colder than this outside, and allows cooling again 2 °C (3.6 °F) above it. A house hotter than the cooling temperature by more than the day's overshoot tolerance still gets cooling. Leave blank for no lockout.",
-          "heat_lockout_outdoor_temp": "Climate Advisor does not heat while it is warmer than this outside, and allows heating again 2 °C (3.6 °F) below it. A house colder than the heating temperature by more than the day's overshoot tolerance still gets heating. Must be above the cooling lockout. Leave blank for no lockout.",
+          "heat_lockout_outdoor_temp": "Climate Advisor does not heat while it is warmer than this outside, and allows heating again 2 °C (3.6 °F) below it. A house colder than the heating temperature by more than the day's overshoot tolerance still gets heating. Must be at least 2 °C (3.6 °F) above the cooling lockout. Leave blank for no lockout.",
           "hvac_season": "Auto heats and cools. Heat only or Cool only removes the other side for the season, as if the thermostat could not do it; a house far past that side's comfort edge still gets it."
         }
       },
@@ -579,7 +579,7 @@
       "vacation_cool_below_away_warning": "Vacation cooling is cooler than away cooling, so a vacation uses more energy than a normal day out. Submit again to keep this.",
       "vacation_freeze_warning": "With this setting, vacation heating ends up below 45 °F (7 °C). Pipes can freeze during a long trip. Submit again to keep this.",
       "thermostat_shared_zone": "Another Climate Advisor zone already uses this thermostat. Pick a different thermostat.",
-      "lockout_overlap": "The heating lockout must be above the cooling lockout; otherwise there are outdoor temperatures at which neither heating nor cooling is allowed."
+      "lockout_overlap": "The heating lockout must be at least 2 °C (3.6 °F) above the cooling lockout; otherwise, once both have engaged, there are outdoor temperatures at which neither heating nor cooling is allowed."
     }
   },
   "issues": {

@@ -12,8 +12,11 @@ only / Cool only), and since when. Equipment is what is possible; the policies o
 
 Safety release (owner decision 2026-11-22): a POLICY lock (outdoor lockout or season) steps aside while the house is
 deeper past that side's edge than the day's settling tolerance (``comfort_deadband_*_f``; the comfort-edge R1 rule,
-depth strictly greater than the tolerance), and locks again once the depth is back at or inside it. Missing equipment
-is never released (there is nothing to run). With an unknown indoor reading or band a policy lock stays locked.
+depth strictly greater than the tolerance), and locks again only once the house is back at the edge (depth <= 0) and
+the mode-switch dwell allows a routine switch -- a hysteresis, so a house hovering around edge + tolerance does not
+flip heat and cool on every reading. Missing equipment is never released (there is nothing to run). With an unknown
+indoor reading or band a policy lock stays locked. The release state is owned by the comfort-edge selector (the band
+it decides on); every other reader uses the recorded state.
 
 Pure: no Home Assistant, no clock, no logging. The engine (``automation.py``) owns the in-memory lockout state and
 feeds this module; spec ``docs/zone-capability-spec.md``.
@@ -75,14 +78,15 @@ def step_heat_lockout(engaged: bool, outdoor_f: float | None, threshold_f: float
 
 
 def lockout_thresholds_overlap(cool_lockout_f: float | None, heat_lockout_f: float | None) -> bool:
-    """True when both lockouts are set and the heat lockout is at or below the cool lockout (rejected in the form).
+    """True when both lockouts are set and could be engaged at once (rejected in the form).
 
-    With heat locked out above H and cool locked out below C, H <= C leaves outdoor temperatures at which the zone
-    could neither heat nor cool.
+    The cool lockout stays engaged up to C + 3.6 °F once engaged and the heat lockout down to H - 3.6 °F, so with
+    H < C + 3.6 (2 °C) there are outdoor temperatures between H and C + 3.6 at which, coming from below, the zone could
+    neither heat nor cool. The heat lockout must be at least 2 °C above the cool lockout.
     """
     if cool_lockout_f is None or heat_lockout_f is None:
         return False
-    return heat_lockout_f <= cool_lockout_f
+    return heat_lockout_f < cool_lockout_f + LOCKOUT_RELEASE_HYSTERESIS_F - 1e-6
 
 
 def normalize_season(value: object) -> str:
@@ -111,6 +115,23 @@ def depth_past_edge(
     if family == FAMILY_HEAT:
         return None if floor_f is None else floor_f - indoor_f
     return None if ceiling_f is None else indoor_f - ceiling_f
+
+
+def next_safety_release(
+    released_before: bool, depth_f: float | None, tolerance_f: float | None, *, relock_allowed: bool = True
+) -> bool:
+    """Next state of a policy lock's safety release, with hysteresis (review of #1699).
+
+    Releases when the house is deeper past the edge than the tolerance (``depth > tolerance``, the R1 boundary).
+    Once released it stays released until the house is back at the edge (``depth <= 0``), so a house hovering around
+    edge + tolerance does not flip the mode on every reading; and, at the edge, only once the mode-switch dwell
+    allows a routine switch (``relock_allowed``). An unknown reading, band or tolerance locks.
+    """
+    if depth_f is None or tolerance_f is None:
+        return False
+    if released_before:
+        return depth_f > 0.0 or not relock_allowed
+    return depth_f > tolerance_f
 
 
 @dataclass(frozen=True)
@@ -153,15 +174,30 @@ class ZoneCapability:
     def family(self, family: str) -> FamilyAvailability:
         return self.heat if family == FAMILY_HEAT else self.cool
 
+    @property
+    def policy_engaged(self) -> bool:
+        """True while an outdoor lockout or the season setting takes either side away."""
+        return self.heat.policy_locked or self.cool.policy_locked
+
     def mode_allowed(self, mode: str | None) -> bool:
-        """May Climate Advisor command ``mode`` now? heat/cool need their family; a band mode needs both."""
+        """May Climate Advisor command ``mode`` now?
+
+        heat / cool need their family. A band mode (heat_cool / auto) the thermostat advertises stays allowed on
+        equipment alone (on a heat-only Tado or Netatmo ``auto`` is its schedule mode); it is refused only while a
+        policy lock is engaged on either side, because the thermostat would then run the locked side by itself.
+        """
         if mode == FAMILY_HEAT:
             return self.heat.available
         if mode == FAMILY_COOL:
             return self.cool.available
         if mode in BAND_MODES:
-            return self.heat.available and self.cool.available
+            return not self.policy_engaged
         return True
+
+    @property
+    def none_available(self) -> bool:
+        """Neither family can run now (e.g. cool-only equipment plus a cool lockout)."""
+        return not self.heat.available and not self.cool.available
 
     def bank_allowed(self, family: str) -> bool:
         """May an optional bank (TOU pre-conditioning, overnight pre-cool) run ``family`` now?
@@ -184,8 +220,16 @@ def resolve_family(
     ceiling_f: float | None,
     tolerance_f: float | None,
     since: datetime | None = None,
+    released_before: bool = False,
+    relock_allowed: bool = True,
+    safety_released: bool | None = None,
 ) -> FamilyAvailability:
-    """Availability of one family. See the module docstring for the rules."""
+    """Availability of one family. See the module docstring for the rules.
+
+    The safety release is stateful: ``released_before`` is the family's previous release state and the answer is
+    :func:`next_safety_release`. A caller that must not move that state (any path other than the comfort-edge
+    selector, which owns it) passes ``safety_released`` to use the recorded decision as is.
+    """
     if not equipment:
         return FamilyAvailability(family, False, REASON_EQUIPMENT, since=since)
     reason: str | None = None
@@ -196,7 +240,11 @@ def resolve_family(
     if reason is None:
         return FamilyAvailability(family, True, since=since)
     depth = depth_past_edge(family, indoor_f, floor_f, ceiling_f)
-    released = depth is not None and tolerance_f is not None and depth > tolerance_f
+    released = (
+        safety_released
+        if safety_released is not None
+        else next_safety_release(released_before, depth, tolerance_f, relock_allowed=relock_allowed)
+    )
     return FamilyAvailability(
         family, released, reason, policy_locked=True, safety_released=released, depth_f=depth, since=since
     )
@@ -215,8 +263,16 @@ def resolve_zone_capability(
     tolerance_f: float | None = None,
     heat_since: datetime | None = None,
     cool_since: datetime | None = None,
+    heat_released_before: bool = False,
+    cool_released_before: bool = False,
+    relock_allowed: bool = True,
+    use_recorded_release: bool = False,
 ) -> ZoneCapability:
-    """The zone's answer for heat and cool. Equipment only ever narrows; the policies never widen it."""
+    """The zone's answer for heat and cool. Equipment only ever narrows; the policies never widen it.
+
+    ``*_released_before`` is each family's recorded safety-release state. ``use_recorded_release`` answers with it as
+    is (every reader except the selector); otherwise the release steps through :func:`next_safety_release`.
+    """
     common = {"season": normalize_season(season), "indoor_f": indoor_f, "floor_f": floor_f, "ceiling_f": ceiling_f}
     return ZoneCapability(
         heat=resolve_family(
@@ -225,6 +281,9 @@ def resolve_zone_capability(
             outdoor_locked=heat_lockout_engaged,
             tolerance_f=tolerance_f,
             since=heat_since,
+            released_before=heat_released_before,
+            relock_allowed=relock_allowed,
+            safety_released=heat_released_before if use_recorded_release else None,
             **common,
         ),
         cool=resolve_family(
@@ -233,6 +292,9 @@ def resolve_zone_capability(
             outdoor_locked=cool_lockout_engaged,
             tolerance_f=tolerance_f,
             since=cool_since,
+            released_before=cool_released_before,
+            relock_allowed=relock_allowed,
+            safety_released=cool_released_before if use_recorded_release else None,
             **common,
         ),
     )
@@ -241,7 +303,7 @@ def resolve_zone_capability(
 def masked_modes(modes: Iterable[str], zone: ZoneCapability) -> tuple[str, ...]:
     """The thermostat's advertised modes with what the zone cannot use now removed.
 
-    An unavailable family's mode goes; a band mode (heat_cool / auto) goes when either family is unavailable, so a
+    An unavailable family's mode goes; a band mode (heat_cool / auto) goes while a policy lock is engaged, so a
     locked side behaves exactly like a heat-only or cool-only thermostat. Every other mode (off, fan_only, dry) stays.
     """
     return tuple(m for m in modes if zone.mode_allowed(m))

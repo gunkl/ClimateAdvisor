@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "Gastmodus-Schalter",
   "settings.guest_toggle_invert.description": "Aktiviere dies, wenn dein Schalter EIN meldet, wenn KEINE Gäste da sind.",
   "settings.guest_toggle_invert.label": "Gastschalter umkehren",
-  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor heizt nicht, solange es draußen wärmer ist als dieser Wert, und erlaubt das Heizen 2 °C (3,6 °F) darunter wieder. Ein Haus, das um mehr als die Tagestoleranz unter der Heiztemperatur liegt, wird trotzdem geheizt. Muss über der Kühlsperre liegen. Leer lassen für keine Sperre.",
+  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor heizt nicht, solange es draußen wärmer ist als dieser Wert, und erlaubt das Heizen 2 °C (3,6 °F) darunter wieder. Ein Haus, das um mehr als die Tagestoleranz unter der Heiztemperatur liegt, wird trotzdem geheizt. Muss mindestens 2 °C (3,6 °F) über der Kühlsperre liegen. Leer lassen für keine Sperre.",
   "settings.heat_lockout_outdoor_temp.label": "Kein Heizen über außen",
   "settings.heat_power_kw.description": "Durchschnittliche elektrische Leistung deiner Heizung im Betrieb (in kW; siehe Typenschild oder Smart Plug). Optional: wird mit dem Energiepreis zur Schätzung der Tageskosten verwendet. Bleibt das Feld leer, werden keine Kosten angezeigt.",
   "settings.heat_power_kw.label": "Heizleistung",

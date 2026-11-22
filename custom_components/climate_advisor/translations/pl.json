@@ -256,7 +256,7 @@
           "vacation_heat": "Temperatura ogrzewania, gdy włączony jest przełącznik wakacji. Zostaw puste, aby użyć temperatury ogrzewania podczas nieobecności minus 3 °F (ok. 1,5 °C).",
           "vacation_cool": "Temperatura chłodzenia, gdy włączony jest przełącznik wakacji. Zostaw puste, aby użyć temperatury chłodzenia podczas nieobecności plus 3 °F (ok. 1,5 °C).",
           "cool_lockout_outdoor_temp": "Climate Advisor nie chłodzi, gdy na zewnątrz jest zimniej niż ta wartość, i znów pozwala chłodzić 2 °C (3,6 °F) powyżej niej. Dom cieplejszy od temperatury chłodzenia o więcej niż dzienna tolerancja i tak zostanie schłodzony. Zostaw puste, aby nie blokować.",
-          "heat_lockout_outdoor_temp": "Climate Advisor nie grzeje, gdy na zewnątrz jest cieplej niż ta wartość, i znów pozwala grzać 2 °C (3,6 °F) poniżej niej. Dom zimniejszy od temperatury ogrzewania o więcej niż dzienna tolerancja i tak zostanie ogrzany. Musi być powyżej blokady chłodzenia. Zostaw puste, aby nie blokować.",
+          "heat_lockout_outdoor_temp": "Climate Advisor nie grzeje, gdy na zewnątrz jest cieplej niż ta wartość, i znów pozwala grzać 2 °C (3,6 °F) poniżej niej. Dom zimniejszy od temperatury ogrzewania o więcej niż dzienna tolerancja i tak zostanie ogrzany. Musi być co najmniej 2 °C (3,6 °F) powyżej blokady chłodzenia. Zostaw puste, aby nie blokować.",
           "hvac_season": "Auto grzeje i chłodzi. Tylko ogrzewanie lub Tylko chłodzenie usuwa drugą stronę na sezon, jakby termostat tego nie umiał; dom daleko poza granicą komfortu tej strony i tak ją dostanie."
         }
       },
@@ -579,7 +579,7 @@
       "vacation_cool_below_away_warning": "Chłodzenie podczas wakacji jest chłodniejsze niż chłodzenie podczas nieobecności, więc wakacje zużywają więcej energii niż zwykły dzień poza domem. Zatwierdź ponownie, aby to zachować.",
       "vacation_freeze_warning": "Przy tym ustawieniu ogrzewanie podczas wakacji spada poniżej 45 °F (7 °C). Podczas długiego wyjazdu rury mogą zamarznąć. Zatwierdź ponownie, aby to zachować.",
       "thermostat_shared_zone": "Inna strefa Climate Advisor już używa tego termostatu. Wybierz inny termostat.",
-      "lockout_overlap": "Blokada ogrzewania musi być powyżej blokady chłodzenia; w przeciwnym razie są temperatury zewnętrzne, przy których nie wolno ani grzać, ani chłodzić."
+      "lockout_overlap": "Blokada ogrzewania musi być co najmniej 2 °C (3,6 °F) powyżej blokady chłodzenia; w przeciwnym razie, gdy obie są aktywne, są temperatury zewnętrzne, przy których nie wolno ani grzać, ani chłodzić."
     }
   },
   "issues": {

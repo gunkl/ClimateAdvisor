@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "Misafir modu anahtarı",
   "settings.guest_toggle_invert.description": "Anahtarınız misafirler YOKKEN AÇIK bildiriyorsa etkinleştirin.",
   "settings.guest_toggle_invert.label": "Misafir anahtarını ters çevir",
-  "settings.heat_lockout_outdoor_temp.description": "Dışarısı bundan sıcakken Climate Advisor ısıtmaz ve bunun 2 °C (3,6 °F) altında yeniden ısıtmaya izin verir. Isıtma sıcaklığından günün toleransından fazla soğuk bir ev yine de ısıtılır. Soğutma kilidinin üstünde olmalıdır. Kilit istemiyorsanız boş bırakın.",
+  "settings.heat_lockout_outdoor_temp.description": "Dışarısı bundan sıcakken Climate Advisor ısıtmaz ve bunun 2 °C (3,6 °F) altında yeniden ısıtmaya izin verir. Isıtma sıcaklığından günün toleransından fazla soğuk bir ev yine de ısıtılır. Soğutma kilidinden en az 2 °C (3,6 °F) yüksek olmalıdır. Kilit istemiyorsanız boş bırakın.",
   "settings.heat_lockout_outdoor_temp.label": "Dışarısı üstündeyse ısıtma yok",
   "settings.heat_power_kw.description": "Isıtmanın çalışırken çektiği ortalama elektrik gücü (kW cinsinden; etiketine veya akıllı prize bakın). İsteğe bağlı: günlük maliyeti tahmin etmek için enerji tarifesiyle birlikte kullanılır. Boş bırakılırsa maliyet gösterilmez.",
   "settings.heat_power_kw.label": "Isıtma gücü",

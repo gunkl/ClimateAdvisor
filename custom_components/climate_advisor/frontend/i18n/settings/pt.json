@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "Alternância do modo de convidados",
   "settings.guest_toggle_invert.description": "Ative se o seu interruptor indicar ligado quando NÃO há convidados.",
   "settings.guest_toggle_invert.label": "Inverter alternância de convidados",
-  "settings.heat_lockout_outdoor_temp.description": "O Climate Advisor não aquece enquanto estiver mais quente do que isto lá fora, e volta a permitir 2 °C (3,6 °F) abaixo. Uma casa mais fria do que a temperatura de aquecimento em mais do que a tolerância do dia é aquecida na mesma. Tem de ficar acima do bloqueio de arrefecimento. Deixe vazio para nenhum bloqueio.",
+  "settings.heat_lockout_outdoor_temp.description": "O Climate Advisor não aquece enquanto estiver mais quente do que isto lá fora, e volta a permitir 2 °C (3,6 °F) abaixo. Uma casa mais fria do que a temperatura de aquecimento em mais do que a tolerância do dia é aquecida na mesma. Tem de ficar pelo menos 2 °C (3,6 °F) acima do bloqueio de arrefecimento. Deixe vazio para nenhum bloqueio.",
   "settings.heat_lockout_outdoor_temp.label": "Sem aquecimento acima do exterior",
   "settings.heat_power_kw.description": "Potência elétrica média que o seu aquecimento consome enquanto funciona (em kW; consulte a placa de características ou uma tomada inteligente). Opcional: usada com o preço da energia para estimar o custo diário. Se ficar em branco, não é apresentado nenhum custo.",
   "settings.heat_power_kw.label": "Potência de aquecimento",

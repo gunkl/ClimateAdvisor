@@ -10547,7 +10547,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Away/Vacation split-delta bank), so ``_apply_tou_schedule()`` writes the bank target right after
         ``apply_classification()`` and that pass must not write a band edge first."""
         resolution = getattr(self, "_tou_phase_resolution", None)
-        return bool(resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING)
+        if not (resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING):
+            return False
+        # Issue #1699: a bank in a family the zone cannot use now is suppressed, so it owns nothing and the band pass
+        # must write the band edge (otherwise nothing is written for the whole pre-conditioning window).
+        return self._tou_bank_family_allowed(getattr(resolution, "mode", None))
+
+    def _tou_bank_family_allowed(self, mode: Any) -> bool:
+        """Issue #1699: the engine allows a bank in ``mode``'s family now (no lockout / season / missing equipment)."""
+        engine = getattr(self, "automation_engine", None)
+        fn = getattr(engine, "_zone_bank_allowed", None) if engine is not None else None
+        if fn is None:
+            return True
+        try:
+            return fn(mode) is not False
+        except Exception:  # noqa: BLE001 - never lose the bank to a capability fault
+            return True
 
     def _tou_bank_in_force(self, now: datetime) -> Any | None:
         """CONTROL (Issues #1404/#1409): this cycle's time-of-use resolution when its bank owns the thermostat at
@@ -10574,6 +10589,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ae = self.automation_engine
         if ae is None or not ae.tou_bank_gates_pass():
             return None
+        if not self._tou_bank_family_allowed(res.mode):
+            return None  # Issue #1699: suppressed (lockout / season / equipment): the schedule band holds
         return res
 
     def _active_tou_bank(self, now: datetime) -> TouBankHold | None:

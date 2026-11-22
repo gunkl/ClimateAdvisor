@@ -936,8 +936,8 @@ CONFIG_METADATA = {
         "description": (
             "Climate Advisor does not heat while the outdoor temperature is above this (Issue #1699). It allows"
             " heating again once it is two Celsius degrees colder. If the house gets colder than the floor by more"
-            " than the day's overshoot tolerance, heating runs anyway. Must be above the cooling lockout. Leave empty"
-            " for no lockout."
+            " than the day's overshoot tolerance, heating runs anyway. Must be at least two Celsius degrees above the"
+            " cooling lockout. Leave empty for no lockout."
         ),
         "category": "setpoints",
         "display_transform": "temp_abs",

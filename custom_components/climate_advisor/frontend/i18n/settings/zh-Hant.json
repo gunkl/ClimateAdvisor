@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "訪客模式開關",
   "settings.guest_toggle_invert.description": "若您的開關在「沒有」訪客時回報 ON，請啟用此選項。",
   "settings.guest_toggle_invert.label": "反轉訪客開關",
-  "settings.heat_lockout_outdoor_temp.description": "室外比此溫度暖時，Climate Advisor 不開暖氣；低於此溫度 2 °C (3.6 °F) 後再次允許暖氣。比暖氣溫度低出超過當天容差的房屋仍會開暖氣。必須高於冷氣鎖定溫度。留空表示不鎖定。",
+  "settings.heat_lockout_outdoor_temp.description": "室外比此溫度暖時，Climate Advisor 不開暖氣；低於此溫度 2 °C (3.6 °F) 後再次允許暖氣。比暖氣溫度低出超過當天容差的房屋仍會開暖氣。必須比冷氣鎖定溫度至少高 2 °C (3.6 °F)。留空表示不鎖定。",
   "settings.heat_lockout_outdoor_temp.label": "室外高於此值不開暖氣",
   "settings.heat_power_kw.description": "暖氣運轉時的平均耗電功率（單位 kW；可查看銘牌或使用智慧插座量測）。選填：與電價搭配以估算每日費用。留空則不顯示費用。",
   "settings.heat_power_kw.label": "暖氣耗電功率",

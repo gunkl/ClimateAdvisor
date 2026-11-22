@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "Interrupteur du mode invités",
   "settings.guest_toggle_invert.description": "Activez si votre interrupteur indique ON quand il n’y a PAS d’invités.",
   "settings.guest_toggle_invert.label": "Inverser l’interrupteur d’invités",
-  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor ne chauffe pas tant qu'il fait plus chaud que cette valeur dehors, et l'autorise de nouveau 2 °C (3,6 °F) en dessous. Une maison plus froide que la température de chauffage de plus que la tolérance du jour est quand même chauffée. Doit être au-dessus du verrouillage de climatisation. Laisser vide pour aucun verrouillage.",
+  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor ne chauffe pas tant qu'il fait plus chaud que cette valeur dehors, et l'autorise de nouveau 2 °C (3,6 °F) en dessous. Une maison plus froide que la température de chauffage de plus que la tolérance du jour est quand même chauffée. Doit être au moins 2 °C (3,6 °F) au-dessus du verrouillage de climatisation. Laisser vide pour aucun verrouillage.",
   "settings.heat_lockout_outdoor_temp.label": "Pas de chauffage au-dessus extérieur",
   "settings.heat_power_kw.description": "Puissance électrique moyenne absorbée par votre chauffage en marche (en kW, voir la plaque signalétique ou une prise connectée). Facultatif : sert, avec le tarif de l’énergie, à estimer le coût quotidien. Si vide, aucun coût n’est affiché.",
   "settings.heat_power_kw.label": "Puissance de chauffage",

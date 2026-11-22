@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "Przełącznik trybu gości",
   "settings.guest_toggle_invert.description": "Włącz, jeśli przełącznik zgłasza ON, gdy gości NIE ma.",
   "settings.guest_toggle_invert.label": "Odwróć przełącznik gości",
-  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor nie grzeje, gdy na zewnątrz jest cieplej niż ta wartość, i znów pozwala grzać 2 °C (3,6 °F) poniżej niej. Dom zimniejszy od temperatury ogrzewania o więcej niż dzienna tolerancja i tak zostanie ogrzany. Musi być powyżej blokady chłodzenia. Zostaw puste, aby nie blokować.",
+  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor nie grzeje, gdy na zewnątrz jest cieplej niż ta wartość, i znów pozwala grzać 2 °C (3,6 °F) poniżej niej. Dom zimniejszy od temperatury ogrzewania o więcej niż dzienna tolerancja i tak zostanie ogrzany. Musi być co najmniej 2 °C (3,6 °F) powyżej blokady chłodzenia. Zostaw puste, aby nie blokować.",
   "settings.heat_lockout_outdoor_temp.label": "Bez ogrzewania powyżej zewnątrz",
   "settings.heat_power_kw.description": "Średnia moc elektryczna pobierana przez grzanie podczas pracy (w kW; sprawdź tabliczkę znamionową lub inteligentne gniazdko). Opcjonalne: razem ze stawką energii służy do szacowania kosztu dziennego. Gdy puste, koszt nie jest pokazywany.",
   "settings.heat_power_kw.label": "Moc ogrzewania",

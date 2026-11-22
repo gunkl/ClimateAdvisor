@@ -2456,13 +2456,14 @@ class AutomationEngine:
         # Issue #1699: zone capability policy state, in memory only (no stored-schema change). A restart starts
         # with no lockout until the first outdoor reading; the season comes from the options. ``_zone_policy_since``
         # is when each family's policy lock last engaged or released; ``_zone_policy_reported`` is the last policy
-        # reason announced per family (engage/release rows fire on a change of it); ``_zone_safety_reported`` the
+        # reason announced per family (engage/release rows fire on a change of it); ``_zone_safety_released`` the
         # last safety-release state announced per family.
         self._cool_lockout_engaged: bool = False
         self._heat_lockout_engaged: bool = False
         self._zone_policy_since: dict[str, datetime | None] = {zc.FAMILY_HEAT: None, zc.FAMILY_COOL: None}
         self._zone_policy_reported: dict[str, str | None] = {zc.FAMILY_HEAT: None, zc.FAMILY_COOL: None}
-        self._zone_safety_reported: dict[str, bool] = {zc.FAMILY_HEAT: False, zc.FAMILY_COOL: False}
+        self._zone_safety_released: dict[str, bool] = {zc.FAMILY_HEAT: False, zc.FAMILY_COOL: False}
+        self._last_gated_restore_mode: str | None = None  # what the last _restore_hvac_mode_gated() wrote
         # Issue #1066 (F2): last selector write attempt (wanted family, when) and last RESOLVED
         # family, for the reactive-retry rate limit and the once-per-realised-switch event.
         self._last_selector_write_attempt: tuple[str, datetime] | None = None
@@ -5942,8 +5943,11 @@ class AutomationEngine:
                 _effective_active,
                 list(caps.modes),
             )
-            self._last_band_write = ComfortModeWrite(held_reason="no_capable_mode")
-            return None
+            _off = await self._off_when_zone_has_neither_family(reason=reason, mode_reason=mode_reason, band=band)
+            self._last_band_write = ComfortModeWrite(
+                result=_off, family="off" if _off is not None else None, held_reason="no_capable_mode"
+            )
+            return _off
 
         self._last_band_write = self._mode_write_record(_write_result, _cmd_shape, _target)
         # Issue #1417: a deliberate band write (the overnight pre-cool and its 30-minute re-assert) is a "ran" record
@@ -6004,6 +6008,32 @@ class AutomationEngine:
                 },
             )
         return _write_result
+
+    async def _off_when_zone_has_neither_family(
+        self, *, reason: str, mode_reason: str, band: ComfortBand
+    ) -> HvacCommandResult | None:
+        """Issue #1699: the zone can run neither heat nor cool now -- leave the thermostat Off, not in the locked mode.
+
+        Occupant: cool-only equipment plus a cool lockout (or season Cool only plus a cool lockout) must not keep the
+        AC running because the band could not be armed. Only when the live mode is one the zone cannot use now (a
+        heat / cool / band mode); Off is never gated. Returns the Off write's result, or None when nothing was sent.
+        """
+        zone = self._zone_capability()
+        if not zone.none_available:
+            return None
+        state = self.hass.states.get(self.climate_entity)
+        live = getattr(state, "state", None)
+        if not isinstance(live, str) or live not in ("heat", "cool", *zc.BAND_MODES) or zone.mode_allowed(live):
+            return None
+        _LOGGER.info(
+            "Zone can run neither heat nor cool now — thermostat %s -> off (heat=%s cool=%s) zone=%s",
+            live,
+            zone.heat.reason,
+            zone.cool.reason,
+            self.climate_entity,
+        )
+        with self._mode_change_context(mode_reason, band=band):
+            return await self._set_hvac_mode("off", reason=_R("reason_zone_no_capable_mode", mode=mode_w(live)))
 
     def _log_whf_write_blocked(self, reason: str) -> None:
         """Log the routine WHF/AC mode-ownership handoff at INFO (Issue #874).
@@ -6724,8 +6754,10 @@ class AutomationEngine:
                     {"attempted_mode": mode, "reason": reason},
                 )
             return HvacCommandResult.WHF_BLOCKED
-        if self._refuse_capability_blocked(mode, reason):
-            return HvacCommandResult.CAPABILITY_BLOCKED  # Issue #1699: before any stamp, verify or retry
+        if self.dry_run is not True and self._refuse_capability_blocked(mode, reason):
+            # Issue #1699: before any stamp, verify or retry. Observe-only answers DRY_RUN first (below), so the
+            # "nothing was sent" checks that read DRY_RUN (#1300 / #1306) keep working there.
+            return HvacCommandResult.CAPABILITY_BLOCKED
         if _refuse_if_shut_down(self, f"set HVAC mode {mode}"):
             return HvacCommandResult.FAILED  # before _write_seq / _note_* / verify / retry
         if self.dry_run:
@@ -6846,7 +6878,7 @@ class AutomationEngine:
         the write was already asking for actually take effect. Shared by ``_set_temperature``
         and the nudge/retry path (which deliberately does not go through ``_set_temperature``).
         """
-        if self._refuse_capability_blocked(mode, "mode switch before setpoint write"):
+        if self.dry_run is not True and self._refuse_capability_blocked(mode, "mode switch before setpoint write"):
             # Issue #1699: a setpoint write (or a nudge) for a family the zone cannot use now goes no further.
             self._last_mode_switch_result = HvacCommandResult.CAPABILITY_BLOCKED
             return False
@@ -7049,8 +7081,9 @@ class AutomationEngine:
                     {"attempted_mode": mode, "reason": reason},
                 )
             return HvacCommandResult.WHF_BLOCKED
-        if self._refuse_capability_blocked(mode, reason):
-            return HvacCommandResult.CAPABILITY_BLOCKED  # Issue #1699: before the offset, stamps, verify or retry
+        if self.dry_run is not True and self._refuse_capability_blocked(mode, reason):
+            # Issue #1699: before the offset, stamps, verify or retry (observe-only answers DRY_RUN below).
+            return HvacCommandResult.CAPABILITY_BLOCKED
         unit = self._temp_unit
         # Issue #1194 (a): THE one place the remote-sensor offset is applied -- every CA setpoint writer (wake,
         # bedtime, pre-cool, TOU, band apply, restores, retries, the outer loop itself) reaches the thermostat
@@ -8015,6 +8048,14 @@ class AutomationEngine:
         held = self._pre_cool_band_in_force_now()
         if held is None or getattr(band, "context", "") != BAND_CONTEXT_SLEEP:
             return band
+        if not self._zone_bank_allowed(zc.FAMILY_COOL):
+            # Issue #1699: a cool lockout or the Heat-only season engaged after the pre-cool was armed. The bank ends
+            # here: the plain sleep band applies (and the safety release is measured against it, never the lowered
+            # pre-cool ceiling), so the house is not cooled toward the banking target through the lock.
+            _LOGGER.info("Pre-cool hold ended: cooling unavailable in this zone now (lockout or season)")
+            self._pre_cool_band_in_force = None
+            self._pre_cool_band_since = None
+            return band
         return held
 
     def _resolved_comfort_band(self, c: DayClassification) -> ComfortBand:
@@ -8313,9 +8354,17 @@ class AutomationEngine:
 
         if not self._zone_bank_allowed(classification.hvac_mode):
             # Issue #1699: a bank in a family the zone cannot use now (outdoor lockout, season, equipment) is not
-            # written; the selector keeps the band with the side that is available.
-            _LOGGER.info(
-                "TOU pre-conditioning suppressed: %s unavailable in this zone now (schedule=%s, target=%.1f°F)",
+            # written; the selector keeps the band with the side that is available. Logged once per schedule and day
+            # (the 5-minute bank check asks again), DEBUG after that.
+            _log = (
+                _LOGGER.debug
+                if self._recent_duplicate(
+                    "tou_bank_suppressed", (schedule_id, classification.hvac_mode, dt_util.now().date())
+                )
+                else _LOGGER.info
+            )
+            _log(
+                "TOU pre-conditioning suppressed: %s unavailable in this zone now (schedule=%s, target_f=%.1f)",
                 classification.hvac_mode,
                 schedule_id,
                 target,
@@ -8420,9 +8469,14 @@ class AutomationEngine:
             return
         if not self._zone_bank_allowed(mode):
             # Issue #1699: mirror of apply_tou_precondition() -- no bank in a family the zone cannot use now.
-            _LOGGER.info(
+            _log = (
+                _LOGGER.debug
+                if self._recent_duplicate("tou_av_bank_suppressed", (schedule_id, mode, dt_util.now().date()))
+                else _LOGGER.info
+            )
+            _log(
                 "Away/vacation TOU pre-conditioning suppressed: %s unavailable in this zone now (schedule=%s,"
-                " target=%.1f°F)",
+                " target_f=%.1f)",
                 mode,
                 schedule_id,
                 target,
@@ -11969,6 +12023,13 @@ class AutomationEngine:
                 self.role,
             )
             return
+        if HvacCommandResult.CAPABILITY_BLOCKED in results and all(
+            r is None or r is HvacCommandResult.CAPABILITY_BLOCKED for r in results
+        ):
+            # Issue #1699: every restore write was refused (the zone cannot use that family now): nothing was sent,
+            # so there is no change of ours for an automation grace to cover.
+            _LOGGER.info("Automation grace (%s) not started: the restore was not sent (zone capability)", trigger)
+            return
         decisive = next((r for r in reversed(results) if r is not None), None)
         pending = self._pending_restore
         if decisive is None and pending is not None and not self._restore_landed(pending.target):
@@ -15046,6 +15107,7 @@ class AutomationEngine:
         which writes the available family with its own band edge; with no classification yet nothing is written
         (the next cycle arms the band). A mode the zone can use is restored exactly as before.
         """
+        self._last_gated_restore_mode = mode  # what this restore wrote (``mode``, the selector's family, or None)
         if mode is None or self._zone_mode_allowed(mode):
             return await self._set_hvac_mode(mode, reason=reason) if mode is not None else None
         _LOGGER.info(
@@ -15055,8 +15117,12 @@ class AutomationEngine:
         )
         c = getattr(self, "_current_classification", None)
         if c is None:
+            self._last_gated_restore_mode = None
             return None
-        return await self._set_temperature_for_mode(c, reason=reason)
+        result = await self._set_temperature_for_mode(c, reason=reason)
+        written = self._last_mode_write
+        self._last_gated_restore_mode = written.family if written.held_reason is None else None
+        return result
 
     def _restore_landed(self, target: str | None) -> bool:
         """True when the thermostat reads the mode the restore asked for (Issue #1308).
@@ -17106,7 +17172,9 @@ class AutomationEngine:
         # Issue #1699: the EFFECTIVE capabilities -- a side the zone cannot use right now (equipment, an outdoor
         # lockout, the season setting; a policy lock steps aside past the tolerance) is masked, so the selector
         # and its unknown-family / hysteresis-gap fallback behave exactly as on a heat-only or cool-only thermostat.
-        caps = self._effective_capabilities(floor=floor, ceiling=ceiling, indoor=_indoor, day_type=day_type)
+        caps = self._effective_capabilities(
+            floor=floor, ceiling=ceiling, indoor=_indoor, day_type=day_type, decide=True
+        )
         current_state = self._current_thermostat_family(now)
         # Issue #1073 settling guard: minutes since the family being LEFT ran or was commanded. The thermal
         # model is deliberately not consulted (R7). Issue #1149: when the live family is unknown (Off /
@@ -20901,15 +20969,18 @@ class AutomationEngine:
                         target=_restore_mode,
                         reason=_R("reason_whf_release", reason=_nest(reason)),
                     )
-                    if _stranded_restore_result is not HvacCommandResult.DRY_RUN:
+                    # Issue #1699 (review): record the mode actually written -- the gated restore may have armed the
+                    # other family through the selector, or written nothing at all.
+                    _written_mode = getattr(self, "_last_gated_restore_mode", _restore_mode)
+                    if _stranded_restore_result is not HvacCommandResult.DRY_RUN and _written_mode is not None:
                         self._record_action(
                             _R("action_stranded_hvac_restored"),
-                            _R("reason_stranded_hvac_restored", reason=_nest(reason), mode=mode_w(str(_restore_mode))),
+                            _R("reason_stranded_hvac_restored", reason=_nest(reason), mode=mode_w(str(_written_mode))),
                         )
                         if self._emit_event_callback:
                             self._emit_event_callback(
                                 "stranded_hvac_suppression_restored",
-                                {"reason": reason, "restore_mode": _restore_mode},
+                                {"reason": reason, "restore_mode": _written_mode},
                             )
                 else:
                     _LOGGER.debug(
@@ -21639,20 +21710,29 @@ class AutomationEngine:
         ceiling: float | None = None,
         indoor: float | None = None,
         day_type: str | None = None,
+        decide: bool = False,
     ) -> zc.ZoneCapability:
         """The resolver's answer now (Issue #1699).
 
-        The safety release needs the house's depth past the locked side's edge: ``floor`` / ``ceiling`` default to
-        the resolved comfort band in force, ``indoor`` to the live reading, ``day_type`` to the classification's
-        (its settling tolerance, ``_comfort_deadband_for_day_type()``). They are only read while a policy lock is
-        engaged, so a zone with no lockout and no season setting resolves from its equipment alone.
+        The safety release is a recorded state per family (``_zone_safety_released``), with hysteresis
+        (``zone_capability.next_safety_release``). Only the comfort-edge selector moves it (``decide=True``, from
+        ``_comfort_family_inputs``, with the band the selector decides on -- never a TOU or pre-cool bank target):
+        it measures the house's depth past the locked side's edge against the day's settling tolerance
+        (``_comfort_deadband_for_day_type()``) and announces a change. Every other reader (the write backstop, the
+        band write, banks, diagnostics) uses the recorded decision, so a write the selector released is never
+        refused against a different band. A zone with no policy lock resolves from its equipment alone.
         """
         heat_eq, cool_eq, _caps = self._equipment_families()
         since = getattr(self, "_zone_policy_since", None) or {}
+        recorded = getattr(self, "_zone_safety_released", None)
+        if not isinstance(recorded, dict):
+            recorded = self._zone_safety_released = {zc.FAMILY_HEAT: False, zc.FAMILY_COOL: False}
         heat_reason = self._zone_policy_reason(zc.FAMILY_HEAT)
         cool_reason = self._zone_policy_reason(zc.FAMILY_COOL)
+        policy = (heat_reason is not None and heat_eq) or (cool_reason is not None and cool_eq)
         tolerance: float | None = None
-        if (heat_reason is not None and heat_eq) or (cool_reason is not None and cool_eq):
+        relock_allowed = True
+        if decide and policy:
             c = getattr(self, "_current_classification", None)
             if (floor is None or ceiling is None) and c is not None:
                 try:
@@ -21672,6 +21752,7 @@ class AutomationEngine:
                 tolerance = self._comfort_deadband_for_day_type(day_type if isinstance(day_type, str) else None)
             except Exception:  # noqa: BLE001 - unreadable tolerance: the policy lock stays locked
                 tolerance = None
+            relock_allowed = self._zone_relock_allowed()
         zone = zc.resolve_zone_capability(
             equipment_heat=heat_eq,
             equipment_cool=cool_eq,
@@ -21684,9 +21765,26 @@ class AutomationEngine:
             tolerance_f=tolerance,
             heat_since=since.get(zc.FAMILY_HEAT),
             cool_since=since.get(zc.FAMILY_COOL),
+            heat_released_before=bool(recorded.get(zc.FAMILY_HEAT)) and heat_reason is not None,
+            cool_released_before=bool(recorded.get(zc.FAMILY_COOL)) and cool_reason is not None,
+            relock_allowed=relock_allowed,
+            use_recorded_release=not decide,
         )
-        self._announce_zone_safety(zone)
+        if decide:
+            self._announce_zone_safety(zone)
         return zone
+
+    def _zone_relock_allowed(self) -> bool:
+        """A released policy lock may lock again only once the mode-switch dwell allows a routine switch."""
+        last = self._last_mode_change_time()
+        if last is None:
+            return True
+        try:
+            elapsed = seconds_since(last, now=dt_util.now())
+        except TypeError:
+            return True
+        dwell = float(self.config.get(CONF_COMFORT_MODE_SWITCH_MIN_INTERVAL_S, COMFORT_MODE_SWITCH_MIN_INTERVAL_S))
+        return elapsed >= dwell
 
     def _effective_capabilities(
         self,
@@ -21695,18 +21793,19 @@ class AutomationEngine:
         ceiling: float | None = None,
         indoor: float | None = None,
         day_type: str | None = None,
+        decide: bool = False,
     ) -> ThermostatCapabilities:
         """The thermostat's capabilities with what the zone cannot use now removed (Issue #1699).
 
         Every command path reads this, so a locked side behaves exactly like a heat-only or cool-only thermostat
-        (the band modes heat_cool / auto go too while either side is unavailable). ``_get_thermostat_capabilities()``
+        (the band modes heat_cool / auto go too while a policy lock is engaged). ``_get_thermostat_capabilities()``
         stays the EQUIPMENT input (diagnostics and the thermostat profile show it). An unknown thermostat with no
         policy lock is returned unchanged.
         """
         _heat_eq, _cool_eq, caps = self._equipment_families()
-        zone = self._zone_capability(floor=floor, ceiling=ceiling, indoor=indoor, day_type=day_type)
-        if zone.heat.available and zone.cool.available:
-            return caps
+        zone = self._zone_capability(floor=floor, ceiling=ceiling, indoor=indoor, day_type=day_type, decide=decide)
+        if not zone.policy_engaged or (zone.heat.available and zone.cool.available):
+            return caps  # equipment alone: the thermostat's own advertised modes, unchanged (a heat-only "auto")
         return replace(
             caps,
             modes=zc.masked_modes(caps.modes, zone),
@@ -21791,6 +21890,9 @@ class AutomationEngine:
             reported[family] = reason
             since[family] = dt_util.now()
             changed = True
+            released = getattr(self, "_zone_safety_released", None)
+            if isinstance(released, dict):
+                released[family] = False  # a new (or ended) policy lock starts locked
             if not (heat_eq if family == zc.FAMILY_HEAT else cool_eq):
                 continue
             engaged = reason is not None
@@ -21831,11 +21933,12 @@ class AutomationEngine:
 
         Same two Activity rows as the policy itself, with ``reason`` = the lock's reason and ``safety`` = True: one
         ``hvac_lockout_released`` when the house goes deeper past the locked side's edge than the tolerance, one
-        ``hvac_lockout_engaged`` when it is back inside it (or the lock itself ended while released).
+        ``hvac_lockout_engaged`` when it is back at the edge and locks again (``next_safety_release``). Called only from
+        the selector path (``_zone_capability(decide=True)``), which also records the new state.
         """
-        reported = getattr(self, "_zone_safety_reported", None)
+        reported = getattr(self, "_zone_safety_released", None)
         if not isinstance(reported, dict):
-            reported = self._zone_safety_reported = {zc.FAMILY_HEAT: False, zc.FAMILY_COOL: False}
+            reported = self._zone_safety_released = {zc.FAMILY_HEAT: False, zc.FAMILY_COOL: False}
         for family in zc.FAMILIES:
             fam = zone.family(family)
             released = fam.safety_released

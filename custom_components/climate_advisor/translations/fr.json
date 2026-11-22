@@ -256,7 +256,7 @@
           "vacation_heat": "Température de chauffage lorsque l’interrupteur de vacances est activé. Laissez vide pour utiliser la température d’absence en chauffage moins 3 °F (environ 1,5 °C).",
           "vacation_cool": "Température de climatisation lorsque l’interrupteur de vacances est activé. Laissez vide pour utiliser la température d’absence en climatisation plus 3 °F (environ 1,5 °C).",
           "cool_lockout_outdoor_temp": "Climate Advisor ne climatise pas tant qu'il fait plus froid que cette valeur dehors, et l'autorise de nouveau 2 °C (3,6 °F) au-dessus. Une maison plus chaude que la température de climatisation de plus que la tolérance du jour est quand même climatisée. Laisser vide pour aucun verrouillage.",
-          "heat_lockout_outdoor_temp": "Climate Advisor ne chauffe pas tant qu'il fait plus chaud que cette valeur dehors, et l'autorise de nouveau 2 °C (3,6 °F) en dessous. Une maison plus froide que la température de chauffage de plus que la tolérance du jour est quand même chauffée. Doit être au-dessus du verrouillage de climatisation. Laisser vide pour aucun verrouillage.",
+          "heat_lockout_outdoor_temp": "Climate Advisor ne chauffe pas tant qu'il fait plus chaud que cette valeur dehors, et l'autorise de nouveau 2 °C (3,6 °F) en dessous. Une maison plus froide que la température de chauffage de plus que la tolérance du jour est quand même chauffée. Doit être au moins 2 °C (3,6 °F) au-dessus du verrouillage de climatisation. Laisser vide pour aucun verrouillage.",
           "hvac_season": "Auto chauffe et climatise. Chauffage seul ou Climatisation seule retire l'autre côté pour la saison, comme si le thermostat ne pouvait pas le faire ; une maison très au-delà de la limite de confort de ce côté l'obtient quand même."
         }
       },
@@ -579,7 +579,7 @@
       "vacation_cool_below_away_warning": "La climatisation en mode vacances est plus fraîche que la climatisation en absence : des vacances consomment donc plus d’énergie qu’une journée d’absence ordinaire. Validez à nouveau pour conserver ce choix.",
       "vacation_freeze_warning": "Avec ce réglage, le chauffage en mode vacances descend sous 45 °F (7 °C). Les canalisations peuvent geler pendant un long voyage. Validez à nouveau pour conserver ce choix.",
       "thermostat_shared_zone": "Une autre zone Climate Advisor utilise déjà ce thermostat. Choisissez un autre thermostat.",
-      "lockout_overlap": "Le verrouillage du chauffage doit être au-dessus de celui de la climatisation ; sinon, à certaines températures extérieures, ni le chauffage ni la climatisation ne sont permis."
+      "lockout_overlap": "Le verrouillage du chauffage doit être au moins 2 °C (3,6 °F) au-dessus de celui de la climatisation ; sinon, une fois les deux engagés, à certaines températures extérieures ni le chauffage ni la climatisation ne sont permis."
     }
   },
   "issues": {

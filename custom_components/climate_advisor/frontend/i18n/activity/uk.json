@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "вентилятор для всього будинку увімкнено після HVAC — призупинення HVAC (перемагає найновіша дія)",
   "activity.reason_why_indoor_le_comfort_floor": "у приміщенні {indoor} ≤ нижня межа комфорту {floor}",
   "activity.reason_why_outdoor_ge_indoor": "надворі {outdoor} >= у приміщенні {indoor}",
+  "activity.reason_zone_no_capable_mode": "У цій зоні зараз недоступні ні опалення, ні охолодження (було {mode})",
   "activity.resumes_once_clears": "поновиться, щойно зникне",
   "activity.resumes_once_clears_mode": "поновиться, щойно зникне ({mode})",
   "activity.sensor_open_recheck": "Повторна перевірка: підтверджено відчинені двері/вікно",

@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "ventola per tutta la casa accesa dopo la climatizzazione — climatizzazione sospesa (vince l’azione più recente)",
   "activity.reason_why_indoor_le_comfort_floor": "interno {indoor} ≤ minimo di comfort {floor}",
   "activity.reason_why_outdoor_ge_indoor": "esterno {outdoor} >= interno {indoor}",
+  "activity.reason_zone_no_capable_mode": "In questa zona ora non sono disponibili né riscaldamento né raffrescamento (era {mode})",
   "activity.resumes_once_clears": "riprende quando si risolve",
   "activity.resumes_once_clears_mode": "riprende quando si risolve ({mode})",
   "activity.sensor_open_recheck": "Nuovo controllo: porta/finestra confermata aperta",

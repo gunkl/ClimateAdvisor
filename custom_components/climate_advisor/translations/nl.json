@@ -256,7 +256,7 @@
           "vacation_heat": "Verwarmingstemperatuur terwijl de vakantieschakelaar aan staat. Laat leeg om de verwarming bij afwezigheid min 3 °F (ongeveer 1,5 °C) te gebruiken.",
           "vacation_cool": "Koeltemperatuur terwijl de vakantieschakelaar aan staat. Laat leeg om de koeling bij afwezigheid plus 3 °F (ongeveer 1,5 °C) te gebruiken.",
           "cool_lockout_outdoor_temp": "Climate Advisor koelt niet zolang het buiten kouder is dan dit, en staat koelen 2 °C (3,6 °F) erboven weer toe. Een huis dat meer dan de tolerantie van de dag warmer is dan de koeltemperatuur, wordt toch gekoeld. Leeg laten voor geen blokkering.",
-          "heat_lockout_outdoor_temp": "Climate Advisor verwarmt niet zolang het buiten warmer is dan dit, en staat verwarmen 2 °C (3,6 °F) eronder weer toe. Een huis dat meer dan de tolerantie van de dag kouder is dan de verwarmingstemperatuur, wordt toch verwarmd. Moet boven de koelblokkering liggen. Leeg laten voor geen blokkering.",
+          "heat_lockout_outdoor_temp": "Climate Advisor verwarmt niet zolang het buiten warmer is dan dit, en staat verwarmen 2 °C (3,6 °F) eronder weer toe. Een huis dat meer dan de tolerantie van de dag kouder is dan de verwarmingstemperatuur, wordt toch verwarmd. Moet minstens 2 °C (3,6 °F) boven de koelblokkering liggen. Leeg laten voor geen blokkering.",
           "hvac_season": "Auto verwarmt en koelt. Alleen verwarmen of Alleen koelen haalt de andere kant weg voor het seizoen, alsof de thermostaat het niet kan; een huis ver voorbij de comfortgrens van die kant krijgt het toch."
         }
       },
@@ -579,7 +579,7 @@
       "vacation_cool_below_away_warning": "De vakantiekoeling staat koeler dan de koeling bij afwezigheid. Een vakantie kost dus meer energie dan een gewone dag van huis. Verstuur opnieuw om dit te behouden.",
       "vacation_freeze_warning": "Met deze instelling komt de vakantieverwarming onder 45 °F (7 °C). Tijdens een lange reis kunnen leidingen bevriezen. Verstuur opnieuw om dit te behouden.",
       "thermostat_shared_zone": "Een andere Climate Advisor-zone gebruikt deze thermostaat al. Kies een andere thermostaat.",
-      "lockout_overlap": "De verwarmingsblokkering moet boven de koelblokkering liggen; anders zijn er buitentemperaturen waarbij verwarmen noch koelen is toegestaan."
+      "lockout_overlap": "De verwarmingsblokkering moet minstens 2 °C (3,6 °F) boven de koelblokkering liggen; anders zijn er, zodra beide actief zijn, buitentemperaturen waarbij verwarmen noch koelen is toegestaan."
     }
   },
   "issues": {

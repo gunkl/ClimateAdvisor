@@ -78,9 +78,12 @@ class TestHeatLockoutHysteresis:
 
 
 def test_overlapping_thresholds_are_rejected():
+    """The heat lockout must be at least the 2 °C hysteresis above the cool lockout, or both can be engaged at once."""
     assert zc.lockout_thresholds_overlap(60.0, 60.0) is True
     assert zc.lockout_thresholds_overlap(60.0, 55.0) is True
-    assert zc.lockout_thresholds_overlap(60.0, 60.5) is False
+    assert zc.lockout_thresholds_overlap(C(16.0), C(17.0)) is True  # both engaged between 17 and 18 °C
+    assert zc.lockout_thresholds_overlap(C(16.0), C(18.0)) is False
+    assert zc.lockout_thresholds_overlap(60.0, 63.6) is False
     assert zc.lockout_thresholds_overlap(None, 40.0) is False
     assert zc.lockout_thresholds_overlap(60.0, None) is False
 
@@ -298,15 +301,34 @@ class TestBackstop:
         assert engine._last_mode_switch_result is HvacCommandResult.CAPABILITY_BLOCKED
         assert _climate_calls(hass) == []
 
-    def test_band_with_no_capable_side_attempts_no_write(self):
-        """Heat-only equipment + season Cool only: nothing is armed and nothing is even attempted."""
-        engine, hass, scheduler, _ = _engine({"hvac_season": "cool_only"}, modes=("off", "heat"))
+    @pytest.mark.parametrize(
+        ("config", "modes", "live", "outdoor"),
+        [
+            ({"hvac_season": "cool_only"}, ("off", "heat"), "heat", None),  # heat-only equipment + season Cool only
+            ({"cool_lockout_outdoor_temp": 60.8}, ("off", "cool"), "cool", 44.6),  # cool-only equipment + cool lockout
+            ({"hvac_season": "cool_only", "cool_lockout_outdoor_temp": 60.8}, ("off", "heat", "cool"), "cool", 44.6),
+        ],
+    )
+    def test_zone_with_neither_family_turns_the_thermostat_off(self, config, modes, live, outdoor):
+        """Neither side available: the thermostat is not left running the locked mode -- it is switched Off."""
+        engine, hass, scheduler, _ = _engine(config, state=live, modes=modes)
+        from custom_components.climate_advisor.automation import ComfortBand
+
+        with scheduler.installed():
+            if outdoor is not None:
+                engine.update_outdoor_temp(outdoor)
+            asyncio.run(engine._apply_comfort_band(ComfortBand(64.4, 71.6, "floor", "t"), reason="t"))
+        assert engine._last_band_write.held_reason == "no_capable_mode"
+        assert engine._last_band_write.family == "off"
+        assert [(a["service"], a["data"].get("hvac_mode")) for a in _climate_calls(hass)] == [("set_hvac_mode", "off")]
+
+    def test_zone_with_neither_family_already_off_writes_nothing(self):
+        engine, hass, scheduler, _ = _engine({"hvac_season": "cool_only"}, state="off", modes=("off", "heat"))
         from custom_components.climate_advisor.automation import ComfortBand
 
         with scheduler.installed():
             asyncio.run(engine._apply_comfort_band(ComfortBand(64.4, 71.6, "floor", "t"), reason="t"))
         assert engine._last_band_write.result is None
-        assert engine._last_band_write.held_reason == "no_capable_mode"
         assert _climate_calls(hass) == []
 
     def test_ode_ceiling_guard_does_not_escalate_while_cool_is_locked(self):
@@ -584,14 +606,16 @@ def test_lock_engaging_while_cool_is_armed_switches_to_heat_at_once():
 
 def test_heat_lockout_warm_day_cold_house_heats_past_the_tolerance_then_locks_again():
     """Heat lockout 60 F, outdoor 70 F (locked). The house falls more than the 2 F mild-day tolerance below the 68 F
-    floor: heat runs (safety release). Back inside the tolerance the heat lock returns and cool is armed again."""
+    floor: heat runs (safety release). It keeps running while the house is still below the floor (the release's
+    hysteresis); once the house is back at the floor the heat lock returns and cool is armed again."""
     start = datetime(2026, 11, 12, 9, 0)
     points = [
         (start, 70.0),
         (start + timedelta(hours=1), 65.0),  # 3 F below the floor: past the 2 F tolerance
         (start + timedelta(hours=2), 65.0),
-        (start + timedelta(hours=3), 67.0),  # back inside the tolerance (1 F below the floor)
-        (start + timedelta(hours=4), 67.0),
+        (start + timedelta(hours=2, minutes=30), 67.0),  # back inside the tolerance, still below the floor
+        (start + timedelta(hours=3), 69.0),  # back at / above the floor
+        (start + timedelta(hours=4), 69.0),
     ]
     sc = _night(
         lambda t: 70.0,
@@ -606,6 +630,8 @@ def test_heat_lockout_warm_day_cold_house_heats_past_the_tolerance_then_locks_ag
     heat = _mode_writes(r, "heat")
     assert heat, "a house past the tolerance must get heat despite the lockout"
     assert min(a["ts"] for a in heat) >= released_at - timedelta(minutes=10)
+    still_released = start.replace(tzinfo=UTC) + timedelta(hours=2, minutes=30)
+    assert [a for a in heat if a["ts"] >= still_released], "inside the tolerance but below the floor: heat continues"
     relocked = start.replace(tzinfo=UTC) + timedelta(hours=3)
     assert [a for a in heat if a["ts"] > relocked + timedelta(minutes=10)] == []
     kinds = [(et, p.get("safety")) for et, p, _ in r.event_log if et.startswith("hvac_lockout")]
@@ -722,3 +748,274 @@ def test_spec_variable_table_matches_the_code():
     assert const.HVAC_SEASON_OPTIONS == zc.SEASONS
     for key in (const.CONF_COOL_LOCKOUT_OUTDOOR_TEMP, const.CONF_HEAT_LOCKOUT_OUTDOOR_TEMP, const.CONF_HVAC_SEASON):
         assert f"`{key}`" in spec and key in const.CONFIG_METADATA
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Review fixes (#1699 phase 1 review)
+# ---------------------------------------------------------------------------------------------------------------
+
+
+class TestSafetyReleaseHysteresis:
+    def test_released_stays_released_until_back_at_the_edge(self):
+        assert zc.next_safety_release(False, 5.0, 5.0) is False  # == tolerance: locked
+        assert zc.next_safety_release(False, 5.01, 5.0) is True
+        assert zc.next_safety_release(True, 4.9, 5.0) is True  # back inside the tolerance: still released
+        assert zc.next_safety_release(True, 0.01, 5.0) is True
+        assert zc.next_safety_release(True, 0.0, 5.0) is False  # at the edge: locks again
+
+    def test_relock_waits_for_the_dwell(self):
+        assert zc.next_safety_release(True, -1.0, 5.0, relock_allowed=False) is True
+        assert zc.next_safety_release(True, -1.0, 5.0, relock_allowed=True) is False
+
+    def test_unknown_reading_locks(self):
+        assert zc.next_safety_release(True, None, 5.0) is False
+
+    def test_hovering_around_ceiling_plus_tolerance_does_not_alternate(self):
+        """Cold night, cool lockout, house hovering at the sleep ceiling + 5 F (the cold-day tolerance): the safety
+        release switches to cool ONCE and stays; before the fix every 0.1 F tick flipped cool and heat."""
+        start = datetime(2026, 11, 12, 0, 0)
+        hover = [(start + timedelta(minutes=10 * i), 71.6 + (5.1 if i % 2 else 4.9)) for i in range(1, 25)]
+        sc = _night(
+            lambda t: C(7.0),
+            indoor_points=[(start, 71.6 + 5.2), *hover],
+            start=start,
+            config={"cool_lockout_outdoor_temp": C(16.0)},
+        )
+        r = run_production_scenario(sc, use_coordinator=True)
+        assert r.callback_errors == []
+        switches = [(p["from_mode"], p["to_mode"]) for et, p, _ in r.event_log if et == "thermostat_mode_set"]
+        assert switches.count(("cool", "heat")) == 0, switches
+        assert switches.count(("heat", "cool")) <= 1, switches
+        assert _mode_writes(r, "cool"), "the house past the tolerance still gets cooling"
+
+
+def test_engine_relock_waits_for_the_mode_switch_dwell():
+    """Released cool, house back at the ceiling: within the dwell since the last mode change it stays released (no
+    instant flip back to heat); after the dwell it locks."""
+    engine, hass, scheduler, _ = _engine({"cool_lockout_outdoor_temp": 60.8}, state="heat", indoor=80.0)
+
+    def decide(indoor):
+        engine._comfort_family_inputs("cool", floor=64.4, ceiling=71.6, now=NOW, day_type="cold", indoor=indoor)
+        return engine._zone_safety_released["cool"]
+
+    with scheduler.installed():
+        engine.update_outdoor_temp(44.6)
+        assert decide(80.0) is True
+        asyncio.run(engine._set_hvac_mode("cool", reason="t"))  # the release's own mode change starts the dwell
+        assert decide(71.0) is True  # back at the edge, inside the dwell
+        scheduler.advance_by(601)
+        assert decide(71.0) is False
+
+
+class TestRecordedDecision:
+    def test_backstop_trusts_the_selectors_release(self):
+        """The selector released cool on its band; a write with no resolvable band is not refused against another."""
+        engine, hass, scheduler, events = _engine({"cool_lockout_outdoor_temp": 60.8}, state="heat", indoor=80.0)
+        with scheduler.installed():
+            engine.update_outdoor_temp(44.6)
+            engine._comfort_family_inputs("cool", floor=64.4, ceiling=71.6, now=NOW, day_type="cold", indoor=80.0)
+            assert engine._zone_safety_released["cool"] is True
+            result = asyncio.run(engine._set_hvac_mode("cool", reason="t"))
+        assert result is not HvacCommandResult.CAPABILITY_BLOCKED
+        assert [e for e in events if e[0] == "hvac_lockout_released" and e[1].get("safety")]
+
+    def test_diagnostics_never_move_the_release(self):
+        engine, hass, scheduler, events = _engine({"cool_lockout_outdoor_temp": 60.8}, state="heat", indoor=90.0)
+        engine._current_classification = _classification("cold", "heat")
+        with scheduler.installed():
+            engine.update_outdoor_temp(44.6)
+            snap = engine.zone_capability_snapshot()
+            asyncio.run(engine._set_hvac_mode("cool", reason="t"))
+        assert snap["cool"]["safety_released"] is False
+        assert engine._zone_safety_released["cool"] is False
+        assert not [e for e in events if e[1].get("safety")]
+
+    def test_policy_change_resets_the_release(self):
+        engine, hass, scheduler, _ = _engine({"cool_lockout_outdoor_temp": 60.8}, indoor=80.0)
+        with scheduler.installed():
+            engine.update_outdoor_temp(44.6)
+            engine._comfort_family_inputs("cool", floor=64.4, ceiling=71.6, now=NOW, day_type="cold", indoor=80.0)
+            engine.update_outdoor_temp(70.0)  # lockout releases
+            engine.update_outdoor_temp(44.6)  # and engages again: starts locked
+        assert engine._zone_safety_released["cool"] is False
+
+
+class TestPreCoolHold:
+    def test_held_pre_cool_band_ends_when_cool_locks(self):
+        from custom_components.climate_advisor.automation import BAND_CONTEXT_SLEEP, ComfortBand
+
+        engine, hass, scheduler, _ = _engine({"cool_lockout_outdoor_temp": 60.8, "wake_time": "06:30"})
+        sleep_band = ComfortBand(64.4, 71.6, "ceiling", "sleep", context=BAND_CONTEXT_SLEEP)
+        engine._pre_cool_band_in_force = ComfortBand(64.4, 68.0, "ceiling", "pre-cool", context=BAND_CONTEXT_SLEEP)
+        engine._pre_cool_band_since = NOW
+        with scheduler.installed():
+            assert engine._hold_pre_cool_band(sleep_band).ceiling == 68.0  # no lock yet: the bank holds
+            engine.update_outdoor_temp(44.6)
+            assert engine._hold_pre_cool_band(sleep_band) is sleep_band
+        assert engine._pre_cool_band_in_force is None
+
+
+class TestObserveOnlyAndGrace:
+    def test_observe_only_answers_dry_run_first(self):
+        engine, hass, scheduler, _ = _engine({"cool_lockout_outdoor_temp": 60.8})
+        engine.dry_run = True
+        with scheduler.installed():
+            engine.update_outdoor_temp(44.6)
+            assert asyncio.run(engine._set_hvac_mode("cool", reason="t")) is HvacCommandResult.DRY_RUN
+            assert asyncio.run(engine._set_temperature(71.6, reason="t", mode="cool")) is HvacCommandResult.DRY_RUN
+
+    def test_refused_restore_starts_no_automation_grace(self):
+        engine, hass, scheduler, _ = _engine({"cool_lockout_outdoor_temp": 60.8})
+        with scheduler.installed():
+            engine._start_automation_grace_unless_restore_unsent("t", HvacCommandResult.CAPABILITY_BLOCKED, None)
+        assert engine._grace_active is False
+
+
+class TestBandModes:
+    def test_heat_only_auto_schedule_mode_is_allowed_without_options(self):
+        """Tado / Netatmo ``[off, heat, auto]``: ``auto`` is the schedule mode, never refused on equipment alone."""
+        engine, hass, scheduler, _ = _engine({}, modes=("off", "heat", "auto"))
+        with scheduler.installed():
+            assert asyncio.run(engine._set_hvac_mode("auto", reason="t")) is not HvacCommandResult.CAPABILITY_BLOCKED
+        assert engine._effective_capabilities() == engine._get_thermostat_capabilities()
+
+    def test_auto_refused_while_a_policy_lock_is_engaged(self):
+        engine, hass, scheduler, _ = _engine({"hvac_season": "cool_only"}, modes=("off", "heat", "auto"))
+        with scheduler.installed():
+            assert asyncio.run(engine._set_hvac_mode("auto", reason="t")) is HvacCommandResult.CAPABILITY_BLOCKED
+
+    def test_pure_band_mode_rule(self):
+        heat_only = _zone(equipment_cool=False, indoor_f=70.0)
+        assert heat_only.mode_allowed("auto") is True
+        # A season that removes nothing the equipment has (Heat only on a heat-only unit) engages no policy lock.
+        assert _zone(equipment_cool=False, season=zc.SEASON_HEAT_ONLY, indoor_f=70.0).mode_allowed("auto") is True
+        assert _zone(equipment_cool=False, season=zc.SEASON_COOL_ONLY, indoor_f=70.0).mode_allowed("auto") is False
+
+
+class TestGatedRestoreRecord:
+    def test_records_the_family_the_selector_wrote(self):
+        engine, hass, scheduler, _ = _engine({"cool_lockout_outdoor_temp": 60.8}, state="off")
+        engine._current_classification = _classification("cold", "heat")
+        with scheduler.installed():
+            engine.update_outdoor_temp(44.6)
+            asyncio.run(engine._restore_hvac_mode_gated("cool", reason="t"))
+        assert engine._last_gated_restore_mode == "heat"
+
+    def test_records_nothing_without_a_classification(self):
+        engine, hass, scheduler, _ = _engine({"cool_lockout_outdoor_temp": 60.8}, state="off")
+        with scheduler.installed():
+            engine.update_outdoor_temp(44.6)
+            assert asyncio.run(engine._restore_hvac_mode_gated("cool", reason="t")) is None
+        assert engine._last_gated_restore_mode is None
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Coordinator
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def _coordinator(config: dict):
+    from tools.sim_harness.build_coordinator import build_headless_coordinator
+
+    return build_headless_coordinator(
+        config={**_CFG, **config},
+        climate_entity=ENTITY,
+        climate_state="cool",
+        climate_attributes={"current_temperature": 70.7, "hvac_modes": ["off", "heat", "cool"], "temperature": 71.6},
+        start_time=NOW,
+        skip_startup_coalesce=True,
+    )
+
+
+def test_coordinator_runs_the_reactive_check_and_a_refresh_on_a_change():
+    from unittest.mock import AsyncMock, patch
+
+    coord, hass, scheduler, _ = _coordinator({"cool_lockout_outdoor_temp": 60.8})
+    engine = coord.automation_engine
+    with (
+        scheduler.installed(),
+        patch.object(engine, "comfort_family_temperature_check", new=AsyncMock()) as check,
+        patch.object(coord, "async_request_refresh", new=AsyncMock()) as refresh,
+    ):
+        asyncio.run(coord._async_zone_capability_changed())
+    check.assert_awaited_once()
+    assert check.await_args.args[0] == pytest.approx(70.7)
+    refresh.assert_awaited_once()
+
+
+def test_coordinator_spawns_the_rerun_only_when_availability_changes():
+    from unittest.mock import MagicMock, patch
+
+    coord, hass, scheduler, _ = _coordinator({"cool_lockout_outdoor_temp": 60.8})
+    spawned = []
+    with (
+        scheduler.installed(),
+        patch.object(coord, "_spawn", new=MagicMock(side_effect=lambda c: (spawned.append(c), c.close()))),
+    ):
+        coord._apply_outdoor_temp(70.0, record_history=False)  # above the threshold: nothing changes
+        assert spawned == []
+        coord._apply_outdoor_temp(44.6, record_history=False)  # engages
+        coord._apply_outdoor_temp(44.0, record_history=False)  # stays engaged
+    assert len(spawned) == 1
+
+
+def test_coordinator_tou_bank_in_a_locked_family_owns_nothing():
+    from types import SimpleNamespace
+
+    from custom_components.climate_advisor.scheduler import TOUPhase
+
+    coord, hass, scheduler, _ = _coordinator({"cool_lockout_outdoor_temp": 60.8})
+    coord._tou_phase_resolution = SimpleNamespace(
+        phase=TOUPhase.PRECONDITIONING,
+        mode="cool",
+        target=68.0,
+        schedule_start=NOW + timedelta(hours=2),
+        precondition_start=NOW - timedelta(minutes=10),
+        schedule_id="s1",
+        window_end=NOW + timedelta(hours=5),
+    )
+    with scheduler.installed():
+        assert coord._tou_bank_owns_setpoint() is True
+        assert coord._tou_bank_in_force(NOW) is not None
+        coord.automation_engine.update_outdoor_temp(44.6)
+        assert coord._tou_bank_owns_setpoint() is False  # the band pass writes the band edge
+        assert coord._tou_bank_in_force(NOW) is None  # current_hold shows the schedule band
+
+
+def test_tou_suppression_logged_once_per_window(caplog):
+    import logging
+
+    engine, hass, scheduler, _ = _engine({"cool_lockout_outdoor_temp": 60.8}, state="cool")
+    with scheduler.installed(), caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.automation"):
+        engine.update_outdoor_temp(44.6)
+        for _ in range(3):  # the 5-minute bank check asks again and again
+            asyncio.run(engine.apply_tou_precondition(_classification("hot", "cool"), 68.0, "s1"))
+            scheduler.advance_by(300)
+    infos = [r for r in caplog.records if r.levelno == logging.INFO and "TOU pre-conditioning suppressed" in r.message]
+    assert len(infos) == 1
+
+
+def test_stranded_restore_records_the_mode_actually_written():
+    """The fan already stopped with a stranded cool snapshot; cooling is locked out, so the selector arms heat. The
+    Activity row names heat (what the thermostat got), not the cool snapshot."""
+    engine, hass, scheduler, events = _engine(
+        {"cool_lockout_outdoor_temp": 60.8, "fan_mode": "whole_house_fan", "fan_entity": "fan.whf"}, state="off"
+    )
+    engine._current_classification = _classification("cold", "heat")
+    engine._pre_fan_hvac_mode = "cool"
+    engine._fan_active = False
+    with scheduler.installed():
+        engine.update_outdoor_temp(44.6)
+        asyncio.run(engine._deactivate_fan(reason="t", restore_hvac=True, release_suppression=True))
+    rows = [p for et, p, _ in events if et == "stranded_hvac_suppression_restored"]
+    assert rows and rows[-1]["restore_mode"] == "heat"
+    assert "cool" not in [a["data"].get("hvac_mode") for a in _climate_calls(hass)]
+
+
+def test_options_reject_a_heat_lockout_inside_the_hysteresis():
+    """Cool 16 °C, heat 17 °C: both could be engaged between 17 and 18 °C, so the form refuses it."""
+    result, captured = _submit_setpoints(
+        _celsius_entry(),
+        {**_SETPOINTS_C, "cool_lockout_outdoor_temp": 16.0, "heat_lockout_outdoor_temp": 17.0, "hvac_season": "auto"},
+    )
+    assert result["errors"] == {"heat_lockout_outdoor_temp": "lockout_overlap"}

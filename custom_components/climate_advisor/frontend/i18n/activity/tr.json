@@ -439,6 +439,7 @@
   "activity.reason_whf_suppress_newest_wins": "tüm ev fanı HVAC'den sonra açıldı — HVAC bastırılıyor (en yeni eylem geçerli)",
   "activity.reason_why_indoor_le_comfort_floor": "iç mekan {indoor} ≤ konfor alt sınırı {floor}",
   "activity.reason_why_outdoor_ge_indoor": "dış mekan {outdoor} >= iç mekan {indoor}",
+  "activity.reason_zone_no_capable_mode": "Bu bölgede şu an ne ısıtma ne soğutma kullanılabilir (önceki {mode})",
   "activity.resumes_once_clears": "sorun giderilince devam eder",
   "activity.resumes_once_clears_mode": "sorun giderilince devam eder ({mode})",
   "activity.sensor_open_recheck": "Yeniden kontrol: kapı/pencerenin açık olduğu doğrulandı",

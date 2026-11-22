@@ -165,7 +165,7 @@
   "settings.guest_toggle_entity.label": "Gastmodus-schakelaar",
   "settings.guest_toggle_invert.description": "Schakel dit in als je schakelaar AAN meldt als er GEEN gasten zijn.",
   "settings.guest_toggle_invert.label": "Gastschakelaar omkeren",
-  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor verwarmt niet zolang het buiten warmer is dan dit, en staat verwarmen 2 °C (3,6 °F) eronder weer toe. Een huis dat meer dan de tolerantie van de dag kouder is dan de verwarmingstemperatuur, wordt toch verwarmd. Moet boven de koelblokkering liggen. Leeg laten voor geen blokkering.",
+  "settings.heat_lockout_outdoor_temp.description": "Climate Advisor verwarmt niet zolang het buiten warmer is dan dit, en staat verwarmen 2 °C (3,6 °F) eronder weer toe. Een huis dat meer dan de tolerantie van de dag kouder is dan de verwarmingstemperatuur, wordt toch verwarmd. Moet minstens 2 °C (3,6 °F) boven de koelblokkering liggen. Leeg laten voor geen blokkering.",
   "settings.heat_lockout_outdoor_temp.label": "Niet verwarmen boven buiten",
   "settings.heat_power_kw.description": "Gemiddeld elektrisch vermogen dat je verwarming verbruikt tijdens het draaien (in kW; zie typeplaatje of een slimme stekker). Optioneel: wordt samen met het energietarief gebruikt om de dagelijkse kosten te schatten. Blijft het leeg, dan worden geen kosten getoond.",
   "settings.heat_power_kw.label": "Verwarmingsvermogen",

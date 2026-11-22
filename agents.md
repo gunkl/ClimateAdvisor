@@ -2,6 +2,8 @@
 
 This repository expects any automation agent (Codex CLI, LLM assistants, scripted bots) to follow the rules below. Treat this document as the global source of truth for agent behavior on the Climate Advisor project.
 
+**Assistant working for an outside contributor?** [CONTRIBUTING.md](CONTRIBUTING.md) is your contract: "Start with an issue", "Evidence or hypothesis" and "How we diagnose, fix and verify". The maintainer-only tools described in claude.md and below (deploy, SSH, the live API, `tools/ha_logs.py`) are not available to you; use your own install's diagnostics and logs.
+
 ## Mission & Mindset
 
 **Project Overview**: Climate Advisor is a Home Assistant custom integration (`climate_advisor`) for intelligent HVAC management. It uses weather forecasts, occupancy detection, and door/window sensors to automate heating and cooling while learning from household behavior over time. See [README.md](README.md) for complete feature descriptions.

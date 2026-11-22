@@ -122,8 +122,10 @@ jobs:
                  (docs/i18n-spec.md) and `python tools/i18n.py check` passes;
                - run the affected tests and `uv run --locked --only-group test python tools/validate.py`; they pass;
                - commit, push, and open a DRAFT PR (`gh pr create --draft`) whose body starts with
-                 "Fixes #${{ steps.find.outputs.issue }}." and holds a plain-English before/after table, the
-                 evidence, the regression origin, and the tests (with the proof they fail without the fix).
+                 "Fixes #${{ steps.find.outputs.issue }}." and fills in every section of
+                 .github/pull_request_template.md (what changes for the person at home, evidence, root cause and
+                 origin, states covered, blast radius, mirror check, verification with the proof the tests fail
+                 without the fix, housekeeping), so it passes the submission check (CONTRIBUTING.md).
                If you cannot demonstrate a fix, open no PR: comment the diagnosis and run
                `gh issue edit ${{ steps.find.outputs.issue }} --add-label needs-human`.
 

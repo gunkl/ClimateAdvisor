@@ -25,6 +25,8 @@ The automation logic table and all threshold constants in this document are expr
 | What happens when the thermostat reads several degrees high after the furnace trips its high limit (Issue #1676)? | A 2.5 °F jump within 5 min of a reading, within 10 min of heating, starts a recalibration episode: WARNING, an ignorable Repairs notice, the room read from the sleep or dedicated sensor until the reading is back within 1 °F for 5 min (max 60 min), learning paused. Option `thermostat_recalibration_guard`. | [Bug E — thermostat recalibration](08-COMPUTATION-REFERENCE.md#bug-e--thermostat-recalibration-after-a-furnace-high-limit-trip-issue-1676) |
 | Which log line says Climate Advisor switched the sensor it reads the room temperature from (thermostat, its finer sensor, dedicated or sleep sensor)? | One INFO line per real switch per zone: `Zone "<title>": room temperature now from "<name>" (<id>, <role>, <°F>) instead of "<name>" (<id>, <role>, <°F>): <reason>`, plus an `indoor_source_changed` Activity row (Issue #1230 R1c, 0.9.3). Silent during startup coalescing; one `room temperature using ...` line after it. Owner: `coordinator._note_indoor_source()`; the resolver logs DEBUG only. | [Bug C — Indoor source changes](08-COMPUTATION-REFERENCE.md#bug-c--sleep-window-bedroom-sensor-override-issue-895) |
 | Which log line says Climate Advisor switched the humidity source a Status chart line reads (room, bedroom, outdoor)? | One INFO line per real change per role per zone: `Zone "<title>": <room\|bedroom\|outdoor> humidity now from <new> instead of <old>: <reason>`, each source written `"<friendly name>" (<id>, <kind>, <RH>%)` or `no humidity source`, plus a `humidity_source_changed` Activity row (Issue #1455, 0.9.11). Reasons: `the chosen sensor is unavailable`, `back to your chosen sensor`, `no humidity sensor found on the device`, `weather service (no outdoor humidity sensor)`, `humidity sensor found on the device`. Silent during startup coalescing and on repeats; one `<role> humidity using ...` line after it. Same writer as the room-temperature line (`coordinator._announce_source()`). Chart only: no Repairs card. | [Chart Log Spec](chart-log-spec.md#humidity-source-changes-issue-1455) |
+| What dew point does Climate Advisor carry for decisions, and what makes it unknown (Issue #1690)? | `EngineFacts.indoor_dew_point_f` / `outdoor_dew_point_f` (+ the source used): the chart's humidity source paired with the same device's temperature (read as the temperature readers read it), Magnus (`feels_like.dew_point_f`), median of 15 min of 5-min samples. Unknown on no source, stale (indoor 120 min, outdoor 6 h), non-% unit, no same-device temperature, thermostat recalibrating, or a reconnect glitch (0 % / 32 °F, a lone 0 % RH). Sleep window: bedroom, else the room. No decision reads them yet. | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
+| Can the outdoor sensor's reconnect value (0 % / 32 °F) reach an outdoor temperature decision (Issue #1689)? | No: `_read_outdoor_sensor` rejects it (`paired_glitch`: 0 % same-device humidity with exactly 32.0 °F, or a first reading of exactly 32.0 °F within 30 s after `unavailable` / `unknown`) as `implausible`; the weather service answers until the sensor's next reading or the 5-minute refresh. Any other first reading is used at once. | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
 | What temperature thresholds map to each day type? | HOT ≥ 85°F, WARM ≥ 75°F, MILD ≥ 60°F, COOL ≥ 45°F, COLD < 45°F; all thresholds are °F constants in `const.py`. | [§1. Day Classification](08-COMPUTATION-REFERENCE.md#1-day-classification) |
 | How is the setback modifier computed and what values can it take? | `avg_delta = ((tomorrow_high − today_high) + (tomorrow_low − today_low)) / 2`; modifier ranges from −3.0 (strong warming) to +3.0 (significant cold front); stable trend → 0. | [§3. Setback Modifier](08-COMPUTATION-REFERENCE.md#3-setback-modifier) |
 | What is the bedtime setpoint formula and when does the thermal model change it? | Default: `comfort_heat − 4°F` (heat) / `comfort_cool + 3°F` (cool). When thermal model confidence ≥ "low", `compute_bedtime_setback()` scales depth from `heating_rate_f_per_hour × recovery_window_hours`, clamped to `[MIN_SETBACK_DEPTH, MAX_SETBACK_DEPTH]`. | [§5a. Adaptive Bedtime Setback](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) |
@@ -4231,6 +4233,83 @@ With several candidates, one is used only when exactly one passes; if more than 
 | 60 min without settling | thermostat again | resumes | stays | WARNING |
 
 Tests: `tests/test_thermostat_recal_1676.py` (state machine, resolver, coordinator, v4, renderers), `tests_ha/test_thermostat_recal_1676.py` (real HA: entry and exit with and without an alternate, Repairs ignore survives a second episode).
+
+### Dew-point facts (Issue #1690)
+
+**Occupant view:** a humid 76 °F and a dry 76 °F feel different mostly through moisture, which a dew point measures
+(76 °F at 60 % is a 61 °F dew point, at 35 % a 46 °F one). Before any rule may act on it (the #1507 waves 2-3: humid
+fan-start guard, window advice, humid overcool), Climate Advisor carries the house's and the outside air's dew point
+in the decision facts. **No decision reads them yet**; unknown always means today's behaviour.
+
+- **One resolver, two outputs.** `humidity_sources.resolve_humidity_paired` picks the humidity source exactly as the
+  chart does ([Chart Log Spec](chart-log-spec.md#humidity-and-feels-like-fields-issue-1414)) and also says through
+  which entity's device it was found. The chart logs that raw value; `humidity_facts.read_dew_point` (pure) adds:
+  - **Same-device pairing, one temperature per sensor.** A sensor found on the thermostat's device pairs with the
+    thermostat's `current_temperature`; one found on the bedroom or outdoor sensor's device pairs with that sensor;
+    the user's chosen humidity entity pairs with a temperature sensor on its own device; the climate
+    `current_humidity` attribute with the climate's own temperature. Temperatures are read exactly as the temperature
+    readers read them (the configured unit, `read_sensor_state_f` / `read_attribute_temp_f`), so the dew point never
+    pairs with a different number from the one the decisions act on; only the weather entity is read in its own
+    `temperature_unit` (as the forecast is). No same-device temperature -> `no_temperature`.
+  - **Unit.** A humidity sensor whose unit is not `%` (or has none) -> `wrong_unit`.
+  - **Freshness** (`temperature.is_sensor_stale`, on the humidity and on its temperature): indoor
+    `HUMIDITY_INDOOR_FRESHNESS_MINUTES` (= `REMOTE_OFFSET_FRESHNESS_MINUTES`, 120 min); outdoor
+    `OUTDOOR_SENSOR_STALE_HOURS` (6 h), so outdoor temperature and humidity go stale together. Fails open without
+    timestamps, as everywhere. The one exemption rule, `temperature.stale_check_applies` (an `input_number` helper,
+    by domain or by its configured source), is shared with the indoor resolver and `_read_outdoor_sensor`.
+  - **Recalibration (#1676).** While the thermostat recalibrates after a heating shutdown, a dew point paired with the
+    thermostat or a sensor on its device is `recalibrating` (unknown). When the bedroom sensor took over the room
+    reading, the dew point follows it.
+  - **Glitch** (`paired_glitch`, shared with the outdoor temperature path): exactly 0 % RH with exactly 32.0 °F, or a
+    first reading of exactly 32.0 °F after the sensor was `unavailable` / `unknown` (within
+    `SENSOR_RECONNECT_SETTLE_S` = 30 s; `ReconnectWatch`, fed by the outdoor sensor's listener; the 5-minute sample
+    also observes humidity entities, but only catches a reconnect a tick happens to straddle). The reader also counts
+    a lone 0 % RH as a glitch (no real air is that dry), so a thermostat reconnect drops only that reading.
+    Temperatures outside the indoor 40-110 °F (`indoor_temp.MIN/MAX_PLAUSIBLE_INDOOR_F`) / outdoor -60-150 °F
+    bands -> `implausible`.
+  - **Dew point:** `feels_like.dew_point_f` (Magnus, 17.62 / 243.12 °C), the one function; research scripts and
+    simulations call it.
+- **Which room.** Indoor: the room CA is reading (`indoor_role_for` on the comfort reading): in the sleep window the
+  bedroom, falling back to the day room when the bedroom has none (dew point is house-wide: the bedroom reads 2-5 %
+  RH higher only because it is cooler). Outdoor: the outdoor sensor's humidity, else the weather entity's `dew_point`
+  (its own `temperature_unit`), else its `temperature` with its `humidity`.
+- **Smoothing.** The coordinator's 5-minute tick (`_sample_humidity_facts`, the only writer) stores one sample per
+  signal in `DewPointHistory`; the fact is the median of the last `HUMIDITY_MEDIAN_WINDOW_MINUTES` (15 min) of samples
+  plus the reading at the decision. The window belongs to one humidity source: a sample or reading from another
+  source (the sleep-window edge, a sensor falling back) restarts it, so the median never mixes two rooms. A lasting
+  unknown (no source, stale, unavailable, wrong unit, recalibrating) makes the fact unknown at once and forgets the
+  samples; a glitch (including a lone 0 %) only drops that reading.
+- **Facts.** `EngineFacts.indoor_dew_point_f`, `outdoor_dew_point_f` (None = unknown), the humidity source each came
+  from (`indoor_dew_point_source`, `outdoor_dew_point_source`, for a later display next to the chart's source) and
+  `humid_latches` (names of the humid latches that are on), built by `build_engine_facts` (which
+  `StaticEngineInputs.build_facts` now also calls). Later rules read these fields only, never the raw resolver
+  (pinned by `tests/test_chart_humidity_1414.py::test_humidity_reaches_only_the_dew_point_reader`). Latches step on
+  the 5-minute tick through the one hysteresis helper `latch_above(value, on, off, was_on)` (on at `on`, stays on
+  while above `off`, off at or below `off`, unknown releases); `humidity_facts.LATCH_SPECS` is empty until a later
+  lane adds its rule. The device lookups the readers use are cache-only, so building facts never reads the entity
+  registry (safe on any thread).
+- **Missing inputs (for the #1507 rules that will read these facts):**
+
+| Indoor DP | Outdoor DP | H1 ceiling | H1 relative | H2 | H3 |
+|---|---|---|---|---|---|
+| known | known | yes | yes | yes | yes |
+| unknown | known | yes | no | today's rule | off |
+| known | unknown | no | no | yes | yes |
+| unknown | unknown | no | no | today's rule | off |
+
+**Outdoor temperature reconnect glitch (Issue #1689).** `coordinator._read_outdoor_sensor` (the single reader of the
+dedicated outdoor sensor) applies `paired_glitch` to every reading: the humidity on the outdoor sensor's own device
+(cache-only lookup) at exactly 0 % with exactly 32.0 °F, or a first reading of exactly 32.0 °F within 30 s after the
+sensor came back from `unavailable` / `unknown` (the listener notes it), is `implausible`. The weather service then
+answers until the sensor's next reading or the 5-minute outdoor refresh, whichever comes first (the existing fallback,
+logged and announced like any outdoor-sensor fallback: one `outdoor_sensor_fallback` "changed" row, then
+`outdoor_sensor_recovered`). Any other first reading (52.9 °F, even with its humidity still at 0 %) is used at once.
+A genuine 32.0 °F first reading is therefore held off for at most one refresh tick. Occupant view: after an 8-hour
+outage the outdoor sensor reported 0 % / 32.0 °F for 3.6-4.6 s; a decision taken then (window advice, nat-vent,
+heating plans) could have acted on a false freezing reading. Before, 32 °F passed the -60 °F plausibility floor.
+The indoor path already rejects 32 °F (`MIN_PLAUSIBLE_INDOOR_F` = 40).
+
+Tests: `tests/test_humidity_facts_1690.py`, `tests_ha/test_humidity_facts_realha_1690.py`.
 
 ### Indoor sensor failure reasons and announcements (Issue #1033)
 

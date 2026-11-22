@@ -71,8 +71,9 @@ custom_components/climate_advisor/
 ├── cycle_model.py       # Pooled heating/cooling cycle model (Issues #1512/#1516): fit_cycles, clean_series, infer_resolution, grade, typical_prior, prior_from_cache. Pure math, no HA imports; shared with tools/thermal_replay.py and tools/predict_backtest.py. See 05-LEARNING-ENGINE-DESIGN.md.
 ├── cycle_recorder.py    # CycleRecorder: pure state machine turning thermostat edges, band-sensor readings, flags, setpoint changes and gaps into closed cycle dicts.
 ├── cycle_store.py       # CycleStore: per-zone climate_advisor_cycles.json (evidence-based retention, Issue #1512 reopened: past 90 days back from the mode's newest cycle only a cycle whose fit weight fell below 0.01 leaves; cap 3000 cycles (1500 per mode) evicting the lowest weight first, native-resolution integer deltas (v2; v1 migrated), compact in memory, saved periodically + at HA stop, atomic 0600 write). Separate from the chart_log (chart-log-spec.md).
-├── feels_like.py        # Issue #1414: pure NWS heat index / wind chill (feels_like_f) and weather wind-unit -> mph, chart display only. See chart-log-spec.md "Humidity and Feels-Like Fields".
-├── humidity_sources.py  # Issue #1414: one humidity resolver, three roles (indoor_day, indoor_sleep, outdoor); chart display only, never the climate TARGET humidity.
+├── feels_like.py        # Issue #1414: pure NWS heat index / wind chill (feels_like_f, chart display only) and weather wind-unit -> mph; Issue #1690: the one dew_point_f (Magnus), which decisions may read via humidity_facts. See chart-log-spec.md "Humidity and Feels-Like Fields".
+├── humidity_sources.py  # Issue #1414: one humidity resolver, three roles (indoor_day, indoor_sleep, outdoor), never the climate TARGET humidity; the chart's pick, and (Issue #1690, resolve_humidity_paired) the decision dew point's.
+├── humidity_facts.py    # Issue #1690: the decision dew point: same-device pairing, paired_glitch (shared with the outdoor temperature path, #1689), ReconnectWatch, freshness/unit checks, 15-min median, latch_above. Pure. See 08-COMPUTATION-REFERENCE.md "Dew-point facts".
 ├── forecast_archive.py  # Forecast archive (Issue #1230 R0): persisted hourly-forecast snapshots, one per local hour, for forecast-error scoring. Record-only; entry-scoped JSON. See forecast-archive-spec.md.
 ├── predictor_v4.py      # Prediction engine v4 (Issue #1230 R1): pure-Python indoor-temperature predictor (hidden-mass thermal model, thermostat emulation, forecast correction, bounded Levenberg-Marquardt fit). Default PRIMARY engine since 0.9.4: as primary its baseline path and control_rates() reach the decisions through the coordinator's control feed (R6b); no decision module imports it. See predictor-v4-spec.md.
 ├── night_strategy.py    # Bedroom night strategy (Issue #1230 R4): pure planner (options per fan mode, DP-2 score, evidence gate) + apply_night_strategy(timeline). ADVISE ONLY (applied to the timeline since R6; never commands). See night-strategy-spec.md.
@@ -334,7 +335,8 @@ sleep_indoor_temp_entity: sensor.bedroom_temp (optional — Issue #895; used for
   entry and exit: the bedtime band is written at offset 0 BEFORE the loop's first decision of the night, the wake
   band is written at offset 0 (the offset is cleared first), and if no wake write comes the loop itself writes the
   plain target once after a 120 s grace -- see "Context entry and exit (Issue #1194 c)" there)
-indoor_humidity_entity: sensor.hallway_humidity (optional, Issue #1414; chart display only, blank = detect
+indoor_humidity_entity: sensor.hallway_humidity (optional, Issue #1414; the chart's and, since Issue #1690, the decision
+  dew point's source (no decision reads it yet), blank = detect
   automatically: a humidity sensor on the thermostat's or comfort sensor's device, else the thermostat's
   current_humidity)
 sleep_indoor_humidity_entity: sensor.bedroom_humidity (optional, Issue #1414; used for the chart while the sleep
@@ -634,6 +636,7 @@ Single facts are computed by the coordinator and passed in at the decision call:
 | hourly forecast | `_hourly_forecast_temps` (`_refresh_hourly_forecast`, kept-forecast restore) | `forecast_peak_2h` (never the list) | `decide_nat_vent_start_veto(forecast_peak_2h=…)` (#1138) |
 | today's outdoor peak / samples | `_outdoor_temp_history` (each recorded reading; same-day restore; midnight reset) | `outdoor_today_peak`, `outdoor_today_sample_count` | soft start (#540) |
 | Away/Vacation TOU window | `_tou_av_window: TouAvWindow` (`_sync_tou_away_vacation_state`) | `tou_av` (expansion, schedule id, bank target) | Away/Vacation band expansion (#899) |
+| indoor / outdoor dew point, humid latches | `_dew_point_history`, `_humid_latch_state`, `_reconnect_watch` (written only by the 5-minute `_sample_humidity_facts`; read by the pure `_read_dew_point` / `_dew_point_fact`) | `indoor_dew_point_f`, `outdoor_dew_point_f` (+ `*_dew_point_source`), `humid_latches` | none yet (#1507 waves 2-3; Issue #1690) |
 
 - **Passed in.** `coordinator.engine_facts(now)` builds a frozen `EngineFacts` snapshot. Every coordinator (and
   `api.py`) call into an engine method that reaches one of these facts goes through `decide(coordinator, method, ...)`

@@ -1253,8 +1253,16 @@ class TestTemperatureNormalization:
 
         # Bind the real methods under test to our mock coordinator
         coord._get_outdoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_outdoor_temp, coord)
-        # Issue #1032: _get_outdoor_temp now delegates to these helpers (sensor read, fallback state, weather tail).
-        for _helper in ("_read_outdoor_sensor", "_note_outdoor_sensor_state", "_get_weather_outdoor_temp"):
+        # Issue #1032: _get_outdoor_temp now delegates to these helpers (sensor read, fallback state, weather tail);
+        # Issue #1689: the sensor read checks the reconnect glitch through the last three.
+        for _helper in (
+            "_read_outdoor_sensor",
+            "_note_outdoor_sensor_state",
+            "_get_weather_outdoor_temp",
+            "_outdoor_reading_glitched",
+            "_cached_companions",
+            "_reconnect_watch_for",
+        ):
             setattr(coord, _helper, types.MethodType(getattr(ClimateAdvisorCoordinator, _helper), coord))
         coord._get_indoor_temp_with_provenance = types.MethodType(
             ClimateAdvisorCoordinator._get_indoor_temp_with_provenance, coord

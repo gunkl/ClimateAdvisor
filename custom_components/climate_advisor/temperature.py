@@ -11,7 +11,12 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import NamedTuple
 
-from .const import ECONOMIZER_TEMP_DELTA, UNAVAILABLE_STATES, WINDOWS_RECOMMENDED_HYSTERESIS_F
+from .const import (
+    ECONOMIZER_TEMP_DELTA,
+    TEMP_SOURCE_INPUT_NUMBER,
+    UNAVAILABLE_STATES,
+    WINDOWS_RECOMMENDED_HYSTERESIS_F,
+)
 from .swing import swing_tolerance, thermostat_holds_direction
 from .time_utils import seconds_since
 
@@ -141,6 +146,18 @@ def read_attribute_temp_f(state, attr: str, unit: str) -> tuple[float | None, st
     if not math.isfinite(value_f):
         return None, "non_finite"
     return value_f, None
+
+
+def stale_check_applies(entity_id: str | None, configured_source: str | None = None) -> bool:
+    """Whether the stale rule applies to a temperature/humidity reading (Issues #1032, #1033, #1690).
+
+    The one exemption rule: an ``input_number`` helper legitimately stays unchanged for days, whether it is known by
+    its domain or by the source the occupant configured for it (``TEMP_SOURCE_INPUT_NUMBER``). Every other sensor
+    goes stale.
+    """
+    if configured_source == TEMP_SOURCE_INPUT_NUMBER:
+        return False
+    return not (isinstance(entity_id, str) and entity_id.startswith("input_number."))
 
 
 def is_sensor_stale(state, stale_hours: float, now: datetime) -> bool:

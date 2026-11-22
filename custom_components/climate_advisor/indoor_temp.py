@@ -66,7 +66,7 @@ from .const import (
     TEMP_SOURCE_SENSOR,
     is_unavailable_state,
 )
-from .temperature import is_sensor_stale, read_attribute_temp_f, read_sensor_state_f
+from .temperature import is_sensor_stale, read_attribute_temp_f, read_sensor_state_f, stale_check_applies
 from .thermostat_recal import ThermostatRecal
 
 _LOGGER = logging.getLogger(__name__)
@@ -216,8 +216,8 @@ def _resolve_primary_indoor_temp_f(
         checked = _check_plausible(val_f, indoor_temp_entity)
         if checked is None:
             return None, None, "implausible"
-        # input_number helpers legitimately stay unchanged for days - stale applies to `sensor` only.
-        if source == TEMP_SOURCE_SENSOR and is_sensor_stale(state, INDOOR_SENSOR_STALE_HOURS, now):
+        # input_number helpers legitimately stay unchanged for days (the one rule: temperature.stale_check_applies).
+        if stale_check_applies(indoor_temp_entity, source) and is_sensor_stale(state, INDOOR_SENSOR_STALE_HOURS, now):
             return None, None, "stale"
         return checked, indoor_temp_entity, None
 
@@ -249,9 +249,7 @@ def _resolve_sleep_indoor_temp_f(
     checked = _check_plausible(val_f, sleep_indoor_temp_entity)
     if checked is None:
         return None, "implausible"
-    if not sleep_indoor_temp_entity.startswith("input_number.") and is_sensor_stale(
-        state, INDOOR_SENSOR_STALE_HOURS, now
-    ):
+    if stale_check_applies(sleep_indoor_temp_entity) and is_sensor_stale(state, INDOOR_SENSOR_STALE_HOURS, now):
         return None, "stale"
     return checked, None
 

@@ -402,6 +402,21 @@ where new event types produced blank or LLM-dependent rows in the activity table
 
 ---
 
+## Reserved Event Names (Issue #1690, #1507)
+
+These event types are reserved for the humidity lanes of #1507 and registered unmapped in
+`tools/sim_harness/outcomes.py` (`humidity_facts.RESERVED_EVENT_TYPES`). Nothing emits them yet, so they have no
+renderer and no catalog row: the coverage guardrail (`test_no_renderer_is_dead_code`) and the catalog parity test
+(`TestEventRenderersCatalogParity`) both refuse a renderer or row for a type no production code emits. Each lane adds
+its renderer, its catalog row above and its strings in the PR that first emits the event.
+
+| Name | Lane | What the occupant will see |
+|---|---|---|
+| `nat_vent_humid_skip` | H1 (#1507 I2) | A window-open fan / nat-vent start refused because the outdoor air is humid (sibling of `nat_vent_forecast_skip`). |
+| `humid_windows_close_notice` | H1 (#1507 I3) | "Humid outside (dew point X): close the windows and the AC will take over." |
+| `overcool_started` | H3 (#1507 I5) | Humid overcool lowered the commanded cool setpoint. |
+| `overcool_ended` | H3 (#1507 I5) | Humid overcool released (dew point dropped, run ended, 60-minute cap, gate closed). |
+
 ## Code Reference
 
 - `build_event_timeline_table` — `ai_skills_context.py` (deterministic table builder; moved from `ai_skills_activity.py`, Issue #563)

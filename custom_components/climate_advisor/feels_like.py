@@ -1,8 +1,9 @@
 """Feels-like temperature for the Status charts (Issue #1414), by the National Weather Service methods.
 
 Occupant view: on a 92 F afternoon at 60 % humidity the air feels like about 105 F, and a 30 F morning in a 20 mph wind
-feels like about 17 F. The chart draws that next to the thermometer reading. CHART DISPLAY ONLY: no decision, setpoint
-or control path reads anything here (pinned by ``tests/test_chart_humidity_1414.py``).
+feels like about 17 F. The chart draws that next to the thermometer reading. The feels-like values are CHART DISPLAY
+ONLY: no decision, setpoint or control path reads them (pinned by ``tests/test_chart_humidity_1414.py``). The one
+exception in this module is ``dew_point_f`` (Issue #1690), which the decision dew-point facts use.
 
 Heat index, NWS Weather Prediction Center (https://www.wpc.ncep.noaa.gov/html/heatindex_equation.shtml):
 
@@ -28,6 +29,9 @@ import math
 _HI_REGRESSION_MIN_F = 80.0
 _WC_MAX_TEMP_F = 50.0
 _WC_MIN_WIND_MPH = 3.0
+# Magnus coefficients for the dew point (over water, degrees C): Alduchov & Eskridge (1996), as WMO recommends.
+_MAGNUS_B = 17.62
+_MAGNUS_C = 243.12
 
 # Weather-entity ``wind_speed_unit`` strings (HA ``UnitOfSpeed``) -> factor to mph.
 _TO_MPH: dict[str, float] = {
@@ -101,6 +105,27 @@ def feels_like_f(temp_f: float | None, rh: float | None, wind_mph: float | None 
     if wind_mph is not None:
         return wind_chill_f(t, wind_mph)
     return None
+
+
+def dew_point_f(temp_f: float | None, rh: float | None) -> float | None:
+    """Dew point (F) of air at ``temp_f`` (F) and ``rh`` (%, above 0 and at most 100), else None (Issue #1690).
+
+    The one dew-point function (Magnus, coefficients 17.62 / 243.12 C, WMO-recommended over water, Alduchov and
+    Eskridge 1996): ``gamma = ln(RH/100) + 17.62*T / (243.12 + T)`` and ``Td = 243.12*gamma / (17.62 - gamma)``, T and
+    Td in C. Occupant view: 76 F at 60 % is a 61 F dew point (muggy), 76 F at 35 % is 46 F (dry), whatever the
+    thermometer says. Unlike the feels-like functions above, decisions may read it (through the filtered dew-point
+    facts, ``humidity_facts``). 0 % has no dew point (and is the reconnect glitch); not rounded.
+    """
+    t = _finite(temp_f)
+    h = _finite(rh)
+    if t is None or h is None or not 0.0 < h <= 100.0:
+        return None
+    t_c = (t - 32.0) * 5.0 / 9.0
+    if t_c <= -_MAGNUS_C:  # the Magnus pole at -243.12 C (unreachable inside the plausibility bands)
+        return None
+    gamma = math.log(h / 100.0) + _MAGNUS_B * t_c / (_MAGNUS_C + t_c)  # always < _MAGNUS_B above the pole
+    td_c = _MAGNUS_C * gamma / (_MAGNUS_B - gamma)
+    return td_c * 9.0 / 5.0 + 32.0
 
 
 def wind_speed_to_mph(value: object, unit: object) -> float | None:

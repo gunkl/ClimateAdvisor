@@ -543,6 +543,20 @@ class RealHASession:
         self.house.set_outdoor(temp_f)
         self.hass.states.async_set(OUTDOOR_F_SENSOR, str(float(temp_f)), force_update=True)
 
+    def _report_humidity(self, event: dict) -> None:
+        """Issue #1690: the optional ``humidity`` / ``outdoor_humidity`` (RH %) of a ``temp_update``, as FakeHass
+        models them (``humidity_devices.report_scenario_humidity``): the thermostat's and the outdoor sensor's own
+        humidity sensors report, and the coordinator's same-device lookup is seeded (the house registers no devices).
+        Real HA stamps ``last_updated`` itself (wall clock); the outdoor sensor is written on every event already."""
+        from tools.sim_harness import humidity_devices  # noqa: PLC0415
+
+        coordinator = self.coordinator
+
+        def _report(entity_id: str, rh: float) -> None:
+            self.hass.states.async_set(entity_id, str(rh), humidity_devices.HUMIDITY_ATTRS, force_update=True)
+
+        humidity_devices.report_scenario_humidity(coordinator, coordinator.config["climate_entity"], event, _report)
+
     # --------------------------------------------------------------- dispatch
     async def _dispatch(self, event: dict, etype: str) -> str:  # noqa: PLR0912, PLR0915
         assert self.house is not None
@@ -560,6 +574,7 @@ class RealHASession:
                 self._report_outdoor(float(outdoor_f))
             if indoor_f is not None:
                 self._set_indoor(float(indoor_f))
+            self._report_humidity(event)
             await self._drain()
             # the periodic cycle's nat-vent re-evaluation: a real production trigger the scenario models per tick
             await engine.check_natural_vent_conditions()

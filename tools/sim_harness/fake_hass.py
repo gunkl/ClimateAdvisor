@@ -587,6 +587,18 @@ class _FakeStates:
         if self._dispatch_fn is not None:
             self._dispatch_fn(entity_id, old_state, new_state, context=context)
 
+    def async_report_humidity(self, entity_id: str, rh: float) -> None:
+        """A humidity sensor reports (Issue #1690): ``async_set`` plus ``last_updated`` / ``last_reported`` stamped on
+        the sim clock, the way ``remote_sensor_report`` models a reporting sensor. Humidity entities ONLY: stamping
+        every write would switch on the existing staleness checks for sensors the coordinator-mode goldens never
+        stamp (an unstamped state is treated as fresh forever)."""
+        self.async_set(entity_id, str(float(rh)), {"device_class": "humidity", "unit_of_measurement": "%"})
+        stamped = self._states.get(entity_id)
+        if stamped is not None and self._clock_fn is not None:
+            stamp = self._clock_fn()
+            stamped.last_updated = stamp
+            stamped.last_reported = stamp
+
 
 class _FakeConfigEntries:
     """Minimal stand-in for hass.config_entries (Issue #796).

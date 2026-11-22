@@ -209,6 +209,8 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    HUMIDITY_INDOOR_FRESHNESS_MINUTES,
+    HUMIDITY_MEDIAN_WINDOW_MINUTES,
     HVAC_CMD_FAIL_BANNER_MIN_AGE_MIN,
     INVESTIGATION_REPORT_HISTORY_CAP,
     INVESTIGATION_REPORTS_FILE,
@@ -375,12 +377,25 @@ from .fan_status import (
 )
 from .feels_like import feels_like_f, wind_speed_to_mph
 from .forecast_archive import ForecastArchive
+from .humidity_facts import (
+    LATCH_SPECS,
+    SIGNAL_INDOOR,
+    SIGNAL_OUTDOOR,
+    DewPoint,
+    DewPointHistory,
+    ReconnectWatch,
+    decision_dew_point,
+    paired_glitch,
+    read_dew_point,
+    update_latches,
+)
 from .humidity_sources import (
     ROLE_INDOOR_DAY,
     ROLE_INDOOR_SLEEP,
     ROLE_OUTDOOR,
     indoor_role_for,
     read_humidity_source,
+    read_humidity_state,
     resolve_humidity,
 )
 from .hvac_action import (
@@ -505,6 +520,7 @@ from .temperature import (
     read_sensor_state_f,
     read_state_temp_f,
     reminder_due,
+    stale_check_applies,
     to_fahrenheit,
     unit_key_from_attr,
     unit_mismatch,
@@ -1742,6 +1758,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1676: the thermostat's recalibration after a heating shutdown, shared with the engine the same way.
         self._recal = ThermostatRecal()
         self.automation_engine.indoor_recal = self._recal
+        # Issue #1690 / #1689: the decision dew point's state (all event-loop writes; the readers are pure): the
+        # reconnect memory shared with the outdoor temperature path, the 15-minute samples, and the humid latches.
+        self._reconnect_watch = ReconnectWatch()
+        self._dew_point_history = DewPointHistory(timedelta(minutes=HUMIDITY_MEDIAN_WINDOW_MINUTES))
+        self._humid_latch_state: dict[str, bool] = {}
         with contextlib.suppress(Exception):
             self._companion_temp_sensors()  # resolve the candidates now so the first reading already knows them
         # Funnel state (``_refresh_indoor_sensor_health``): the companion in use now / last announced, and the
@@ -2199,6 +2220,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             @callback
             def _async_outdoor_temp_changed(event: Any) -> None:
+                # Issue #1689: remember a reading that arrived right after the sensor was unavailable (before the
+                # refresh reads it), so the reconnect value is not taken as the outside temperature.
+                with contextlib.suppress(Exception):
+                    self._reconnect_watch_for().note(
+                        _outdoor_temp_entity, event.data.get("old_state"), event.data.get("new_state")
+                    )
                 self._refresh_outdoor_temp(min_delta_f=0.1)
                 ae = self.automation_engine
                 if ae._fan_active or ae._natural_vent_active:
@@ -2575,6 +2602,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.warning("Blind-fan recovery check failed on thermal tick; sampling continues", exc_info=True)
         self._cycle_tick()  # Issue #1512: coast windows that elapsed, outdoor, flags
+        try:  # Issue #1690: the decision dew point's 5-minute sample (nothing is decided here)
+            self._sample_humidity_facts(dt_util.now())
+        except Exception:  # noqa: BLE001 - a humidity sample must never break thermal sampling
+            _LOGGER.debug("dew point sample failed", exc_info=True)
         try:  # owner decision 2026-11-13: watch for a thermostat that never reports heating/cooling
             self._tick_hvac_action_watch()
         except Exception:  # noqa: BLE001 - a notice must never break thermal sampling
@@ -5856,12 +5887,43 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None, reason
         if not MIN_PLAUSIBLE_OUTDOOR_F <= value_f <= MAX_PLAUSIBLE_OUTDOOR_F:
             return None, "implausible"
+        if self._outdoor_reading_glitched(entity_id, state, value_f):
+            return None, "implausible"  # Issue #1689: the sensor's reconnect value (0 % / 32 F, or first after down)
         # Stale check: `sensor` only (an input_number helper legitimately stays unchanged for days).
         # last_reported updates on every report even when the value is unchanged; older HA lacks it.
         # Fails open (treated as fresh) when no real datetime is available (stubs, old HA).
-        if source == TEMP_SOURCE_SENSOR and is_sensor_stale(state, OUTDOOR_SENSOR_STALE_HOURS, dt_util.utcnow()):
+        if stale_check_applies(entity_id, source) and is_sensor_stale(
+            state, OUTDOOR_SENSOR_STALE_HOURS, dt_util.utcnow()
+        ):
             return None, "stale"
         return value_f, None
+
+    def _reconnect_watch_for(self) -> ReconnectWatch:
+        """This zone's reconnect memory (created on first use for coordinators built without ``__init__``)."""
+        watch = self.__dict__.get("_reconnect_watch")
+        if not isinstance(watch, ReconnectWatch):
+            watch = ReconnectWatch()
+            self._reconnect_watch = watch
+        return watch
+
+    def _outdoor_reading_glitched(self, entity_id: str, state: Any, value_f: float) -> bool:
+        """True for the outdoor sensor's reconnect glitch (Issue #1689; the shared ``paired_glitch`` rule).
+
+        Occupant view: after an outage the outdoor sensor can report 0 % / 32.0 F for a few seconds; Climate Advisor
+        keeps using the weather service for that moment instead of deciding on a false freezing night. The humidity
+        paired with the reading is the humidity sensor on the SAME device (cache-only lookup, so this stays a pure
+        read); without one only the "first reading after unavailable" rule applies. Never raises.
+        """
+        try:
+            rh = None
+            for cand in self._cached_companions(entity_id, "humidity", False):
+                rh = read_humidity_state(self.hass, cand)
+                if rh is not None:
+                    break
+            first_after = self._reconnect_watch_for().first_after_unavailable(entity_id, state, dt_util.utcnow())
+            return paired_glitch(value_f, rh, first_after_unavailable=first_after)
+        except Exception:  # noqa: BLE001 - a glitch check never blocks a real reading
+            return False
 
     def _note_outdoor_sensor_state(
         self, reason: str | None, entity_id: str | None, source_in_use: str | None, value_f: float | None
@@ -6615,7 +6677,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     ) -> dict[str, float]:
         """The Issue #1414 chart-row fields ``humidity``, ``feelslike``, ``outdoor_humidity``, ``outdoor_feelslike``.
 
-        CHART DISPLAY ONLY: nothing in automation or control reads these. Indoor humidity belongs to the room whose
+        CHART DISPLAY ONLY: nothing in automation or control reads these fields (decisions read the filtered dew point
+        from the same resolver, ``_read_dew_point``, Issue #1690). Indoor humidity belongs to the room whose
         temperature the row records: the role is chosen from ``reading.source_entity`` (sleep-window swapped), so in
         the sleep window it is the bedroom's humidity sensor or nothing, never the day room's. ``feelslike`` is the NWS
         heat index of the row's ``indoor`` (no wind indoors); ``outdoor_feelslike`` is the NWS heat index or wind chill
@@ -6675,6 +6738,129 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001 - a chart row must never fail on humidity
             _LOGGER.debug("chart_log: could not read humidity / feels-like", exc_info=True)
         return out
+
+    # ------------------------------------------------------------------
+    # Issue #1690 (#1507 H0): the decision dew point. Same resolver and inputs as the chart rows above
+    # (``_humidity_role_inputs``), so the chart line and the decisions always read the same sensor; the chart keeps
+    # the raw value, decisions get ``humidity_facts``' filtered dew point through ``engine_facts``.
+    # ------------------------------------------------------------------
+
+    def _cached_companions(self, entity_id: str, device_class: str, exclude_non_room: bool = True) -> tuple[str, ...]:
+        """Cache-only device lookup (Issue #1690): never reads the entity registry, so it is safe on any thread.
+
+        Warmed on the event loop by ``_companion_sensors`` (chart rows, the 5-minute dew-point sample); a lookup not
+        warmed yet finds nothing, which makes the dew point unknown (today's behaviour) until the next sample.
+        """
+        cache = getattr(self, "_companion_sensors_cache", None)
+        hit = cache.get((entity_id, device_class, bool(exclude_non_room))) if isinstance(cache, dict) else None
+        return tuple(hit[0]) if hit else ()
+
+    def _read_dew_point(self, signal: str, now: datetime) -> DewPoint:
+        """This zone's current dew point for ``signal`` (indoor / outdoor) from one reading. Pure read; never raises.
+
+        Occupant view: the moisture of the room Climate Advisor is reading (the bedroom in the sleep window, falling
+        back to the day room: dew point is house-wide), and of the air outside (outdoor sensor, else the weather
+        service). While the thermostat recalibrates after a heating shutdown (Issue #1676) its own temperature is
+        false, so a dew point paired with it is unknown. Indoor readings go stale after
+        ``HUMIDITY_INDOOR_FRESHNESS_MINUTES``, outdoor ones after ``OUTDOOR_SENSOR_STALE_HOURS``.
+        """
+        try:
+            cfg = self.config
+            unit = cfg.get("temp_unit", "fahrenheit")
+            watch = self._reconnect_watch_for()
+            false_entities = tuple(self._chart_recal_false() or ())
+            # The occupant's configured source per entity, for the one stale exemption (input_number helpers).
+            configured_sources = {
+                str(cfg.get(entity_key)): str(cfg.get(source_key))
+                for entity_key, source_key in (
+                    ("indoor_temp_entity", "indoor_temp_source"),
+                    ("outdoor_temp_entity", "outdoor_temp_source"),
+                )
+                if cfg.get(entity_key) and cfg.get(source_key)
+            }
+
+            def _read(role: str, source_entity: str | None, stale_hours: float) -> DewPoint:
+                chosen, sources, fallback = self._humidity_role_inputs(role, source_entity)
+                exclude = role != ROLE_OUTDOOR
+                return read_dew_point(
+                    self.hass,
+                    role,
+                    chosen=chosen,
+                    source_entities=sources,
+                    fallback_entity=fallback,
+                    discover=lambda eid, excl: self._cached_companions(eid, "humidity", excl),
+                    discover_temp=lambda eid: self._cached_companions(eid, "temperature", exclude),
+                    unit=unit,
+                    stale_hours=stale_hours,
+                    now=now,
+                    false_entities=false_entities,
+                    reconnect=watch,
+                    configured_sources=configured_sources,
+                )
+
+            if signal == SIGNAL_OUTDOOR:
+                return _read(ROLE_OUTDOOR, None, OUTDOOR_SENSOR_STALE_HOURS)
+            indoor_hours = HUMIDITY_INDOOR_FRESHNESS_MINUTES / 60.0
+            source = getattr(self._get_indoor_temp_with_provenance(), "source_entity", None)
+            role = indoor_role_for(source, cfg.get("sleep_indoor_temp_entity"))
+            reading = _read(role, source, indoor_hours)
+            if role == ROLE_INDOOR_SLEEP and not reading.known:
+                reading = _read(ROLE_INDOOR_DAY, None, indoor_hours)
+            return reading
+        except Exception:  # noqa: BLE001 - a decision input never raises; unknown = today's behaviour
+            _LOGGER.debug("dew point: could not read %s", signal, exc_info=True)
+            return DewPoint(None, reason="not_configured")
+
+    def _dew_point_fact(self, signal: str, now: datetime) -> DewPoint:
+        """The decision dew point for ``signal``: the 15-minute median of the same source with the current reading,
+        and the humidity source it came from (Issue #1690). Pure read."""
+        history = self.__dict__.get("_dew_point_history")
+        return decision_dew_point(
+            self._read_dew_point(signal, now), history if isinstance(history, DewPointHistory) else None, signal, now
+        )
+
+    def _sample_humidity_facts(self, now: datetime) -> None:
+        """The 5-minute dew-point sample (Issue #1690): event loop only, the one writer of the dew-point state.
+
+        Warms the device lookups the pure readers use, notes sensors coming back from unavailable (the
+        ``paired_glitch`` "first reading after unavailable" rule for entities without a listener), stores one sample
+        per signal (a lasting unknown forgets the old samples, a momentary glitch keeps them) and steps the humid
+        latches (``humidity_facts.LATCH_SPECS``; none yet). Logs at DEBUG only: nothing is decided here.
+        """
+        watch = self._reconnect_watch_for()
+        history = self.__dict__.get("_dew_point_history")
+        if not isinstance(history, DewPointHistory):
+            history = DewPointHistory(timedelta(minutes=HUMIDITY_MEDIAN_WINDOW_MINUTES))
+            self._dew_point_history = history
+        for role in (ROLE_INDOOR_DAY, ROLE_INDOOR_SLEEP, ROLE_OUTDOOR):
+            chosen, sources, fallback = self._humidity_role_inputs(role)
+            exclude = role != ROLE_OUTDOOR
+            watched: list[str] = [e for e in (chosen, fallback) if isinstance(e, str) and e]
+            for eid in sources:
+                if isinstance(eid, str) and eid:
+                    watched.append(eid)
+                    watched.extend(self._companion_sensors(eid, "humidity", exclude))
+            if isinstance(chosen, str) and chosen:
+                watched.extend(self._companion_sensors(chosen, "temperature", exclude))
+            for eid in dict.fromkeys(watched):
+                watch.observe(eid, self.hass.states.get(eid))
+        dew_points: dict[str, float | None] = {}
+        for signal in (SIGNAL_INDOOR, SIGNAL_OUTDOOR):
+            reading = self._read_dew_point(signal, now)
+            if reading.known and reading.dp_f is not None:
+                history.add(signal, now, reading.dp_f, reading.humidity_source)
+            elif reading.reason != "glitch":
+                history.clear(signal)
+            dew_points[signal] = decision_dew_point(reading, history, signal, now).dp_f
+            _LOGGER.debug(
+                "Dew point sample: signal=%s dp_f=%s reason=%s humidity=%s temperature=%s",
+                signal,
+                f"{reading.dp_f:.2f}" if reading.dp_f is not None else "unknown",
+                reading.reason,
+                reading.humidity_source,
+                reading.temp_source,
+            )
+        self._humid_latch_state = update_latches(LATCH_SPECS, dew_points, self.__dict__.get("_humid_latch_state") or {})
 
     def _humidity_source_kind(self, role: str, source: str | None, chosen: str | None) -> str | None:
         """Code of the kind of a humidity source (Issue #1455): ``chosen``, ``weather_service``, ``thermostat`` or
@@ -8672,11 +8858,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def engine_facts(self, now: datetime) -> EngineFacts:
         """The frozen snapshot of this coordinator's facts for a decision at ``now`` (Issue #1443)."""
+        latches = self.__dict__.get("_humid_latch_state")
+        dew_point = getattr(self, "_dew_point_fact", None)  # getattr: test stubs that borrow only this builder
+        indoor = dew_point(SIGNAL_INDOOR, now) if callable(dew_point) else None
+        outdoor = dew_point(SIGNAL_OUTDOOR, now) if callable(dew_point) else None
         return build_engine_facts(
             now,
             hourly_forecast=getattr(self, "_hourly_forecast_temps", None),
             outdoor_history=getattr(self, "_outdoor_temp_history", None),
             tou_av=getattr(self, "_tou_av_window", None),
+            # Issue #1690: the filtered dew points and the humid latches (no decision reads them yet).
+            indoor_dew_point_f=getattr(indoor, "dp_f", None),
+            outdoor_dew_point_f=getattr(outdoor, "dp_f", None),
+            humid_latches=frozenset(k for k, v in latches.items() if v) if isinstance(latches, dict) else None,
+            indoor_dew_point_source=getattr(indoor, "humidity_source", None)
+            if getattr(indoor, "known", False)
+            else None,
+            outdoor_dew_point_source=(
+                getattr(outdoor, "humidity_source", None) if getattr(outdoor, "known", False) else None
+            ),
         )
 
     def control_house_stepper(self) -> Any:
@@ -9009,8 +9209,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             cache = getattr(self, "_companion_sensors_cache", None)
 
             def _cached(eid: str, exclude: bool) -> tuple[str, ...]:
-                hit = cache.get((eid, "humidity", bool(exclude))) if isinstance(cache, dict) else None
-                return hit[0] if hit else ()
+                return self._cached_companions(eid, "humidity", exclude)
 
             for role in roles:
                 chosen, sources, fallback = self._humidity_role_inputs(role)

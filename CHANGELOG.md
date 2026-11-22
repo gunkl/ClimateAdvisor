@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.68] — 2026-11-22
+
+### Fixed
+- **Security scan false positive cleared (#1681):** a test assertion in `tests/i18n_dashboard.mjs` read to CodeQL like an incomplete HTML sanitizer. It is now a word-list check that is no looser than before. Test only: nothing changes in your house.
+
 ## [0.9.67] — 2026-11-21
 
 ### Added

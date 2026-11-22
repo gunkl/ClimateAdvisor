@@ -134,7 +134,7 @@ Stage 1 adds the file and the `<script>` tags only; no page text uses `t()` yet,
 
 ## Cache busting
 
-The panel registers `entry.html?v=<hash>`. `_panel_asset_bytes` (`__init__.py`) hashes `entry.html`, `index.html`, `new_dashboard.html`, `i18n.js`, `intl-messageformat.iife.js` and every `*.json` under `frontend/i18n/` in sorted order, so a corrected translation changes the hash. The `StaticPathConfig` registration is unchanged. `tests/test_i18n_panel_wiring.py` pins that a changed or added catalog file changes the hash. Catalogs are loaded once in `async_setup_entry` (`await hass.async_add_executor_job(i18n.load_catalogs)`, skipped when `catalogs_loaded()`).
+The panel registers `entry.html?v=<hash>`. `_panel_asset_bytes` (`__init__.py`) hashes `entry.html`, `index.html`, `new_dashboard.html`, `i18n.js`, `intl-messageformat.iife.js` and every `*.json` under `frontend/i18n/` in sorted order, so a corrected translation changes the hash. The `StaticPathConfig` registration is unchanged. `tests/test_i18n_panel_wiring.py` pins that a changed or added catalog file changes the hash. Catalogs are loaded once in `async_setup`, before any zone is set up (`await hass.async_add_executor_job(i18n.ensure_catalogs)`); `async_setup_entry` repeats the call, a no-op by then. `ensure_catalogs` is thread-safe: Home Assistant sets zones up concurrently, so the attempt counts as done only once it finishes, and a second caller waits for a load in progress instead of rendering with empty catalogs (Issue #1673; `tests/test_i18n_startup_order_1673.py`). Nothing in production drops the catalogs, not even unloading the last zone.
 
 ## Conformance
 

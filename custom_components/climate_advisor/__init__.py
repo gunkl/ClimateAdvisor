@@ -134,7 +134,11 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     registered by the first zone's setup and removed with the last zone, so a call made while no zone was
     loaded failed as "service not found". Now the call exists and fails with a clear, translated "zone not
     loaded" error instead (services.py).
+
+    Issue #1673: the translation catalogs are read here, once, before any zone is set up. Home Assistant sets
+    the zones up concurrently right after this returns, and each zone's first refresh renders text.
     """
+    await hass.async_add_executor_job(i18n.ensure_catalogs)
     async_setup_services(hass)
     return True
 
@@ -607,9 +611,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ClimateAdvisorConfigEntr
     log_capture.install(hass)
 
     # Issue #1341: read the translation catalogs (blocking file reads) once, in the executor, before
-    # anything renders. ``ensure_catalogs`` never raises, records the attempt and is a no-op afterwards, so a
-    # failed load (bad JSON, missing file, mismatched index) never stops setup and never retries inside the event
-    # loop: rendering then falls back (English, then the key).
+    # anything renders. Issue #1673: ``async_setup`` already loaded them before any zone; this call is a no-op
+    # then, and waits (never skips) if another zone's load is still running. ``ensure_catalogs`` never raises,
+    # records the attempt and is a no-op afterwards, so a failed load (bad JSON, missing file, mismatched index)
+    # never stops setup and never retries inside the event loop: rendering then falls back (English, then the key).
     await hass.async_add_executor_job(i18n.ensure_catalogs)
 
     # Issue #812: one-time migration off the old domain-wide (unscoped)

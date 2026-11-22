@@ -50,6 +50,7 @@ import logging
 import math
 import os
 import re
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, localcontext
@@ -1334,7 +1335,8 @@ _CATALOGS: dict[str, dict[str, str]] = {}
 _LOADED_FROM: Path | None = None
 _STRICT_OVERRIDE: bool | None = None
 _WARNED: set[str] = set()
-_ENSURE_TRIED = False
+_ENSURE_TRIED = False  # True once an attempt has FINISHED (loaded or failed), never while one runs
+_ENSURE_LOCK = threading.Lock()
 
 
 def default_i18n_dir() -> Path:
@@ -1367,17 +1369,28 @@ def ensure_catalogs() -> None:
 
     A no-op once loaded, and also after a failed attempt (so a failed setup load never triggers blocking file
     reads again from inside the event loop). Rendering with the catalogs missing stays non-raising (English
-    fallback, then the key). Production calls it once from an executor job in ``async_setup_entry``; headless
-    entry points (the simulation harness, tools, tests) call it once up front.
+    fallback, then the key). Production calls it from an executor job in ``async_setup`` (once, before any zone
+    is set up) and again in ``async_setup_entry`` (a no-op by then); headless entry points (the simulation
+    harness, tools, tests) call it once up front.
+
+    Thread-safe (Issue #1673): zones are set up concurrently, each in its own executor thread. The attempt is
+    marked done only after it finishes, under a lock, so a second caller waits for a load in progress instead
+    of returning to render with empty catalogs.
     """
     global _ENSURE_TRIED  # noqa: PLW0603
     if _LOADED_FROM is not None or _ENSURE_TRIED:
         return
-    _ENSURE_TRIED = True
-    try:
-        load_catalogs()
-    except Exception as err:  # noqa: BLE001 - any failure (bad JSON, missing file, mismatched index) is non-fatal
-        _LOGGER.error("Climate Advisor could not load its translation catalogs (%s); continuing with fallbacks", err)
+    with _ENSURE_LOCK:
+        if _LOADED_FROM is not None or _ENSURE_TRIED:
+            return
+        try:
+            load_catalogs()
+        except Exception as err:  # noqa: BLE001 - any failure (bad JSON, missing file, mismatched index) is non-fatal
+            _LOGGER.error(
+                "Climate Advisor could not load its translation catalogs (%s); continuing with fallbacks", err
+            )
+        finally:
+            _ENSURE_TRIED = True
 
 
 def catalogs_loaded() -> bool:

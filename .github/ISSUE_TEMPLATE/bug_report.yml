@@ -1,0 +1,75 @@
+name: Bug report
+description: Climate Advisor did something wrong in your home, or you think it would.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Data from your house helps far more than a proposed fix: please attach what you have.
+        No data yet? You can still file it as a **hypothesis**. See [CONTRIBUTING: Evidence or hypothesis](https://github.com/gunkl/ClimateAdvisor/blob/main/CONTRIBUTING.md#evidence-or-hypothesis-say-which).
+  - type: dropdown
+    id: evidence_kind
+    attributes:
+      label: Evidence or hypothesis?
+      options:
+        - "Evidence: I saw it happen and attached data"
+        - "Evidence: reproduced in the simulation harness"
+        - "Hypothesis: from reading code or docs, no data yet"
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: What did the person at home experience?
+      description: In plain words, what the house did. For example, "the AC ran for an hour with the windows open".
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations:
+      required: true
+  - type: input
+    id: when
+    attributes:
+      label: When did it happen?
+      description: Date, time and time zone. Leave empty for a hypothesis.
+  - type: input
+    id: ca_version
+    attributes:
+      label: Climate Advisor version
+      description: HACS → Climate Advisor, or the dashboard's Debug tab.
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      description: Settings → About.
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Thermostat, fan hardware and fan mode
+      placeholder: "Thermostat model, whole-house fan on a switch (or none), fan mode whole_house_fan or hvac_fan"
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Diagnostics, logs and other evidence
+      description: |
+        Drag files here. Diagnostics: Settings → Devices & Services → Climate Advisor → ⋮ → Download diagnostics (or the dashboard's Debug tab). Logs: Debug tab → Download logs.
+        For a harness reproduction, give the command, seed or scenario.
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Where did you read it, and what would confirm or rule it out?
+      description: For a hypothesis. The doc section, file and function, and the data that would settle it.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I checked the scope facts (claude.md) and the closed wontfix issues for this behaviour.
+          required: true

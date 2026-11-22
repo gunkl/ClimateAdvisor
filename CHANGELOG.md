@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.69] — 2026-11-22
+
+### Changed
+- #1683 (contributing; nothing changes in your house):
+  - **Start with an issue.** A bug fix PR can follow its issue straight away, as a proposed fix. A feature or enhancement needs `approach agreed` on its issue first.
+  - **Evidence or hypothesis.** Bug reports say which they are: attached data, or a labelled hypothesis with what would confirm it.
+  - **New issue forms and a PR template.** The PR template asks for the project's analysis (evidence, origin, states, blast radius, mirror check, verification), and CONTRIBUTING.md has a new section on how we diagnose, fix and verify, with instructions to give your AI assistant.
+  - **An automatic submission check** comments on each new issue and PR, at most twice, with what's missing or that it's complete.
+
 ## [0.9.68] — 2026-11-22
 
 ### Fixed

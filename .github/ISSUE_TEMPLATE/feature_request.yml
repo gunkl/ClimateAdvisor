@@ -1,0 +1,31 @@
+name: Feature or enhancement
+description: Something Climate Advisor should do. The approach is agreed here before any pull request.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A feature or enhancement pull request needs the approach agreed on this issue first (the `approach agreed` label). See [CONTRIBUTING: Start with an issue](https://github.com/gunkl/ClimateAdvisor/blob/main/CONTRIBUTING.md#start-with-an-issue).
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What should the person at home get?
+      description: The outcome in plain words, not the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you handle it today?
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: Optional. How you would build it, and what it would touch.
+  - type: dropdown
+    id: implement
+    attributes:
+      label: Would you like to implement it?
+      options:
+        - "Yes, once the approach is agreed"
+        - "No"

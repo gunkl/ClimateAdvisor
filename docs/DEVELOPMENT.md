@@ -237,8 +237,22 @@ refused), **usage limit**, **API unavailable**, **turn limit** or
 **unknown**. It writes that to the job summary, comments it on the nightly-failure issue and labels the issue
 `needs-human`. `claude.yml` (the `@claude` responder) runs the same script on failure, writing only to its job summary.
 
-**How the workflows log in to Claude.** Both Claude workflows use Anthropic workload identity federation instead of a
-stored token. Each job has `id-token: write`; the action requests a GitHub OIDC token and exchanges it for an Anthropic
+### Submission check (`submission-check.yml`, Issue #1683)
+
+Reads each new issue and pull request and posts one comment: what's missing and how to complete it, or that the submission is complete. It sets `needs-info` / `submission: complete`, and `hypothesis` when the bug form says so. The rules for contributors are in [CONTRIBUTING, The automatic submission check](../CONTRIBUTING.md#the-automatic-submission-check); the logic is `.github/scripts/submission_check.py`, tested by `tests/test_submission_check_1683.py`.
+
+| Job | Permissions | Does |
+|---|---|---|
+| `gate` | contents: read | From the event payload alone: skips the owner, Dependabot, `github-actions[bot]`, `nightly-failure` issues and closed items. Takes the opening, an edit (body or title) or push by the author, a reply by the author, or `/recheck` by the owner. |
+| `settle` | none | Waits 5 minutes. Concurrency group per submission with cancel-in-progress, so a newer change restarts the wait. |
+| `prepare` | contents, issues, pull-requests: read | Fetches the submission as it is now. Decides the round: two at most, counted from the hidden `<!-- submission-check round=… ai=… kind=… author=… -->` marker in its own comments; `/recheck` adds one. Runs the deterministic checks, and works out the AI rate limits from the markers of the last 30 days of its comments (`ai=1`): 10 distinct submissions a day overall; per contributor, 3 a day and 30 a month of each kind. A submission counts once. Writes `check.json` and `submission.json`. |
+| `ai-review` | contents: read, id-token: write | Only when the limits allow. Sonnet through `claude-code-action`, given the job's read-only `GITHUB_TOKEN` and the tools `Read, Glob, Grep, Write`. The submission is only in `submission.json` and is never interpolated into the prompt. Writes `ai_review.json`. `continue-on-error`. |
+| `post` | issues, pull-requests: write | Runs no AI. Composes the comment, sanitises the AI text (mentions broken, off-repo links removed, 500 characters per finding, at most 6 findings), posts it and sets the labels. |
+
+No job checks out or runs PR code: `pull_request_target` runs the workflow from `main`.
+
+**How the workflows log in to Claude.** The Claude workflows use Anthropic workload identity federation instead of a
+stored token (the submission check's federation use needs this workflow allowed by the rule too). Each job has `id-token: write`; the action requests a GitHub OIDC token and exchanges it for an Anthropic
 access token that expires in about 10 minutes. The federation rule, organization, service account and workspace IDs in
 the workflow are identifiers, not credentials: what the rule allows (this repository and its workflows) is configured
 in the Claude Console. No Claude secret is stored in the repository or its Actions secrets.

@@ -2,7 +2,85 @@
 
 Climate Advisor runs real heating, cooling and fans in someone's home. Every change is judged by what the person living there experiences: comfort, cost and trust that the house does what the briefing says. This guide collects the project's existing rules in one place. Where a rule is written down in more detail elsewhere, the section links to it; that document stays the authority.
 
-Contents: [Branches](#branches-and-where-a-change-goes) · [Setup](#development-setup) · [Tests](#running-the-tests) · [Goldens](#golden-scenarios-and-the-simulation-harness) · [Issues](#writing-an-issue) · [Docs and design rules](#docs-first-and-the-design-rules) · [Changelog and versions](#changelog-version-and-fix-history) · [PR checklist](#pull-request-checklist)
+Contents: [Issue first](#start-with-an-issue) · [Evidence or hypothesis](#evidence-or-hypothesis-say-which) · [How we fix](#how-we-diagnose-fix-and-verify) · [Automatic check](#the-automatic-submission-check) · [Branches](#branches-and-where-a-change-goes) · [Setup](#development-setup) · [Tests](#running-the-tests) · [Goldens](#golden-scenarios-and-the-simulation-harness) · [Issues](#writing-an-issue) · [Docs and design rules](#docs-first-and-the-design-rules) · [Changelog and versions](#changelog-version-and-fix-history) · [PR checklist](#pull-request-checklist)
+
+## Start with an issue
+
+**Every pull request links an issue.** What has to happen before the PR depends on the kind of change:
+
+| Change | Before you open a PR |
+|---|---|
+| **Bug fix** | Open the bug issue with its evidence, or a labelled hypothesis ([below](#evidence-or-hypothesis-say-which)). You can then open the PR straight away: it's a **proposed fix**, reviewed together with the issue. The analysis in the PR template is still required, and the data in the issue counts for more than the fix. |
+| **Feature or enhancement** | Open the issue and **agree the approach first**. Wait until the issue has the `approach agreed` label. A feature PR without it is asked to settle the approach in the issue first. |
+| **Typo, broken link, translation fix** | No issue needed. |
+
+In this project the fix is usually the easy part. Most of the work is finding out what the house actually did, why, and what else the same cause touches. The issue and the PR template exist for that work, and [How we diagnose, fix and verify](#how-we-diagnose-fix-and-verify) describes it.
+
+## Evidence or hypothesis: say which
+
+Every bug report is one of two kinds, and the issue form asks which.
+
+**Evidence-backed:** you saw it happen, and you attach what shows it. Data beats a proposed fix: a report with diagnostics and logs and no fix is more useful than a fix with no data.
+
+- Diagnostics for the zone: **Settings → Devices & Services → Climate Advisor → ⋮ → Download diagnostics**, or the dashboard's Debug tab.
+- Logs covering the time it happened (Debug tab → **Download logs**). For more detail, turn on **Enable debug logging**, reproduce the problem, then turn it off.
+- When it happened (date, time and time zone), what you expected, what the house did, and anything you did yourself (changed the setpoint, opened a window, switched the fan).
+- Climate Advisor and Home Assistant versions, the thermostat and fan hardware, and the fan mode.
+- If you have them: a screenshot of the dashboard chart, the AI Investigator report, or the household-promise misses on the Analysis tab.
+- A reproduction in the [simulation harness](#golden-scenarios-and-the-simulation-harness) also counts as evidence: a generated day (`python tools/simulate.py --generate-day N`) or a scenario in `tools/simulations/pending/` that shows the behaviour through the real engine.
+
+**Hypothesis:** you think something is wrong, but have no data from a real house or the harness that shows it. Reading the code and spotting a likely bug is a hypothesis. It's welcome, but label it as one (the form's "Hypothesis" choice sets the `hypothesis` label) and include:
+
+- what you think happens, and what the person at home would experience;
+- where you read it (the doc section, file and function);
+- what data would confirm it or rule it out.
+
+Don't present a hypothesis as a finding. Many things that look like bugs from the code are deliberate decisions: check the [scope facts](claude.md#scope-facts--check-these-before-calling-anything-a-bug-issue-1197) and the closed `wontfix` issues.
+
+## How we diagnose, fix and verify
+
+Every fix in this project follows this method, whether a person or an AI assistant does the work. The [pull request template](.github/pull_request_template.md) asks you to show each step.
+
+1. **Occupant first.** Start with what the person living in the home experiences ("the AC runs while outdoor air would have cooled the house for free"), then the mechanism. A finding that changes nothing for the occupant (duplicate commands, log noise) isn't a bug here.
+2. **Evidence before hypothesis, docs before code.** Look at the logs and recorded data first. Then read the relevant docs: start at the Anchors table in [00-PROJECT-INSTRUCTIONS](docs/00-PROJECT-INSTRUCTIONS.md), then the module's brief and spec. Open source files last, to test a specific hypothesis.
+3. **Check it isn't already decided.** Read the [scope facts](claude.md#scope-facts--check-these-before-calling-anything-a-bug-issue-1197). Search open and closed issues (including `wontfix`), `CHANGELOG.md`, and `python tools/fix_search.py "<topic>"`.
+4. **Find where it came from.** Run `git log -p -S "<key fragment>" -- <file>`. Then say which it is:
+   - a **regression**: name the commit or PR, and the test that would have caught it;
+   - an **original design gap**: it has always worked this way.
+5. **Map the states, not just before and after.** Make a table of the conditions involved, for example mode × fan × window × automation on/off × in grace. Include edge cases, intermediate states and controls, and say what happens in each, today and with the fix.
+6. **Measure the blast radius across the whole repository.** Grep each changed symbol across `custom_components/climate_advisor/`, `tools/`, `tests/`, `tests_ha/` and `docs/`, not just the files you think are related, and list every writer and every reader. A search limited to the obvious files reliably undercounts.
+7. **Mirror check.** Most mechanisms come in pairs (start/stop, open/close, enter/exit). When the root cause is a narrow pattern (an unchecked result, an unguarded flag), check the opposite path for the same defect. Report what you find as its own item: fix it in the same PR if it's small, otherwise file it ([claude.md, Symmetry/Mirror Check](claude.md#symmetrymirror-check-critical--before-closing-any-bug-fix)).
+8. **Fix at the right layer, for every household.** Fix the cause, not the symptom: a wrong check gets a fix to the check, not to the engine. Nothing should be tuned to one house. Keep the [design rules](#docs-first-and-the-design-rules): the boundary rule, one responsibility per module, logging and status coverage, translations.
+9. **Prove the test would catch it.** A new test must fail with the fix reverted and pass with it, and the PR must say you checked. Controls (cases the fix must not change) must pass for the right reason, not because some older code path happens to cover them. Then:
+   - run the unit tier;
+   - run the real-HA tier if you touched lifecycle, listeners, timers or persistence;
+   - for behaviour changes, run `python tools/simulate.py` and generated days for the area;
+   - for scenario work, answer the [three exercises](#the-three-exercise-protocol).
+10. **Keep the docs true.** If production now behaves differently from a spec or brief, update that doc in the same PR.
+
+## The automatic submission check
+
+A workflow (`.github/workflows/submission-check.yml`) reads every new issue and pull request and posts one comment. The comment either lists what's missing and how to complete it, or says the submission is complete. It helps you finish a submission; it never closes or blocks anything.
+
+- **When it runs:** at most twice per submission. The first time is when you open it. The second is after your first revision (an edit, a push or a reply). Each time it waits 5 minutes for further edits first. After that it stays quiet; the maintainer can comment `/recheck` to run it again.
+- **Labels:**
+  - `needs-info` while something is missing;
+  - `submission: complete` once nothing is missing;
+  - `hypothesis` when the issue form says so.
+- **What it checks:**
+  - **A script:**
+    - the form fields are filled in;
+    - the issue says whether it's evidence or a hypothesis;
+    - the PR links an issue, and for a feature that issue has `approach agreed`;
+    - the PR template sections are filled in;
+    - the version, changelog and fix-history entries are present.
+  - **An AI review (read-only):**
+    - does the submission start with the person at home;
+    - is a hypothesis presented as a finding;
+    - do the analysis sections say something real;
+    - does it match a closed `wontfix` issue, or duplicate another issue?
+- **Limits:** the AI review runs for at most 10 submissions a day across the project. Each contributor gets at most 3 issues and 3 PRs a day, and 30 of each a month. Past a limit, the script checks still run, and the comment says the AI review is paused.
+- **Skipped:** the maintainer's own submissions, Dependabot, and the nightly-failure issues.
 
 ## Branches and where a change goes
 
@@ -97,7 +175,7 @@ Any change to `tools/sim_harness/outcomes.py` (`production_outcome_at`, `product
 
 ## Writing an issue
 
-- **Start with the person at home.** The first sentence says what the occupant experiences ("the AC runs while free outdoor air would have cooled the house"), then the mechanism. The specs' "Occupant first:" paragraphs (for example in [household-promises-spec](docs/household-promises-spec.md)) show the style.
+- **Use the issue forms.** The bug form asks for what the person at home experienced, the evidence or hypothesis, the times, versions and hardware ([Evidence or hypothesis](#evidence-or-hypothesis-say-which)). The first sentence says what the occupant experiences, then the mechanism.
 - **Label severity** with one of the repository's labels, chosen by how likely it is to happen, how the household recovers and how long it lasts:
 
   | Label | Meaning (from the label) |
@@ -109,7 +187,6 @@ Any change to `tools/sim_harness/outcomes.py` (`production_outcome_at`, `product
 
 - **Check the scope facts first** ([claude.md, Scope Facts](claude.md#scope-facts--check-these-before-calling-anything-a-bug-issue-1197)): fan mode `both` is not supported; a door or window opening never pauses HVAC instantly (each sensor waits out its delay); changes made during the ~5-minute startup window are not tracked by design.
 - Every feature or fix has a tracking issue. If it is a sub-issue of an epic, also post a status comment on the epic when a phase ships.
-- **Mirror check before closing a fix:** most mechanisms come in pairs (open/close, start/stop). When a root cause is a narrow mechanical pattern, check the opposite path for the same defect and file or fix it; call it out separately, never as a deferred aside ([claude.md, Symmetry/Mirror Check](claude.md#symmetrymirror-check-critical--before-closing-any-bug-fix)).
 
 ## Docs first, and the design rules
 
@@ -138,9 +215,40 @@ Source: [claude.md, Release Process](claude.md#release-process-critical--must-fo
 
 [claude.md](claude.md) and [agents.md](agents.md) are the instructions for AI assistants on this repository. Two rules affect everyone: the human reviews and commits the changes, and nothing posted to GitHub (commits, PR descriptions, PR or issue comments) carries an AI attribution line.
 
+### Instructions for your AI assistant
+
+If an AI assistant writes or reviews your change, give it the instructions below. agents.md and claude.md hold the full rules. Parts of claude.md describe the maintainer's own tools, which you can't use: SSH to the live house, `tools/deploy.py`, `tools/ha_logs.py` and the live API. Use your own install's diagnostics and logs instead.
+
+```text
+You are working on Climate Advisor, a Home Assistant integration that controls real heating,
+cooling and fans in people's homes. Follow CONTRIBUTING.md, "How we diagnose, fix and verify".
+
+- Every change needs a GitHub issue first. For a bug, write the issue with its evidence
+  (diagnostics, logs, times) or a clearly labelled hypothesis; a fix PR may then follow as a
+  proposal. For a feature or enhancement, write no code until the issue has the
+  `approach agreed` label.
+- Start every finding with what the person at home experiences.
+- Look at logs and data before forming a hypothesis. Read docs/00-PROJECT-INSTRUCTIONS.md
+  (Anchors table) and the relevant brief and spec before opening source files.
+- Check the scope facts in claude.md, closed wontfix issues and CHANGELOG.md before calling
+  something a bug.
+- Find the origin with `git log -S`: a regression (name the commit) or an original design gap.
+- Build a state matrix of every relevant condition, including edge cases and controls.
+- Grep every changed symbol across the whole repository, and list every writer and reader.
+- Check the mirror path (start/stop, open/close, enter/exit) for the same defect, and report it
+  as its own item.
+- Every new test must fail with the fix reverted. Say so in the PR.
+- Never edit a golden scenario or tools/sim_harness/outcomes.py without the maintainer's
+  approval and a written justification.
+- Add no AI attribution lines to commits, PRs or comments.
+- Fill in every section of the pull request template.
+```
+
 ## Pull request checklist
 
-- [ ] There is an issue, and its number is in the branch, the commit and the PR title (`Fix #N:` / `Feat #N:`).
+- [ ] There is an issue (for a feature or enhancement, labelled `approach agreed`), and its number is in the branch, the commit and the PR title (`Fix #N:` / `Feat #N:`).
+- [ ] The description fills in every section of the [PR template](.github/pull_request_template.md): evidence, origin, states, blast radius, mirror check, verification.
+- [ ] New tests fail with the fix reverted; controls pass for the right reason.
 - [ ] The PR targets the right branch: `main` for current work, `0.8.x` only for a 0.8 maintenance fix.
 - [ ] The description starts with what the person at home gets.
 - [ ] `tools/validate.py`, `ruff check .` and `ruff format --check .` are clean.

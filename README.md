@@ -373,7 +373,7 @@ After a restart the zone starts even if a cloud thermostat is still loading, and
 
 1. **Download diagnostics** for the zone: **Settings → Devices & Services → Climate Advisor → ⋮ on the zone → Download diagnostics**, or **Download diagnostics** in the dashboard's Debug tab. API keys, the GitHub token, the notification service and the thermostat's serial number, MAC address and location are removed from the file.
 2. For a problem that builds up over hours, also use **Download logs** in the Debug tab. To get more detail, turn on **Enable debug logging** on the Climate Advisor integration page, reproduce the problem, then turn it off again.
-3. [Open an issue](https://github.com/gunkl/ClimateAdvisor/issues) with what you expected, what happened and when, and attach the files. Read them first if you want to check what they hold.
+3. [Open an issue](https://github.com/gunkl/ClimateAdvisor/issues/new/choose) with the bug form: what you expected, what happened and when, with the files attached. Read them first if you want to check what they hold. No data yet? You can still file it as a hypothesis ([CONTRIBUTING: Evidence or hypothesis](CONTRIBUTING.md#evidence-or-hypothesis-say-which)).
 
 The [debugging guide](docs/09-DEBUGGING-GUIDE.md) goes deeper, for developers and advanced users: SSH, container logs and the repository's tools.
 

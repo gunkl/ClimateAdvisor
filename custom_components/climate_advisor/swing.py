@@ -825,3 +825,47 @@ def within_thermostat_hysteresis(
         tol, _ = swing_tolerance(swing_cool_f)
         return thermostat_holds_direction("cool", thermostat_mode) and (indoor_f - ceiling_f) <= tol + eps
     return False
+
+
+def within_band_step_recovery(
+    indoor_f: float,
+    floor_f: float | None,
+    ceiling_f: float | None,
+    *,
+    prev_floor_f: float | None,
+    prev_ceiling_f: float | None,
+    seconds_since_step: float | None,
+    max_s: float,
+    thermostat_mode: Any,
+    setpoint_f: float | None,
+    swing_heat_f: Any,
+    swing_cool_f: Any,
+) -> bool:
+    """True while the room is only recovering from a band that just stepped toward it (Issue #1678, wake).
+
+    Occupant outcome: at wake the band steps from the sleep floor (66) to the awake floor (68) while the room is
+    still at the sleep floor; the thermostat closes that planned gap in minutes. Heat (below the floor) shown, cool
+    mirrors. ALL of: fewer than ``max_s`` seconds since the step; the floor rose (``floor_f > prev_floor_f``); the
+    thermostat holds that side (heat/heat_cool/auto); its setpoint is known and at or above the new floor (it was
+    told to warm the room); and the room is no further below the new floor than the step plus the thermostat swing
+    tolerance. It does NOT require the equipment to be running yet (the start lags the step by seconds). After
+    ``max_s``, with the thermostat Off, in the other mode, or set below the new edge, the plain rule applies.
+    """
+    if seconds_since_step is None or not 0.0 <= seconds_since_step < max_s:
+        return False
+    eps = 1e-6
+    if floor_f is not None and prev_floor_f is not None and indoor_f < floor_f:
+        step = floor_f - prev_floor_f
+        if step <= eps or not thermostat_holds_direction("heat", thermostat_mode):
+            return False
+        if setpoint_f is None or setpoint_f < floor_f - eps:
+            return False
+        return floor_f - indoor_f <= step + swing_tolerance(swing_heat_f)[0] + eps
+    if ceiling_f is not None and prev_ceiling_f is not None and indoor_f > ceiling_f:
+        step = prev_ceiling_f - ceiling_f
+        if step <= eps or not thermostat_holds_direction("cool", thermostat_mode):
+            return False
+        if setpoint_f is None or setpoint_f > ceiling_f + eps:
+            return False
+        return indoor_f - ceiling_f <= step + swing_tolerance(swing_cool_f)[0] + eps
+    return False

@@ -353,7 +353,7 @@ class TestRendererEdgeCases:
             },
             _UNIT,
         )
-        assert "80°F" in settings and "cool" in settings
+        assert "80.0°F" in settings and "cool" in settings  # Issue #1678: the reading to one decimal
 
     def test_paused_entity_with_minutes(self):
         assert "12" in m._cell_en(m._render_paused_entity_settings({"paused_entity": "door", "paused_minutes": 12.7}))

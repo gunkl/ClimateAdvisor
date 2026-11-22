@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.66] — 2026-11-21
+
+### Fixed
+- **No false comfort incidents on bedroom-sensor nights (#1678):** Climate Advisor no longer logs a comfort incident each time its bedroom loop starts the heat (or the AC), or at wake-up while the house warms to the day setting. The Activity log and the AI Investigator stop reporting a cold house that was only the planned setback. A loop at its limit, a stale bedroom sensor, the thermostat Off, or a furnace that never starts (or runs 45 minutes without bringing the room back) still raises one. The comfort score's violation minutes and the "no heating for hours" alert follow the same rule.
+- The "comfort kept" note gives the real distance outside the comfort range (for example 1.6 °F, not 0.6 °F), and no longer counts the bedroom loop's own raise of the thermostat as the thermostat being set wrong (#1678).
+- Comfort incident rows in the Activity table show the reading to one decimal, which sensor was judged (the bedroom at night), the tolerance used, and the target behind a setpoint the bedroom loop raised (#1678).
+
 ## [0.9.64] — 2026-11-21
 
 ### Fixed

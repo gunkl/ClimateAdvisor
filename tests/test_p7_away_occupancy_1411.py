@@ -112,7 +112,7 @@ class TestAwayFromTheOccupancyMode:
         cfg = PromiseConfig.from_config({"comfort_heat": 68, "comfort_cool": 76, "temp_unit": "celsius"})
         assert _hits(_journal([rd(m, occupancy="away") for m in range(5, 161, 5)]), 160, cfg) == []
         (h,) = _hits(_journal([rd(m, occupancy="home") for m in range(5, 161, 5)]), 160, cfg)
-        assert "1.7°C" in h.detail  # 3 F below, said in the occupant's unit
+        assert "2.2°C" in h.detail  # 4 F below the band edge (Issue #1678), said in the occupant's unit
 
     def test_a_change_of_occupancy_is_stored_at_once(self) -> None:
         j = PromiseJournal()
@@ -252,7 +252,7 @@ def test_negative_control_end_to_end_without_either_fix_the_false_miss_returns(m
 
     monkeypatch.setattr(PJ, "_leaves_window", lambda self, mark: None)
     hits, _ = _run_golden(classify_first=True, occupancy_on_readings=False, monkeypatch=monkeypatch)
-    assert len(hits) == 1 and "3.0°F" in hits[0].detail
+    assert len(hits) == 1 and "4.0°F" in hits[0].detail  # Issue #1678: depth past the band edge
 
 
 def test_home_scope_runs_the_same_rule() -> None:

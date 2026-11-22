@@ -78,6 +78,9 @@ class Reading:
     # apply in heat_cool / auto (strict default).
     setpoint_low_f: float | None = None
     setpoint_high_f: float | None = None
+    # Issue #1678: the comfort TARGET behind ``setpoint_f`` while the remote-sensor loop holds an offset (the thermostat
+    # is then set to target + offset in heat, target - offset in cool); None = no offset, ``setpoint_f`` is the target.
+    comfort_target_f: float | None = None
     fan_on: bool | None = None
     contacts_open: bool | None = None
     # Issue #1144: False while automation is switched off (observe-only). Climate Advisor commands nothing then,
@@ -816,3 +819,19 @@ def bump_promise_excused(
     bucket["minutes"] = round(float(bucket.get("minutes", 0.0)) + max(0.0, minutes), 1)
     row["last_ts"] = ts.isoformat()
     prune_promise_stats(stats, now)
+
+
+def engine_comfort_target_f(engine: Any) -> float | None:
+    """The comfort target behind the thermostat's setpoint while the remote loop holds an offset (Issue #1678).
+
+    The ONE reader production's promise reading and the simulation adapter share (``Reading.comfort_target_f``):
+    ``AutomationEngine.remote_comfort_target_f()``; None when there is no engine, no offset or the read fails.
+    """
+    getter = getattr(engine, "remote_comfort_target_f", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+    except Exception:  # noqa: BLE001 - a promise reading must never break a listener or a cycle
+        return None
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None

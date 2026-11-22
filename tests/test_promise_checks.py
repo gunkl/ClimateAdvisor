@@ -967,8 +967,9 @@ class TestP7ComfortKept:
     def test_celsius_user_sees_the_excess_in_celsius_but_evidence_stays_fahrenheit(self):
         cfg = PromiseConfig.from_config({"temp_unit": "celsius"})
         (h,) = hits_for("comfort_kept", make_input(_cold_house(60)), cfg)
-        assert dict(h.evidence)["worst_f"] == pytest.approx(3.0)
-        assert "1.7" in h.detail  # 3 F expressed as a delta in C
+        assert dict(h.evidence)["worst_f"] == pytest.approx(3.0)  # past the 1 F slack (evidence, unchanged)
+        assert dict(h.evidence)["depth_f"] == pytest.approx(4.0)  # Issue #1678: past the band edge
+        assert "2.2" in h.detail  # Issue #1678: the 4 F depth past the band edge, as a delta in C
 
 
 # ─────────────────────────────────────────────────────────────────────────────

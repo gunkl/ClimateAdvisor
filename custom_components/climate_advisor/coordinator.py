@@ -134,6 +134,7 @@ from .const import (
     COMFORT_STALL_MARGIN_F,
     COMFORT_STALL_REMINDER_SECONDS,
     COMFORT_STALL_SUSTAIN_SECONDS,
+    COMFORT_SWING_TOLERANCE_MAX_F,
     COMPANION_CONSISTENCY_F,
     COMPANION_SENSOR_OFF,
     COMPANION_SENSOR_REFRESH_SECONDS,
@@ -328,6 +329,7 @@ from .const import (
     V4_MASS_MAX_GAP_S,
     V4_PREDICT_HORIZON_HOURS,
     VERSION,
+    WAKE_STEP_GRACE_S,
     WINDOW_OPPORTUNITY_MAX_LOW_F,
     WINDOWS_RECOMMENDED_HYSTERESIS_F,
     is_availability_recovery,
@@ -434,6 +436,7 @@ from .promise_journal import (
     PromiseJournal,
     bump_promise_excused,
     bump_promise_stats,
+    engine_comfort_target_f,
     prune_promise_stats,
     sanitize_promise_stats,
 )
@@ -444,7 +447,7 @@ from .promise_journal import (
     Reading as _PromiseReading,
 )
 from .record_text import msg_text, split_msg_fields
-from .remote_offset import RemoteOffsetState
+from .remote_offset import RemoteLoopComfortView, RemoteOffsetState, loop_tolerates_deviation
 from .scheduler import (
     COST_TAG_HIGH,
     Schedule,
@@ -478,6 +481,7 @@ from .swing import (
     swing_tolerance,
     thermostat_holds_direction,
     whole_degree_resolution_f,
+    within_band_step_recovery,
     within_thermostat_hysteresis,
 )
 from .temperature import (
@@ -13989,6 +13993,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             setpoint_f=read_state_temp_f(cs, "temperature", unit) if cs is not None else None,
             setpoint_low_f=read_state_temp_f(cs, "target_temp_low", unit) if cs is not None else None,
             setpoint_high_f=read_state_temp_f(cs, "target_temp_high", unit) if cs is not None else None,
+            comfort_target_f=self._promise_comfort_target(),
             fan_on=self._get_fan_physical_state(),
             contacts_open=contacts,
             automation_enabled=bool(self._automation_enabled),
@@ -14005,6 +14010,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not isinstance(mode, str):
             mode = getattr(self, "_occupancy_mode", None)
         return mode if isinstance(mode, str) and mode else None
+
+    def _promise_comfort_target(self) -> float | None:
+        """The comfort target behind the setpoint while the remote loop holds an offset, for P7 (Issue #1678)."""
+        return engine_comfort_target_f(getattr(self, "automation_engine", None))
 
     def _record_promise_reading(self) -> None:
         try:
@@ -17667,14 +17676,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         modes = attrs.get("hvac_modes")
         self._note_equipment_activity(action, now=now)
 
-        # The same two tolerances as _is_tolerated_comfort_deviation (nat-vent OR swing), kept apart only so the
-        # exclusion names the right reason in the log (Issue #1258).
+        # The same tolerances as _is_tolerated_comfort_deviation (nat-vent OR the control tolerances: swing, the remote
+        # loop, the wake step), kept apart only so the exclusion names the right reason in the log (#1258, #1678).
         _band_known = indoor is not None and comfort_heat is not None and comfort_cool is not None
         nat_vent_tolerated = _band_known and self._is_nat_vent_tolerated_deviation(indoor, comfort_heat, comfort_cool)
         swing_tolerated = (
             _band_known
             and not nat_vent_tolerated
-            and self._is_within_thermostat_hysteresis(indoor, comfort_heat, comfort_cool)
+            and self._is_expected_control_deviation(indoor, comfort_heat, comfort_cool)
         )
         # Only a direction CA itself would act on counts: against the day's grain the margin
         # includes the day-type comfort-family deadband (see stall_margins).
@@ -17948,15 +17957,92 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             indoor, comfort_heat, comfort_cool, swing_heat, swing_cool, self._thermostat_hvac_mode()
         )
 
+    def _remote_loop_view(self) -> RemoteLoopComfortView | None:
+        """The engine's view of the remote-sensor outer loop for the comfort detectors (Issue #1678), or None."""
+        getter = getattr(getattr(self, "automation_engine", None), "remote_loop_comfort_view", None)
+        if not callable(getter):
+            return None
+        try:
+            view = getter()
+        except Exception:  # noqa: BLE001 - a comfort-gate read must never break the update cycle
+            return None
+        return view if isinstance(view, RemoteLoopComfortView) else None
+
+    def _is_loop_tolerated_deviation(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
+        """True if the remote-sensor outer loop is cycling or correcting this reading (Issue #1678).
+
+        Occupant outcome: the bedroom loop lets the room drift one measured swing past the sleep edge before it
+        raises the thermostat (its trigger reading is up to one sensor step further out), and the room then needs the
+        minutes the equipment runs. That is the loop holding the band, not failing to. ``remote_offset.
+        loop_tolerates_deviation`` is the rule (at the cap, gated, stale, Off, or a furnace that never starts: False).
+        """
+        return loop_tolerates_deviation(
+            indoor, comfort_heat, comfort_cool, self._thermostat_hvac_mode(), self._remote_loop_view()
+        )
+
+    def _thermostat_setpoint_f(self) -> float | None:
+        """The thermostat's single live setpoint (internal degF), or None when unreadable."""
+        ae = getattr(self, "automation_engine", None)
+        if ae is None:
+            return None
+        state = self.hass.states.get(ae.climate_entity)
+        if state is None:
+            return None
+        value = read_state_temp_f(state, "temperature", self.config.get("temp_unit", "fahrenheit"))
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    def _is_wake_step_recovery(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
+        """True while the room is only recovering from the band's step at wake time (Issue #1678).
+
+        Occupant outcome: at wake the band steps from the sleep floor to the awake floor while the house is still at
+        the sleep floor; the thermostat, set to the new edge, closes that planned gap in minutes. For at most
+        ``WAKE_STEP_GRACE_S`` (rule: ``swing.within_band_step_recovery``; it does not need the equipment running at
+        the wake instant itself). The cool side mirrors.
+        """
+        getter = getattr(getattr(self, "automation_engine", None), "wake_band_step", None)
+        if not callable(getter):
+            return False
+        try:
+            step = getter()
+        except Exception:  # noqa: BLE001 - a comfort-gate read must never break the update cycle
+            return False
+        if not (isinstance(step, tuple) and len(step) == 3 and isinstance(step[0], ComfortBand)):
+            return False
+        before, _after, since = step
+        swing_heat, swing_cool = self._learned_swings()
+        return within_band_step_recovery(
+            indoor,
+            comfort_heat,
+            comfort_cool,
+            prev_floor_f=before.floor,
+            prev_ceiling_f=before.ceiling,
+            seconds_since_step=since,
+            max_s=WAKE_STEP_GRACE_S,
+            thermostat_mode=self._thermostat_hvac_mode(),
+            setpoint_f=self._thermostat_setpoint_f(),
+            swing_heat_f=swing_heat,
+            swing_cool_f=swing_cool,
+        )
+
+    def _is_expected_control_deviation(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
+        """The control tolerances of the comfort gate (everything but nat-vent): the thermostat's own swing
+        (Issue #1258), the remote-sensor loop's cycle and correction, and the wake-step recovery (Issue #1678)."""
+        return (
+            self._is_within_thermostat_hysteresis(indoor, comfort_heat, comfort_cool)
+            or self._is_loop_tolerated_deviation(indoor, comfort_heat, comfort_cool)
+            or self._is_wake_step_recovery(indoor, comfort_heat, comfort_cool)
+        )
+
     def _is_tolerated_comfort_deviation(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
         """True if this out-of-band reading is expected behaviour, not a comfort failure.
 
         THE one gate for the incident scan, the ``comfort_violations_minutes`` accumulation and the stall alert:
-        nat-vent cycling tolerance (Issue #411) OR the thermostat's own swing (Issue #1258).
+        nat-vent cycling tolerance (Issue #411) OR the thermostat's own swing (Issue #1258) OR the remote-sensor
+        loop's cycle/correction OR the wake-step recovery (Issue #1678).
         """
         return self._is_nat_vent_tolerated_deviation(
             indoor, comfort_heat, comfort_cool
-        ) or self._is_within_thermostat_hysteresis(indoor, comfort_heat, comfort_cool)
+        ) or self._is_expected_control_deviation(indoor, comfort_heat, comfort_cool)
 
     def _hysteresis_incident_context(self, direction: str) -> dict[str, Any]:
         """Why a comfort incident fired despite the swing tolerance: the tolerance used for ``direction``.
@@ -17964,15 +18050,55 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ``direction`` is ``"heat"`` (under-temperature) or ``"cool"`` (over-temperature). Recorded in the
         incident payload (Issue #1258): ``swing_tolerance_f`` (degF delta, floored at 0.5, capped at 2.5), its source
         (``learned`` / ``default``, with `` (capped)`` when the cap bit) and whether the thermostat mode let it
-        apply at all.
+        apply at all. Issue #1678: ``tolerance_f`` / ``tolerance_kind`` name the tolerance that judged the reading:
+        ``remote_loop`` (the loop's measured swing + one sensor step, capped at 2.5), ``thermostat_swing`` or
+        ``fixed`` (0.5 F, the thermostat mode does not hold this side).
         """
         swing_heat, swing_cool = self._learned_swings()
         tol, source = swing_tolerance(swing_heat if direction == "heat" else swing_cool)
+        applied = thermostat_holds_direction(direction, self._thermostat_hvac_mode())
+        view = self._remote_loop_view()
+        if view is not None and view.mode == direction and applied:
+            kind = "remote_loop"
+            used = min(view.swing_f + view.sensor_step_f, COMFORT_SWING_TOLERANCE_MAX_F)
+        elif applied:
+            kind, used = "thermostat_swing", tol
+        else:
+            kind, used = "fixed", COMFORT_DEVIATION_FLOOR_F
         return {
             "swing_tolerance_f": round(tol, 3),
             "swing_tolerance_source": source,
-            "swing_tolerance_applied": thermostat_holds_direction(direction, self._thermostat_hvac_mode()),
+            "swing_tolerance_applied": applied,
+            "tolerance_f": round(used, 3),
+            "tolerance_kind": kind,
         }
+
+    def _indoor_incident_context(self) -> dict[str, Any]:
+        """Which sensor the comfort incident judged, and the comfort target behind the setpoint (Issue #1678).
+
+        ``indoor_source_name`` (the sensor's friendly name, as the Activity table's source-change rows already show
+        it), ``indoor_source_role`` (``sleep_sensor`` / ``finer_sensor`` / ``thermostat`` / ``dedicated_sensor``) and,
+        while the remote-sensor loop holds an offset, ``comfort_target_f`` (the target; ``last_commanded_setpoint_f``
+        is the raised value the thermostat was told).
+        """
+        ctx: dict[str, Any] = {}
+        try:
+            reading = self._get_indoor_temp_with_provenance()
+            entity = getattr(reading, "source_entity", None)
+            if isinstance(entity, str) and entity:
+                role = self._indoor_source_role(entity, reading)
+                name = self._indoor_friendly_name(entity)
+                if isinstance(role, str):
+                    ctx["indoor_source_role"] = role
+                if isinstance(name, str):
+                    ctx["indoor_source_name"] = name
+        except Exception:  # noqa: BLE001 - payload context must never block the incident
+            pass
+        getter = getattr(getattr(self, "automation_engine", None), "remote_comfort_target_f", None)
+        target = getter() if callable(getter) else None
+        if isinstance(target, (int, float)) and not isinstance(target, bool):
+            ctx["comfort_target_f"] = float(target)
+        return ctx
 
     def _detect_and_emit_incidents(self) -> None:
         """Scan recent event_log and state for noteworthy production incidents.
@@ -18096,6 +18222,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         ),
                         **self._thermostat_incident_context(),
                         **self._hysteresis_incident_context("cool"),
+                        **self._indoor_incident_context(),
                     },
                     comfort_heat=comfort_heat,
                     comfort_cool=comfort_cool,
@@ -18126,6 +18253,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         ),
                         **self._thermostat_incident_context(),
                         **self._hysteresis_incident_context("heat"),
+                        **self._indoor_incident_context(),
                     },
                     comfort_heat=comfort_heat,
                     comfort_cool=comfort_cool,

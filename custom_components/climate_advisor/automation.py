@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import contextvars
 import logging
+import math
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
@@ -129,6 +130,7 @@ from .const import (
     PEAK_DECLINE_MARGIN_F,
     REMOTE_OFFSET_EXIT_GRACE_S,
     REMOTE_OFFSET_LATENCY_EWMA_ALPHA,
+    REMOTE_SENSOR_STEP_SAMPLES,
     REVISIT_DELAY_SECONDS,
     SETPOINT_HOLD_TOLERANCE_F,
     SETPOINT_RETRY_DELAY_S,
@@ -136,6 +138,7 @@ from .const import (
     TIMER_BOUNDARY_SETTLE_SECONDS,
     TREND_THRESHOLD_MODERATE,
     TREND_THRESHOLD_SIGNIFICANT,
+    WAKE_STEP_GRACE_S,
 )
 from .desired_state import (
     MODE_SWITCH_DEDUPE_SECONDS,
@@ -295,6 +298,7 @@ from .record_text import MsgText, msg_of, msg_text
 from .remote_offset import (
     ClampLimit,
     RemoteContext,
+    RemoteLoopComfortView,
     RemoteLoopState,
     RemoteOffsetAction,
     RemoteOffsetGate,
@@ -305,6 +309,7 @@ from .remote_offset import (
     decide_remote_offset,
     decide_remote_offset_gate,
     max_magnitude_f,
+    sensor_step_from_values,
     startup_wait_s,
     step_f,
 )
@@ -2254,6 +2259,8 @@ class AutomationEngine:
         # #1194 (b) gap: the CLOSED (window open, no owner) plain-target re-sync already ran this CLOSED episode.
         self._remote_closed_resync_done: bool = False
         self._remote_write_failed_at: datetime | None = None  # the loop's own last write was not executed (back-off)
+        # Issue #1678: distinct recent remote readings (degF), to learn the remote sensor.s reading step.
+        self._remote_seen_values: list[float] = []
         # Issue #411: consecutive setpoint_rejected count for the current commanded value.
         # Reset to 0 whenever a setpoint is confirmed/accepted; incremented on each rejection.
         # On the 2nd+ consecutive rejection, the retry nudges the setpoint by ±1°F first to
@@ -7515,6 +7522,94 @@ class AutomationEngine:
             note=note,
         )
 
+    def _note_remote_reading(self, value_f: Any) -> None:
+        """Remember a distinct remote reading (degF) so the sensor's reading step is known (Issue #1678)."""
+        if not isinstance(value_f, (int, float)) or isinstance(value_f, bool) or not math.isfinite(value_f):
+            return
+        value = round(float(value_f), 2)
+        seen = self._remote_seen_values
+        if value in seen:
+            seen.remove(value)
+        seen.append(value)
+        del seen[:-REMOTE_SENSOR_STEP_SAMPLES]
+
+    def remote_comfort_target_f(self) -> float | None:
+        """The comfort TARGET behind the thermostat's setpoint while the loop holds an offset, else None (#1678).
+
+        While the outer loop holds a non-zero offset the thermostat is set to ``target + offset`` (heat) /
+        ``target - offset`` (cool), so a reader that judges "the thermostat is set at the band edge" (the P7 deadband
+        excuse, the incident row's "target vs commanded") must use the target, not the raised setpoint. A pure read.
+        """
+        applied = self._remote_offset_applied_f
+        target = self._remote_target_f
+        if not applied or applied <= 1e-6 or not isinstance(target, (int, float)) or isinstance(target, bool):
+            return None
+        return float(target)
+
+    def remote_loop_comfort_view(self) -> RemoteLoopComfortView | None:
+        """The loop for the comfort detectors (Issue #1678), or None when it is not acting on the room now.
+
+        None unless a FRESH remote reading supplies the indoor value, the gate is ``PROCEED`` (an owner, a pause, a
+        fan or an open window gates the loop: then the plain thermostat-swing rule judges the room) and the loop has
+        a heat/cool target. A pure read: nothing is decided or written here.
+        """
+        try:
+            if not self._remote_offset_in_play():
+                return None
+            ctx = self._remote_context()
+            mode, target = self._remote_target_mode, self._remote_target_f
+            if ctx is None or not ctx.fresh or mode not in ("heat", "cool") or target is None:
+                return None
+            if self._remote_offset_gate() is not RemoteOffsetGate.PROCEED:
+                return None
+            now = dt_util.now()
+            return RemoteLoopComfortView(
+                mode=mode,
+                remote_value_f=float(ctx.value_f),
+                swing_f=self._remote_swing_f(mode),
+                sensor_step_f=sensor_step_from_values(self._remote_seen_values),
+                offset_f=float(self._remote_offset_applied_f or 0.0),
+                cap_f=self._remote_offset_cap_for(target, mode),
+                seconds_since_raise=seconds_since(self._remote_raise_at, now=now) if self._remote_raise_at else None,
+                wait_s=startup_wait_s(self._remote_startup_latency_s),
+                equipment_active=self._live_hvac_action() == ("heating" if mode == "heat" else "cooling"),
+            )
+        except Exception:  # noqa: BLE001 - a read for the comfort detectors must never break the update cycle
+            _LOGGER.debug("Remote loop comfort view unavailable", exc_info=True)
+            return None
+
+    def wake_band_step(self, now: datetime | None = None) -> tuple[ComfortBand, ComfortBand, float] | None:
+        """``(before, after, seconds_since_wake)`` within ``WAKE_STEP_GRACE_S`` after today's wake time (#1678).
+
+        ``before`` is the band resolved one minute before wake (the sleep band), ``after`` the band in force now.
+        None outside that window, with no classification, or when the wake time is unset. A pure read.
+        """
+        c = self._current_classification
+        wake = self.config.get("wake_time")
+        if c is None or not wake:
+            return None
+        now = now or dt_util.now()
+        try:
+            parts = str(wake).split(":")
+            wake_dt = now.replace(hour=int(parts[0]), minute=int(parts[1]), second=0, microsecond=0)
+        except ValueError, IndexError, TypeError:
+            return None
+        since = seconds_since(wake_dt, now=now)
+        if not 0.0 <= since < WAKE_STEP_GRACE_S:
+            return None
+        try:
+            before = resolve_active_band(
+                c,
+                self.config,
+                occupancy_mode=self._occupancy_mode,
+                now=wake_dt - timedelta(minutes=1),
+                tou_expansion_f=self._active_tou_av_window().expansion_f,
+            )
+        except Exception:  # noqa: BLE001 - a read for the comfort detectors must never break the update cycle
+            _LOGGER.debug("Pre-wake band unavailable", exc_info=True)
+            return None
+        return before, self._resolved_comfort_band(c), since
+
     def _remote_offset_in_play(self) -> bool:
         """A remote sensor is configured, or a context / an offset is still outstanding (an exit left to clear).
 
@@ -7687,6 +7782,8 @@ class AutomationEngine:
         now = dt_util.now()
         ctx = self._remote_context()
         fresh = ctx is not None and ctx.fresh
+        if fresh and ctx is not None:
+            self._note_remote_reading(ctx.value_f)
         self._sync_remote_context(ctx)
         gate, gate_reason = self._remote_offset_gate_and_reason()
         closed_resync = False

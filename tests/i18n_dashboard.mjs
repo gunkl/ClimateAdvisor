@@ -21,7 +21,10 @@ await check('pseudo-localisation keeps ICU syntax and brackets, accents and grow
   const p = CAI18N.pseudo('{n, plural, one {# step} other {# steps}} for {who}');
   assert.match(p, /^\[.*\]$/);
   assert.ok(p.includes('{n, plural, one {# ') && p.includes('} other {# ') && p.includes('{who}'), p);
-  assert.ok(!/[a-z]{3,}/.test(p.replace(/\{[^}]*\}/g, '').replace(/one|other|plural/g, '')), 'no plain ASCII words left: ' + p);
+  // Every run of 3+ plain ASCII letters outside the ICU placeholders must be an ICU keyword (a word list check, not
+  // string stripping: CodeQL js/incomplete-multi-character-sanitization flagged the old chained replace()).
+  const asciiWords = p.replace(/\{[^}]*\}/g, ' ').match(/[a-z]{3,}/g) || [];
+  assert.ok(asciiWords.every((w) => ['one', 'other', 'plural'].includes(w)), 'no plain ASCII words left: ' + p);
   assert.ok(p.includes('~'), 'padded for expansion: ' + p);
   // quoted braces and apostrophes survive, a skeleton is untouched
   assert.ok(CAI18N.pseudo("It's '{'x'}' {t, number, ::percent}").includes("'{'") );

@@ -305,7 +305,9 @@
           "fan_state_feedback": "Fan durum geri bildirimi güvenilir",
           "fan_remote_entity": "Fan RF kumanda olay varlığı",
           "fan_min_runtime_per_hour": "Saatlik asgari fan çalışma süresi",
-          "nat_vent_soft_start_enabled": "Doğal havalandırma yumuşak başlatma"
+          "nat_vent_soft_start_enabled": "Doğal havalandırma yumuşak başlatma",
+          "humid_air_guard_enabled": "Nemli hava koruması",
+          "humid_air_guard_ceiling_f": "Çiğ noktası sınırı"
         },
         "data_description": {
           "door_window_sensors": "İzlenecek ikili sensör varlıklarını seçin; birden çok sensörü bir araya getiren ikili sensör grupları da olabilir.",
@@ -321,7 +323,9 @@
           "fan_state_feedback": "Fan varlığınız veya durum sensörünüz gerçek motor durumunu bildiriyorsa (yalnızca gönderilen son komutu değil) bunu AÇIN. Emin değilseniz KAPALI bırakın; CA her döngüde fana istenen durumu komut olarak gönderir.",
           "fan_remote_entity": "Fiziksel RF duvar kumandasına basıldığında tetiklenen isteğe bağlı olay varlığı (ör. gunkl/quietcool-house-fan bellenimi). Kumandadan seçilen zamanlayıcı (1/2/4/8/12 saat) fan duraklatma süresini belirler. Devre dışı bırakmak için boş bırakın.",
           "fan_min_runtime_per_hour": "Saatte fan çalışma dakikası (0 = devre dışı, 60 = hep açık). Döngü saate hizalı değildir; HA'nın ne zaman başladığına göre doğal olarak kayar.",
-          "nat_vent_soft_start_enabled": "Etkinleştirildiğinde, bugünün dış sıcaklığının zirveyi geçtiği ve düştüğü doğrulandıktan sonra tüm ev fanı dış/iç sıcaklık eşitliğinde (dışarının belirgin biçimde serinlemesini beklemeden) başlayabilir; amaç toplu soğutma değil, hava hareketi ile çatı arası/ısıl kütle tahliyesidir. Varsayılan olarak açıktır; fanın yalnızca dışarı içeriden belirgin biçimde serin olduğunda çalışmasını istiyorsanız kapatın. Şu anda hiçbir nem/çiğlenme noktası sensörü bunu korumaz."
+          "nat_vent_soft_start_enabled": "Etkinleştirildiğinde, bugünün dış sıcaklığının zirveyi geçtiği ve düştüğü doğrulandıktan sonra tüm ev fanı dış/iç sıcaklık eşitliğinde (dışarının belirgin biçimde serinlemesini beklemeden) başlayabilir; amaç toplu soğutma değil, hava hareketi ile çatı arası/ısıl kütle tahliyesidir. Varsayılan olarak açıktır; fanın yalnızca dışarı içeriden belirgin biçimde serin olduğunda çalışmasını istiyorsanız kapatın. Nemli gecelerde nemli hava koruması başlamasını engeller.",
+          "humid_air_guard_enabled": "Açıkken, dış hava fazla nemli olduğu sürece tüm ev fanı ve doğal havalandırma başlamaz: çiğ noktası sınıra eşit veya üstündedir ya da dış hava nemlidir ve evin içinden belirgin şekilde daha nemlidir. Çalışan bir oturum durdurulmaz. Dış nem ölçümü yoksa hiçbir şey değişmez. Varsayılan olarak açık.",
+          "humid_air_guard_ceiling_f": "Evdeki nem ne olursa olsun, nemli hava korumasının fanı asla başlatmadığı dış çiğ noktası. Daha düşük değer daha çok geceyi engeller. Koruma bu değerin hemen altında bırakır."
         }
       },
       "occupancy": {

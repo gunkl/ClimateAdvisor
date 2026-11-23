@@ -1,0 +1,84 @@
+{
+  "name": "humid_air_1691_economizer_running_phase_change_kept",
+  "description": "An economizer that started on dry air keeps its running fan when it moves from cool-down to maintain after the air turns humid (start-only: the guard refuses starts, it never strands or stops a running fan)",
+  "source": "synthetic",
+  "issue": 1691,
+  "notes": [
+    "08:00 dew points: indoor 74F at 53.4% = 55.99F; outdoor 71F at 87.2% = 67.0F (at or above the 65F ceiling). Before 07:59 no humidity is known.",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: a guard applied to the cool-down -> maintain transition (not only to a start) makes 08:00 read an inactive economizer while its fan keeps running. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: a fan left running with no economizer session to stop it; or, the other way, a fan the occupant sees stop and start on a phase change."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Running economizer keeps its fan across a phase change on humid air",
+    "observed_behavior": "economizer maintain",
+    "expected_behavior": "economizer maintain"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "economizer_temp_delta": 3.0,
+    "natural_vent_delta": 3.0,
+    "aggressive_savings": false,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 90,
+      "today_low": 70,
+      "note": "Hot day."
+    },
+    {
+      "time": "2026-07-10T07:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": true,
+      "hour": 7,
+      "note": "No humidity known: cool-down engages, the fan starts."
+    },
+    {
+      "time": "2026-07-10T07:59:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 71.0,
+      "humidity": 53.4,
+      "outdoor_humidity": 87.2,
+      "note": "The outdoor air turns humid while the economizer runs."
+    },
+    {
+      "time": "2026-07-10T08:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 71,
+      "indoor_temp": 74,
+      "windows_open": true,
+      "hour": 8,
+      "note": "Indoor reached comfort: cool-down -> maintain (no new fan start)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "economizer_phase",
+      "phase": "cool-down",
+      "reason": "Dry (unknown) air: the economizer starts."
+    },
+    {
+      "at": "2026-07-10T08:00:00",
+      "expect": "economizer_final_phase",
+      "phase": "maintain",
+      "reason": "The running economizer moves to maintain; humidity does not stop or strand it."
+    },
+    {
+      "at": "2026-07-10T08:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": true,
+      "reason": "The economizer's fan is still running and still owned by an economizer session (not stranded)."
+    }
+  ]
+}

@@ -3545,6 +3545,27 @@ def _render_nat_vent_forecast_skip(p: dict, unit: str) -> tuple[Cell, Cell]:
 
 
 @_msg_renderer
+def _render_nat_vent_humid_skip(p: dict, unit: str) -> tuple[Cell, Cell]:
+    """Issue #1691 (#1507 H1): a fan start refused because the outdoor air is humid (one row per humid spell)."""
+    label = _m("nat_vent_skip_humid")
+    out = p.get("outdoor_dew_point")
+    with contextlib.suppress(TypeError, ValueError):
+        if p.get("reason") == "ceiling" and out is not None and p.get("ceiling") is not None:
+            label = _m(
+                "nat_vent_skip_humid_ceiling",
+                outdoor=_tp(float(out), unit, 1),
+                ceiling=_tp(float(p["ceiling"]), unit, 1),
+            )
+        elif p.get("reason") == "wetter_than_house" and out is not None and p.get("indoor_dew_point") is not None:
+            label = _m(
+                "nat_vent_skip_humid_wetter",
+                outdoor=_tp(float(out), unit, 1),
+                indoor=_tp(float(p["indoor_dew_point"]), unit, 1),
+            )
+    return label, ""
+
+
+@_msg_renderer
 def _render_nat_vent_floor_imminent_skip(p: dict, unit: str) -> tuple[Cell, Cell]:
     ttf = p.get("time_to_floor_hr")
     label = _m("nat_vent_skip_floor_imminent")
@@ -4110,6 +4131,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "sensor_all_closed": _render_sensor_all_closed,
     "nat_vent_forecast_skip": _render_nat_vent_forecast_skip,
     "nat_vent_floor_imminent_skip": _render_nat_vent_floor_imminent_skip,
+    "nat_vent_humid_skip": _render_nat_vent_humid_skip,
     "bedtime_setback_skipped": _render_bedtime_setback_skipped,
     "morning_wakeup_skipped": _render_morning_wakeup_skipped,
     "pre_cool_suppressed_nat_vent": _render_pre_cool_suppressed_nat_vent,

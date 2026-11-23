@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Попереднє охолодження} other {Підігрів}} до {target} перед періодом високого тарифу з {ends}, потім {after}",
   "status.hold.sentence_lc": "{mode, select, cool {попереднє охолодження} other {підігрів}} до {target} перед періодом високого тарифу з {ends}, потім {after}",
+  "status.humid_air.blocking_ceiling": "Вентилятор не запущено: надворі волого (точка роси {outdoor}, на порозі {ceiling} або вище)",
+  "status.humid_air.blocking_wetter": "Вентилятор не запущено: надворі волого (точка роси {outdoor}, вологіше, ніж у будинку, де {indoor})",
   "status.humidity_kind.chosen": "вибраний датчик",
   "status.humidity_kind.device_sensor": "датчик на пристрої",
   "status.humidity_kind.thermostat": "термостат",

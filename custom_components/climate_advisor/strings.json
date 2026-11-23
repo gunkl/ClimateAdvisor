@@ -305,7 +305,9 @@
           "fan_state_feedback": "Fan State Feedback Reliable",
           "fan_remote_entity": "Fan RF Remote Event Entity",
           "fan_min_runtime_per_hour": "Fan Minimum Runtime Per Hour",
-          "nat_vent_soft_start_enabled": "Nat-Vent Soft-Start"
+          "nat_vent_soft_start_enabled": "Nat-Vent Soft-Start",
+          "humid_air_guard_enabled": "Humid-Air Guard",
+          "humid_air_guard_ceiling_f": "Humid-Air Dew Point Ceiling"
         },
         "data_description": {
           "door_window_sensors": "Select any binary sensor entities to monitor, including binary sensor groups that bundle multiple sensors together.",
@@ -321,7 +323,9 @@
           "fan_state_feedback": "Turn ON if your fan entity or state sensor reports actual motor state (not just the last command sent). Leave OFF if unsure — CA will command the fan to the desired state on each cycle.",
           "fan_remote_entity": "Optional event entity that fires when the physical RF wall remote is pressed (e.g. from the gunkl/quietcool-house-fan firmware). A remote timer selection (1/2/4/8/12 hours) sets the fan override grace duration. Leave blank to disable.",
           "fan_min_runtime_per_hour": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). The cycle is not clock-aligned — it offsets naturally based on when HA started.",
-          "nat_vent_soft_start_enabled": "When enabled, the whole-house fan may start at outdoor/indoor temperature parity (not waiting for outdoor to be measurably cooler) once today's outdoor temperature is confirmed past its peak and declining — for air movement and attic/thermal-mass purge, not bulk cooling. On by default; disable if you only want the fan to run once outdoor is measurably cooler than indoor. No humidity/dew-point sensor guards this today."
+          "nat_vent_soft_start_enabled": "When enabled, the whole-house fan may start at outdoor/indoor temperature parity (not waiting for outdoor to be measurably cooler) once today's outdoor temperature is confirmed past its peak and declining — for air movement and attic/thermal-mass purge, not bulk cooling. On by default; disable if you only want the fan to run once outdoor is measurably cooler than indoor. On humid nights the Humid-Air Guard keeps it from starting.",
+          "humid_air_guard_enabled": "When on, the whole-house fan and natural ventilation do not start while the outdoor air is too humid: its dew point is at or above the ceiling, or the outdoor air is humid and clearly wetter than the house. A running session is not stopped. Without an outdoor humidity reading nothing changes. On by default.",
+          "humid_air_guard_ceiling_f": "Outdoor dew point at or above which the Humid-Air Guard never starts the fan, whatever the house's humidity. Lower blocks more nights. The guard releases just below it."
         }
       },
       "occupancy": {

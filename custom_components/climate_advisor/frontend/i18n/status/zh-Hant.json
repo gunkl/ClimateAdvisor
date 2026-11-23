@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {預冷} other {預熱}}至 {target}，持續到 {ends} 的電價尖峰時段，之後{after}",
   "status.hold.sentence_lc": "{mode, select, cool {預冷} other {預熱}}至 {target}，持續到 {ends} 的電價尖峰時段，之後{after}",
+  "status.humid_air.blocking_ceiling": "未啟動風扇：戶外潮濕（露點 {outdoor}，達到或超過上限 {ceiling}）",
+  "status.humid_air.blocking_wetter": "未啟動風扇：戶外潮濕（露點 {outdoor}，比室內的 {indoor} 更潮濕）",
   "status.humidity_kind.chosen": "您選擇的感測器",
   "status.humidity_kind.device_sensor": "裝置上的感測器",
   "status.humidity_kind.thermostat": "溫控器",

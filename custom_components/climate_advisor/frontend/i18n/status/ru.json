@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Предварительное охлаждение} other {Предварительный нагрев}} до {target} перед периодом высокого тарифа с {ends}, затем {after}",
   "status.hold.sentence_lc": "{mode, select, cool {предварительное охлаждение} other {предварительный нагрев}} до {target} перед периодом высокого тарифа с {ends}, затем {after}",
+  "status.humid_air.blocking_ceiling": "Вентилятор не запущен: на улице влажно (точка росы {outdoor}, на пороге {ceiling} или выше)",
+  "status.humid_air.blocking_wetter": "Вентилятор не запущен: на улице влажно (точка росы {outdoor}, влажнее, чем в доме, где {indoor})",
   "status.humidity_kind.chosen": "выбранный датчик",
   "status.humidity_kind.device_sensor": "датчик на устройстве",
   "status.humidity_kind.thermostat": "термостат",

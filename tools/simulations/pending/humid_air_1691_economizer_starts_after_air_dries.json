@@ -1,0 +1,91 @@
+{
+  "name": "humid_air_1691_economizer_starts_after_air_dries",
+  "description": "The economizer refused on humid air starts on its next check once the outdoor air dries",
+  "source": "synthetic",
+  "issue": 1691,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: an economizer guard that never released leaves 07:30 reading nat_vent_humid_skip and the fan off. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: window cooling would stay off all morning after the air dried."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Economizer starts once dry",
+    "observed_behavior": "cool-down at 07:30",
+    "expected_behavior": "cool-down at 07:30"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "economizer_temp_delta": 3.0,
+    "natural_vent_delta": 3.0,
+    "aggressive_savings": false,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 90,
+      "today_low": 70,
+      "note": "Hot day."
+    },
+    {
+      "time": "2026-07-10T06:59:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8,
+      "outdoor_humidity": 84.3,
+      "note": "Humid."
+    },
+    {
+      "time": "2026-07-10T07:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": true,
+      "hour": 7,
+      "note": "Refused."
+    },
+    {
+      "time": "2026-07-10T07:29:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8,
+      "outdoor_humidity": 45.9,
+      "note": "The outdoor air dries (dew point 50F)."
+    },
+    {
+      "time": "2026-07-10T07:30:00",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": true,
+      "hour": 7,
+      "note": "Next check, dry air."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "nat_vent_humid_skip",
+      "reason": "Refused on humid air."
+    },
+    {
+      "at": "2026-07-10T07:30:00",
+      "expect": "economizer_phase",
+      "phase": "cool-down",
+      "reason": "Dry air: cool-down engages."
+    },
+    {
+      "at": "2026-07-10T07:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": true,
+      "reason": "The fan runs."
+    }
+  ]
+}

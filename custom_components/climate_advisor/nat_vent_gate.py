@@ -34,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .const import CEILING_ESCALATION_SAVINGS_MARGIN_F, MIN_VIABLE_NAT_VENT_HOURS
+from .humidity_facts import humid_air_verdict
 
 FAN_MODE_DISABLED = "disabled"
 FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
@@ -240,6 +241,7 @@ def decide_nat_vent_soft_start_gate(inputs: NatVentSoftStartGateInputs) -> bool:
 NO_WORKING_FAN = "no_working_fan"
 FORECAST_PEAK_ABOVE_THRESHOLD = "forecast_peak_above_threshold"
 FLOOR_IMMINENT = "floor_imminent"
+HUMID_AIR = "humid_air"  # Issue #1691 (#1507 H1): the outdoor air is too humid to bring in
 
 
 def fan_available_for_nat_vent(fan_mode: str) -> bool:
@@ -263,6 +265,11 @@ class NatVentStartVetoInputs:
                             forecast data; the caller resolves the clock and the parsing)
       thermal_confidence -> ``thermal_model["confidence"]`` ("none" when there is no model)
       thermal_k_passive  -> ``thermal_model["k_passive"]``
+
+    Issue #1691 (#1507 H1), the humid-air guard: the decision's dew points and the humid latches from the facts
+    (``EngineFacts``), and the configured ceiling (``humidity_facts.humid_air_ceiling_from_config``). The defaults
+    (no dew point, ceiling None = guard not asked) are today's behaviour: the "Next Automation" prediction profile
+    leaves them so (future hours have no humidity).
     """
 
     outdoor: float | None
@@ -273,6 +280,10 @@ class NatVentStartVetoInputs:
     forecast_peak_2h: float | None
     thermal_confidence: str
     thermal_k_passive: float | None
+    indoor_dew_point_f: float | None = None
+    outdoor_dew_point_f: float | None = None
+    humid_latches: frozenset[str] = frozenset()
+    humid_ceiling_f: float | None = None
 
 
 @dataclass(frozen=True)
@@ -286,6 +297,11 @@ class NatVentStartVeto:
     k_passive: float | None = None
     indoor: float | None = None
     comfort_heat: float | None = None
+    # Issue #1691: the humid-air guard's numbers (HUMID_AIR only)
+    humid_reason: str | None = None  # humidity_facts.HUMID_AIR_REASON_CEILING / _WETTER
+    indoor_dew_point_f: float | None = None
+    outdoor_dew_point_f: float | None = None
+    humid_ceiling_f: float | None = None
 
 
 def decide_nat_vent_start_veto(inputs: NatVentStartVetoInputs) -> NatVentStartVeto | None:
@@ -294,7 +310,9 @@ def decide_nat_vent_start_veto(inputs: NatVentStartVetoInputs) -> NatVentStartVe
     Guard 1: a hourly-forecast peak within 2 h above ``comfort_cool + nat_vent_delta`` means the
     window of useful outdoor air is about to close. Guard 2: a medium/high-confidence thermal
     model predicting the indoor comfort floor within ``MIN_VIABLE_NAT_VENT_HOURS`` means a session
-    would end almost immediately. Guard 1 wins when both hold. None = no veto.
+    would end almost immediately. Guard 3 (Issue #1691, #1507 H1): the outdoor air is too humid
+    (``humidity_facts.humid_air_verdict``: dew point at or above the ceiling, or humid and at least 2 °F wetter than
+    the house), so a session would pull moisture in. Earlier guards win when several hold. None = no veto.
     """
     threshold = inputs.comfort_cool + inputs.nat_vent_delta
     if inputs.forecast_peak_2h is not None and inputs.forecast_peak_2h > threshold:
@@ -319,4 +337,19 @@ def decide_nat_vent_start_veto(inputs: NatVentStartVetoInputs) -> NatVentStartVe
                     indoor=inputs.indoor,
                     comfort_heat=inputs.comfort_heat,
                 )
+    if inputs.humid_ceiling_f is not None:
+        humid = humid_air_verdict(
+            inputs.indoor_dew_point_f,
+            inputs.outdoor_dew_point_f,
+            ceiling_f=inputs.humid_ceiling_f,
+            latched=inputs.humid_latches,
+        )
+        if humid.blocks:
+            return NatVentStartVeto(
+                HUMID_AIR,
+                humid_reason=humid.reason,
+                indoor_dew_point_f=humid.indoor_dp_f,
+                outdoor_dew_point_f=humid.outdoor_dp_f,
+                humid_ceiling_f=humid.ceiling_f,
+            )
     return None

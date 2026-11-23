@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Pre-cooling} other {Pre-heating}} to {target} until the {ends} high-cost period, then {after}",
   "status.hold.sentence_lc": "{mode, select, cool {pre-cooling} other {pre-heating}} to {target} until the {ends} high-cost period, then {after}",
+  "status.humid_air.blocking_ceiling": "Fan not started: humid outside (dew point {outdoor}, at or above the ceiling {ceiling})",
+  "status.humid_air.blocking_wetter": "Fan not started: humid outside (dew point {outdoor}, wetter than the house at {indoor})",
   "status.humidity_kind.chosen": "your chosen sensor",
   "status.humidity_kind.device_sensor": "sensor on the device",
   "status.humidity_kind.thermostat": "thermostat",

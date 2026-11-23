@@ -1,0 +1,106 @@
+{
+  "name": "humid_air_1691_cycling_on_refused_session_kept",
+  "description": "A nat-vent session started on dry air; the fan cycled off at the band midpoint; the outdoor air then turns wetter than the house, so the fan is not switched back on (start-only: the session itself is not ended)",
+  "source": "synthetic",
+  "issue": 1691,
+  "notes": [
+    "11:00 dew points: indoor 71F at 57.0% = 55.0F; outdoor 65F at 90.0% = 61.99F (wetter than the house, below the 65F ceiling). Before 11:00 no humidity is known (= today's behaviour).",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: deleting the cycling-on guard makes 11:30 read nat_vent_fan_on (the fan back on into humid air). (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the fan would pull 62F-dew-point air into a 55F-dew-point house for the rest of the evening."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "No fan restart into humid air; the session stays",
+    "observed_behavior": "nat_vent_humid_skip at the cycling-on threshold",
+    "expected_behavior": "nat_vent_humid_skip at the cycling-on threshold"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "nat_vent_hysteresis_f": 1.0,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-06-12T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "Morning, no humidity known: nat-vent eligible by temperature."
+    },
+    {
+      "time": "2026-06-12T08:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day."
+    },
+    {
+      "time": "2026-06-12T08:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_window",
+      "note": "Window opens: the session starts (no humidity known yet)."
+    },
+    {
+      "time": "2026-06-12T10:30:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 70.0,
+      "note": "Indoor at the off threshold: the fan cycles off, the session stays."
+    },
+    {
+      "time": "2026-06-12T11:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 65.0,
+      "humidity": 57.0,
+      "outdoor_humidity": 90.0,
+      "note": "The outdoor air turns humid (dew point 62F against the house's 55F)."
+    },
+    {
+      "time": "2026-06-12T11:30:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 72.0,
+      "note": "Indoor at the on threshold: the fan would cycle back on."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-12T08:10:00",
+      "expect": "natural_ventilation",
+      "reason": "No humidity known: today's behaviour, the session starts."
+    },
+    {
+      "at": "2026-06-12T10:30:00",
+      "expect": "nat_vent_fan_off",
+      "reason": "The fan cycles off at the off threshold."
+    },
+    {
+      "at": "2026-06-12T11:30:00",
+      "expect": "nat_vent_humid_skip",
+      "reason": "The fan is not cycled back on into wetter-than-house air."
+    },
+    {
+      "at": "2026-06-12T11:30:00",
+      "expect": "event_emitted",
+      "event": "nat_vent_humid_skip",
+      "payload_subset": {
+        "reason": "wetter_than_house",
+        "starter": "nat_vent_cycling"
+      },
+      "reason": "Reported once, with the cycling starter."
+    },
+    {
+      "at": "2026-06-12T11:30:00",
+      "expect": "nat_vent_still_active",
+      "reason": "D4 start-only: the running session is not ended by humidity."
+    },
+    {
+      "at": "2026-06-12T11:30:00",
+      "expect": "fan_not_active",
+      "reason": "The fan stays off."
+    }
+  ]
+}

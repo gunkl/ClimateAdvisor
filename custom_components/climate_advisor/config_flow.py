@@ -66,6 +66,8 @@ from .const import (
     CONF_HEAT_POWER_KW,
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
+    CONF_HUMID_AIR_GUARD_CEILING_F,
+    CONF_HUMID_AIR_GUARD_ENABLED,
     CONF_HVAC_FAN_RESTRICT_MODE,
     CONF_HVAC_SEASON,
     CONF_INDOOR_HUMIDITY_ENTITY,
@@ -111,6 +113,8 @@ from .const import (
     DEFAULT_COMFORT_HEAT,
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_FAN_MODE,
+    DEFAULT_HUMID_AIR_GUARD_CEILING_F,
+    DEFAULT_HUMID_AIR_GUARD_ENABLED,
     DEFAULT_HVAC_FAN_RESTRICT_MODE,
     DEFAULT_HVAC_SEASON,
     DEFAULT_MANUAL_GRACE_SECONDS,
@@ -142,6 +146,8 @@ from .const import (
     HVAC_FAN_RESTRICT_COOL,
     HVAC_FAN_RESTRICT_HEAT,
     HVAC_SEASON_OPTIONS,
+    MAX_HUMID_AIR_GUARD_CEILING_F,
+    MIN_HUMID_AIR_GUARD_CEILING_F,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
@@ -167,7 +173,15 @@ from .setpoint_combinations import (
     SETPOINT_SANITY_MIN_F,
     setpoint_combination_findings,
 )
-from .temperature import CELSIUS, FAHRENHEIT, convert_delta, from_fahrenheit, ha_system_unit, to_fahrenheit
+from .temperature import (
+    CELSIUS,
+    FAHRENHEIT,
+    UNIT_SYMBOL,
+    convert_delta,
+    from_fahrenheit,
+    ha_system_unit,
+    to_fahrenheit,
+)
 from .zone_capability import lockout_thresholds_overlap
 
 _LOGGER = logging.getLogger(__name__)
@@ -523,6 +537,51 @@ HVAC_SEASON_SELECTOR = "hvac_season"
 def lockout_slider_range(is_celsius: bool) -> tuple[float, float, float]:
     """``(min, max, step)`` for an outdoor lockout temperature in the display unit (Issue #1699)."""
     return (-30.0, 45.0, 0.5) if is_celsius else (-20.0, 110.0, 1.0)
+
+
+def humid_ceiling_display(stored_f: Any, is_celsius: bool) -> tuple[float, float, float, float]:
+    """``(default, min, max, step)`` of the humid-air dew point ceiling field in the display unit (Issue #1691).
+
+    An absolute dew point (not a delta): 55-70 °F, or 12.8-21.1 °C in 0.1 steps (the °F range rounded inward, so
+    every °C value stays inside it). The stored °F value is shown converted (rounded to 4 dp, ``_display_default``),
+    the default 65 °F as 18.3 °C.
+    """
+    if is_celsius:
+        lo = math.ceil(from_fahrenheit(MIN_HUMID_AIR_GUARD_CEILING_F, CELSIUS) * 10) / 10
+        hi = math.floor(from_fahrenheit(MAX_HUMID_AIR_GUARD_CEILING_F, CELSIUS) * 10) / 10
+        step = 0.1
+    else:
+        lo, hi, step = MIN_HUMID_AIR_GUARD_CEILING_F, MAX_HUMID_AIR_GUARD_CEILING_F, 1.0
+    try:
+        value_f = float(stored_f) if stored_f is not None else None
+    except TypeError, ValueError:
+        value_f = None
+    if value_f is None:
+        default = round(_display_default(DEFAULT_HUMID_AIR_GUARD_CEILING_F, is_celsius, lo, hi), 1)
+    else:
+        default = _display_default(value_f, is_celsius, lo, hi)
+    return default, lo, hi, step
+
+
+def humid_ceiling_to_fahrenheit(user_input: dict[str, Any], stored: Any, unit: str) -> dict[str, Any]:
+    """The humid-air ceiling from the display unit to the stored °F (Issue #1691); a value left as shown keeps the
+    stored °F exactly (no rounding drift on a re-save of a °C page), any other value is converted (absolute)."""
+    if CONF_HUMID_AIR_GUARD_CEILING_F not in user_input:
+        return user_input
+    out = dict(user_input)
+    shown, _lo, _hi, _step = humid_ceiling_display((stored or {}).get(CONF_HUMID_AIR_GUARD_CEILING_F), unit == CELSIUS)
+    stored_f = (stored or {}).get(CONF_HUMID_AIR_GUARD_CEILING_F)
+    typed = float(out[CONF_HUMID_AIR_GUARD_CEILING_F])
+    if typed == shown and stored_f is not None:
+        out[CONF_HUMID_AIR_GUARD_CEILING_F] = float(stored_f)
+    elif typed == shown:
+        out.pop(CONF_HUMID_AIR_GUARD_CEILING_F)  # the untouched default stays the default (65 °F, not 18.5 °C)
+    else:
+        value_f = to_fahrenheit(typed, unit)  # absolute (°C -> °F), clamped to 55-70 °F against fp noise
+        out[CONF_HUMID_AIR_GUARD_CEILING_F] = round(
+            min(max(value_f, MIN_HUMID_AIR_GUARD_CEILING_F), MAX_HUMID_AIR_GUARD_CEILING_F), 4
+        )
+    return out
 
 
 def setpoint_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, float, float]]:
@@ -1594,9 +1653,21 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 self._whf_acknowledged = dict(warnings)
                 errors = dict(warnings)
             elif not errors:
+                user_input = humid_ceiling_to_fahrenheit(
+                    user_input, self.config_entry.data, self.config_entry.data.get(CONF_TEMP_UNIT, FAHRENHEIT)
+                )
                 await self._commit_section(user_input, clearable_keys=clearable)
                 return await self.async_step_init()
             current = merged  # re-show the form with what the user just entered
+
+        is_celsius = self.config_entry.data.get(CONF_TEMP_UNIT, FAHRENHEIT) == CELSIUS
+        if user_input is not None and CONF_HUMID_AIR_GUARD_CEILING_F in user_input:
+            ceiling_shown = float(user_input[CONF_HUMID_AIR_GUARD_CEILING_F])  # re-shown form: what was typed
+            _d, ceiling_lo, ceiling_hi, ceiling_step = humid_ceiling_display(None, is_celsius)
+        else:
+            ceiling_shown, ceiling_lo, ceiling_hi, ceiling_step = humid_ceiling_display(
+                self.config_entry.data.get(CONF_HUMID_AIR_GUARD_CEILING_F), is_celsius
+            )
 
         return self.async_show_form(
             step_id="sensors",
@@ -1718,6 +1789,23 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         CONF_NAT_VENT_SOFT_START_ENABLED,
                         default=current.get(CONF_NAT_VENT_SOFT_START_ENABLED, DEFAULT_NAT_VENT_SOFT_START_ENABLED),
                     ): selector.BooleanSelector(),
+                    # Issue #1691 (#1507 H1): the humid-air guard and its dew point ceiling (absolute, display unit).
+                    vol.Optional(
+                        CONF_HUMID_AIR_GUARD_ENABLED,
+                        default=current.get(CONF_HUMID_AIR_GUARD_ENABLED, DEFAULT_HUMID_AIR_GUARD_ENABLED),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_HUMID_AIR_GUARD_CEILING_F,
+                        default=ceiling_shown,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=ceiling_lo,
+                            max=ceiling_hi,
+                            step=ceiling_step,
+                            unit_of_measurement=UNIT_SYMBOL[CELSIUS if is_celsius else FAHRENHEIT],
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
                 }
             ),
         )

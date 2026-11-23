@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Pré-arrefecimento} other {Pré-aquecimento}} para {target} até às horas de ponta das {ends}, e depois {after}",
   "status.hold.sentence_lc": "{mode, select, cool {pré-arrefecimento} other {pré-aquecimento}} para {target} até às horas de ponta das {ends}, e depois {after}",
+  "status.humid_air.blocking_ceiling": "Ventoinha não arrancada: húmido lá fora (ponto de orvalho {outdoor}, no limite {ceiling} ou acima)",
+  "status.humid_air.blocking_wetter": "Ventoinha não arrancada: húmido lá fora (ponto de orvalho {outdoor}, mais húmido do que a casa a {indoor})",
   "status.humidity_kind.chosen": "o sensor escolhido",
   "status.humidity_kind.device_sensor": "sensor do dispositivo",
   "status.humidity_kind.thermostat": "termóstato",

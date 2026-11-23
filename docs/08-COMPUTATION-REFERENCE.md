@@ -25,7 +25,8 @@ The automation logic table and all threshold constants in this document are expr
 | What happens when the thermostat reads several degrees high after the furnace trips its high limit (Issue #1676)? | A 2.5 °F jump within 5 min of a reading, within 10 min of heating, starts a recalibration episode: WARNING, an ignorable Repairs notice, the room read from the sleep or dedicated sensor until the reading is back within 1 °F for 5 min (max 60 min), learning paused. Option `thermostat_recalibration_guard`. | [Bug E — thermostat recalibration](08-COMPUTATION-REFERENCE.md#bug-e--thermostat-recalibration-after-a-furnace-high-limit-trip-issue-1676) |
 | Which log line says Climate Advisor switched the sensor it reads the room temperature from (thermostat, its finer sensor, dedicated or sleep sensor)? | One INFO line per real switch per zone: `Zone "<title>": room temperature now from "<name>" (<id>, <role>, <°F>) instead of "<name>" (<id>, <role>, <°F>): <reason>`, plus an `indoor_source_changed` Activity row (Issue #1230 R1c, 0.9.3). Silent during startup coalescing; one `room temperature using ...` line after it. Owner: `coordinator._note_indoor_source()`; the resolver logs DEBUG only. | [Bug C — Indoor source changes](08-COMPUTATION-REFERENCE.md#bug-c--sleep-window-bedroom-sensor-override-issue-895) |
 | Which log line says Climate Advisor switched the humidity source a Status chart line reads (room, bedroom, outdoor)? | One INFO line per real change per role per zone: `Zone "<title>": <room\|bedroom\|outdoor> humidity now from <new> instead of <old>: <reason>`, each source written `"<friendly name>" (<id>, <kind>, <RH>%)` or `no humidity source`, plus a `humidity_source_changed` Activity row (Issue #1455, 0.9.11). Reasons: `the chosen sensor is unavailable`, `back to your chosen sensor`, `no humidity sensor found on the device`, `weather service (no outdoor humidity sensor)`, `humidity sensor found on the device`. Silent during startup coalescing and on repeats; one `<role> humidity using ...` line after it. Same writer as the room-temperature line (`coordinator._announce_source()`). Chart only: no Repairs card. | [Chart Log Spec](chart-log-spec.md#humidity-source-changes-issue-1455) |
-| What dew point does Climate Advisor carry for decisions, and what makes it unknown (Issue #1690)? | `EngineFacts.indoor_dew_point_f` / `outdoor_dew_point_f` (+ the source used): the chart's humidity source paired with the same device's temperature (read as the temperature readers read it), Magnus (`feels_like.dew_point_f`), median of 15 min of 5-min samples. Unknown on no source, stale (indoor 120 min, outdoor 6 h), non-% unit, no same-device temperature, thermostat recalibrating, or a reconnect glitch (0 % / 32 °F, a lone 0 % RH). Sleep window: bedroom, else the room. No decision reads them yet. | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
+| What dew point does Climate Advisor carry for decisions, and what makes it unknown (Issue #1690)? | `EngineFacts.indoor_dew_point_f` / `outdoor_dew_point_f` (+ the source used): the chart's humidity source paired with the same device's temperature (read as the temperature readers read it), Magnus (`feels_like.dew_point_f`), median of 15 min of 5-min samples. Unknown on no source, stale (indoor 120 min, outdoor 6 h), non-% unit, no same-device temperature, thermostat recalibrating, or a reconnect glitch (0 % / 32 °F, a lone 0 % RH). Sleep window: bedroom, else the room. Read by the humid-air guard on fan starts (Issue #1691). | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
+| Why did the fan not start on a humid night (Issue #1691)? | The humid-air guard: outdoor dew point at or above `humid_air_guard_ceiling_f` (65 °F), or at least 55 °F and 2 °F above the house's (1 °F hysteresis). Every fan start asks it (5 nat-vent start profiles incl. soft start, economizer, cycling-on, whole-house-fan min-runtime); the Next Automation prediction does not. One `nat_vent_humid_skip` row per humid spell, INFO `Fan start skipped: humid outdoor air ...`, a Status line on the outdoor card. | [Humid-air guard on fan starts](08-COMPUTATION-REFERENCE.md#humid-air-guard-on-fan-starts-issue-1691) |
 | Can the outdoor sensor's reconnect value (0 % / 32 °F) reach an outdoor temperature decision (Issue #1689)? | No: `_read_outdoor_sensor` rejects it (`paired_glitch`: 0 % same-device humidity with exactly 32.0 °F, or a first reading of exactly 32.0 °F within 30 s after `unavailable` / `unknown`) as `implausible`; the weather service answers until the sensor's next reading or the 5-minute refresh. Any other first reading is used at once. | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
 | What temperature thresholds map to each day type? | HOT ≥ 85°F, WARM ≥ 75°F, MILD ≥ 60°F, COOL ≥ 45°F, COLD < 45°F; all thresholds are °F constants in `const.py`. | [§1. Day Classification](08-COMPUTATION-REFERENCE.md#1-day-classification) |
 | How is the setback modifier computed and what values can it take? | `avg_delta = ((tomorrow_high − today_high) + (tomorrow_low − today_low)) / 2`; modifier ranges from −3.0 (strong warming) to +3.0 (significant cold front); stable trend → 0. | [§3. Setback Modifier](08-COMPUTATION-REFERENCE.md#3-setback-modifier) |
@@ -1579,7 +1580,7 @@ Natural ventilation and the economizer **no longer set `hvac_mode=off`** when th
 
 **Exits with a window still open (Issue #1142 D4/D8):** the outdoor-rise and ceiling exits, the comfort-floor exit (slow and fast loop) and the away-ceiling exit (slow and fast loop) all route through `_exit_nat_vent()`'s sensor-open branch: session ended, window pause recorded, thermostat switched Off right then (`_hold_thermostat_off_for_open_window`), reactivation lockout armed. Closing the window re-arms comfort in ONE write through the selector (away: the setback), so modes do not flap. **Observe-only (Issue #1295, mirror of #1293):** with automation switched off the thermostat may be heating/cooling (nothing turned it Off). Since Issue #1304 no session starts or ends on paper (`_activate_fan()`/`_deactivate_fan()` return `DRY_RUN`, the session is kept while its fan runs), so this branch is reached only when the session ends without a fan command (fan already off, or an occupant fan override) -- defense in depth. The Off-hold's `_set_hvac_mode("off")` then comes back `DRY_RUN`; `_hold_thermostat_off_for_open_window()` returns None and `_exit_nat_vent()` records NO window pause (INFO `[DRY RUN] Nat-vent exit (...): window still open -- pause not recorded`). The session has ended, so session and pause are still never both set (#1141 ordering unchanged: session first, pause only after, here none). Leaving observe-only runs `async_reconcile_after_automation_enabled()`, which pauses for real within seconds (rule 3). Before, a pause with nothing to restore was recorded while the AC ran, and the re-enable reconcile read "already paused". Test: `tests_ha/test_observe_only_nat_vent_exit_1295.py` (hvac_fan and whf).
 
-**Prediction surfaces (Issue #1142 step 7):** the Next Automation card's "Natural ventilation at HH:MM" asks `AutomationEngine._nat_vent_start_decision(NAT_VENT_START_PREDICTION, at=<forecast time>)` -- the same nat-vent FSM answer the engine acts on (full gate, soft start, a fan exists, forecast-peak and thermal-floor guards, lockout, override) -- so it never promises a start the engine would veto; it is offered only while a sensor reads open (not dark), since a dark sensor never starts a fan (Issue #1299). The chart's forecast walk (`_walk_forward_regime`) no longer draws the ODE ceiling guard escalating to cool inside a planned blower (`hvac_fan`) session, matching the runtime rule.
+**Prediction surfaces (Issue #1142 step 7):** the Next Automation card's "Natural ventilation at HH:MM" asks `AutomationEngine._nat_vent_start_decision(NAT_VENT_START_PREDICTION, at=<forecast time>)` -- the same nat-vent FSM answer the engine acts on (full gate, soft start, a fan exists, forecast-peak and thermal-floor guards, lockout, override) -- so it never promises a start the engine would veto (the humid-air guard, which has no forecast humidity, is applied as the live verdict: no prediction while it blocks, Issue #1691); it is offered only while a sensor reads open (not dark), since a dark sensor never starts a fan (Issue #1299). The chart's forecast walk (`_walk_forward_regime`) no longer draws the ODE ceiling guard escalating to cool inside a planned blower (`hvac_fan`) session, matching the runtime rule.
 
 **Sleep window (Issue #341) — historical:** the sleep-window deference only existed to avoid a double band write; with no band written it is moot.
 
@@ -3733,10 +3734,10 @@ at outdoor/indoor **parity** for air-movement comfort and attic/thermal-mass pur
 distinct from bulk free-cooling.
 
 **Opt-out, on by default** (`nat_vent_soft_start_enabled` config key). Issue #533
-recommended opt-in given the comfort benefit is subjective and unverified by any
-humidity/dew-point sensor (none exists in the integration today — tracked as an explicit
-gap, not solved here); the project chose to default this on instead, so every WHF install
-gets the benefit unless the user explicitly disables it in settings.
+recommended opt-in given the comfort benefit is subjective; the project chose to default this on instead, so every
+WHF install gets the benefit unless the user explicitly disables it in settings. Since Issue #1691 the humid-air
+guard refuses a soft start on humid outdoor air, through the same start veto as every other start
+([Humid-air guard on fan starts](#humid-air-guard-on-fan-starts-issue-1691)).
 
 **Gate** (`decide_nat_vent_soft_start_gate()` in `nat_vent_gate.py`), all of the
 following must hold:
@@ -4239,7 +4240,8 @@ Tests: `tests/test_thermostat_recal_1676.py` (state machine, resolver, coordinat
 **Occupant view:** a humid 76 °F and a dry 76 °F feel different mostly through moisture, which a dew point measures
 (76 °F at 60 % is a 61 °F dew point, at 35 % a 46 °F one). Before any rule may act on it (the #1507 waves 2-3: humid
 fan-start guard, window advice, humid overcool), Climate Advisor carries the house's and the outside air's dew point
-in the decision facts. **No decision reads them yet**; unknown always means today's behaviour.
+in the decision facts. Since Issue #1691 the humid-air guard on fan starts reads them
+([below](#humid-air-guard-on-fan-starts-issue-1691)); unknown always means today's behaviour.
 
 - **One resolver, two outputs.** `humidity_sources.resolve_humidity_paired` picks the humidity source exactly as the
   chart does ([Chart Log Spec](chart-log-spec.md#humidity-and-feels-like-fields-issue-1414)) and also says through
@@ -4285,8 +4287,8 @@ in the decision facts. **No decision reads them yet**; unknown always means toda
   `StaticEngineInputs.build_facts` now also calls). Later rules read these fields only, never the raw resolver
   (pinned by `tests/test_chart_humidity_1414.py::test_humidity_reaches_only_the_dew_point_reader`). Latches step on
   the 5-minute tick through the one hysteresis helper `latch_above(value, on, off, was_on)` (on at `on`, stays on
-  while above `off`, off at or below `off`, unknown releases); `humidity_facts.LATCH_SPECS` is empty until a later
-  lane adds its rule. The device lookups the readers use are cache-only, so building facts never reads the entity
+  while above `off`, off at or below `off`, unknown releases); `humidity_facts.LATCH_SPECS` holds the H1 wetter
+  latch and `step_humid_latches` adds the configured ceiling latch (Issue #1691). The device lookups the readers use are cache-only, so building facts never reads the entity
   registry (safe on any thread).
 - **Missing inputs (for the #1507 rules that will read these facts):**
 
@@ -4310,6 +4312,72 @@ heating plans) could have acted on a false freezing reading. Before, 32 °F pass
 The indoor path already rejects 32 °F (`MIN_PLAUSIBLE_INDOOR_F` = 40).
 
 Tests: `tests/test_humidity_facts_1690.py`, `tests_ha/test_humidity_facts_realha_1690.py`.
+
+### Humid-air guard predicate (Issue #1691)
+
+**Occupant view:** on a muggy night the whole-house fan or open windows would pull wetter air into the house, and
+short AC runs barely dry it again; on a dry night the same fan is free cooling. One pure predicate decides which,
+so the fan starts and the window advice can never disagree.
+
+- `humidity_facts.humid_air_verdict(indoor_dp_f, outdoor_dp_f, *, ceiling_f, latched)` (and the bool
+  `humid_air_blocks`, and `humid_air_verdict_from_facts(facts, ceiling_f)` on an `EngineFacts`) blocks when:
+  - **ceiling:** outdoor DP >= the ceiling (option `humid_air_guard_ceiling_f`, 55-70 °F, default 65 °F); released at
+    or below the ceiling - 1 °F (latch `humid_air_ceiling`); or
+  - **wetter than the house:** outdoor DP >= 55 °F AND outdoor DP >= indoor DP + 2 °F; released once outdoor DP
+    <= 54 °F or the gap <= 1 °F (latch `humid_air_wetter`, one `latch_above` on the derived signal
+    `outdoor_wetter_margin` = min(outdoor - 55, outdoor - indoor - 2), on at 0, off at -1).
+  - Reason `ceiling` wins over `wetter_than_house` when both hold.
+- **Latches live in the facts, the veto is stateless.** `step_humid_latches(dew_points, state, ceiling_f=...)` is
+  the one step (`LATCH_SPECS` plus the configured ceiling spec from `humid_air_latch_specs`); the coordinator's
+  5-minute tick keeps its result in `EngineFacts.humid_latches`, and each decision takes the same step from those
+  latches with the decision's dew points, so a decision between ticks keeps the hysteresis.
+- **Missing inputs** (the table above): the ceiling needs only the outdoor DP; the relative clause needs both;
+  unknown never blocks (today's behaviour). Option `humid_air_guard_enabled` Off (`ceiling_f` None) never blocks.
+- **Option** (`humid_air_ceiling_from_config`): On at 65 °F by default; a stored value outside 55-70 °F is clamped,
+  a non-number falls back to 65 °F. The options form shows and takes it in the configured unit (°C: 12.8-21.1 in
+  0.1 steps), stored as an absolute °F dew point; an untouched value never drifts.
+
+Tests: `tests/test_humid_air_guard_1691.py`.
+
+### Humid-air guard on fan starts (Issue #1691)
+
+**Occupant view:** on a muggy night neither the whole-house fan nor the HVAC blower starts a ventilation session,
+the economizer does not switch its fan on, a session whose fan cycled off does not get it back, and a whole-house
+fan's min-runtime cycle waits; with the windows open HVAC stays paused for them (household rule 3). A house with no
+fan is unaffected (no fan, no air pulled in: it keeps its economizer AC run). This lane does not withdraw window
+advice (Issue #1692 does, through the same predicate). A dry night is unchanged; unknown humidity or the option Off is today's behaviour. A running
+session is never ended by humidity (D4, start-only).
+
+| Fan start | Where the guard sits | On humid air |
+|---|---|---|
+| Window open, idle-open re-entry, paused-by-door reactivation, grace-expiry re-check, routine re-check (all 5 live start profiles, full gate and the #540 soft start) | guard 3 of `nat_vent_gate.decide_nat_vent_start_veto` (`NatVentStartVetoInputs.indoor_dew_point_f` / `outdoor_dew_point_f` / `humid_latches` / `humid_ceiling_f`, defaulted = not asked), evaluated by the FSM only when a gate would start | veto `humid_air`: `INACTIVE` with `vetoed_state`; the window-open handler pauses (`PAUSE_START_VETOED`) |
+| "Next Automation" prediction (`NAT_VENT_START_PREDICTION`, `humid_guard=False`) | not asked per future hour (no forecast humidity); the scan (`coordinator`, natural-ventilation candidate) is skipped while the live verdict blocks | no "Natural ventilation at HH:MM" promise while humid |
+| Economizer (`_check_window_cooling_opportunity_fsm`, a MAINTAIN / COOL_DOWN start from `INACTIVE`, only when a fan exists: `fan_available_for_nat_vent`) | `_humid_air_blocks_fan_start("economizer")` before `_activate_fan`; a running economizer's cool-down -> maintain change is not a start and keeps its fan; a fan-less house keeps its cool-down AC run | economizer stays `INACTIVE`, re-asked next tick |
+| Mid-session cycling-on (`nat_vent_temperature_check`) | `_humid_air_blocks_fan_start("nat_vent_cycling")` | fan stays off, session stays active |
+| Min-runtime cycle, whole-house fan only (`_fan_cycle_on`) | `_humid_air_blocks_fan_start("min_runtime")` | deferred (`_defer_min_runtime_cycle`, shared with the sealed-house deferral), retry in `WHF_SEALED_CYCLE_RETRY_S` (300 s). Scope differs on purpose: the economizer and cycling-on guards run inside a window-ventilation session (air in through the window, whatever fan moves it); a blower install's min-runtime cycle runs with the windows shut and only recirculates indoor air, so it is left to the H2 HVAC-fan restrict |
+
+- **Predicate:** `humidity_facts.humid_air_verdict` on `EngineFacts` (see the predicate section above); the engine
+  reads it through `AutomationEngine.humid_air_verdict(now)` (pure).
+- **Visibility:** one `nat_vent_humid_skip` Activity row per humid spell (payload `reason`, `outdoor_dew_point`,
+  `indoor_dew_point`, `ceiling`, `starter`, `fan_device`) and one INFO log line `Fan start skipped: humid outdoor
+  air (<at or above the ceiling|wetter than the house>) starter=<starter> outdoor_dew_point_f=<x> indoor_dew_point_f=<y>
+  ceiling_f=<z> -- the fan is not started` (dew points through `humidity_facts.fmt_dp_log`), DEBUG on repeats.
+  The spell ends on the coordinator's 5-minute dew-point tick when no H1 latch is on
+  (`AutomationEngine.note_humid_spell_over`, the one reset site, so a humid night after a dry windows-shut day still
+  writes its row). Status page (new dashboard and classic page): a line on the outdoor card, "Fan not started: humid
+  outside (dew point X, ...)", only while the guard would refuse a start that could happen (a fan exists for
+  ventilation, whatever the day type: `AutomationEngine.humid_air_status_verdict`; `humid_air_guard` in the status API,
+  `api.humid_air_view`, catalog `status.humid_air.blocking_ceiling` / `_wetter`).
+- **Hysteresis granularity:** the latches are kept only by the 5-minute tick; each decision re-steps them from the
+  tick's state with its own dew points and does not write back (the veto is stateless by design). Two decisions in
+  one tick at 65.0 then 64.9 °F therefore give block, then clear. Accepted: the guard never stops a running fan, so
+  this cannot toggle a fan; do not add a second latch store.
+- **Sim harness:** `nat_vent_humid_skip` maps to its own outcome (`tools/sim_harness/outcomes.py`, rule-8 note).
+- **Two-zone installs:** each zone judges its own indoor dew point; a zone without indoor humidity gets the ceiling
+  only (missing-input table).
+
+Tests: `tests/test_humid_fan_guard_1691.py`; Tier-A scenarios `tools/simulations/pending/humid_air_1691_*.json`
+(awaiting owner review for promotion to golden).
 
 ### Indoor sensor failure reasons and announcements (Issue #1033)
 

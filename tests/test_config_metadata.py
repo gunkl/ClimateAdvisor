@@ -59,6 +59,8 @@ EXPECTED_KEYS = {
     "fan_remote_entity",
     "fan_min_runtime_per_hour",
     "nat_vent_soft_start_enabled",
+    "humid_air_guard_enabled",  # Issue #1691
+    "humid_air_guard_ceiling_f",
     "wake_time",
     "sleep_time",
     "sleep_heat",

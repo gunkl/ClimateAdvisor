@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {تبريد مسبق} other {تسخين مسبق}} حتى {target} إلى حين فترة الذروة عند {ends}، ثم {after}",
   "status.hold.sentence_lc": "{mode, select, cool {تبريد مسبق} other {تسخين مسبق}} حتى {target} إلى حين فترة الذروة عند {ends}، ثم {after}",
+  "status.humid_air.blocking_ceiling": "لم تُشغَّل المروحة: الجو رطب في الخارج (نقطة الندى {outdoor}، عند الحد {ceiling} أو فوقه)",
+  "status.humid_air.blocking_wetter": "لم تُشغَّل المروحة: الجو رطب في الخارج (نقطة الندى {outdoor}، أرطب من المنزل عند {indoor})",
   "status.humidity_kind.chosen": "المستشعر الذي اخترته",
   "status.humidity_kind.device_sensor": "مستشعر الجهاز",
   "status.humidity_kind.thermostat": "الثرموستات",

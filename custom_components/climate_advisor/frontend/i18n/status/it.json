@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Preraffreddamento} other {Preriscaldamento}} a {target} fino alle ore di punta delle {ends}, poi {after}",
   "status.hold.sentence_lc": "{mode, select, cool {preraffreddamento} other {preriscaldamento}} a {target} fino alle ore di punta delle {ends}, poi {after}",
+  "status.humid_air.blocking_ceiling": "Ventola non avviata: umido fuori (punto di rugiada {outdoor}, pari o sopra il limite {ceiling})",
+  "status.humid_air.blocking_wetter": "Ventola non avviata: umido fuori (punto di rugiada {outdoor}, più umido della casa a {indoor})",
   "status.humidity_kind.chosen": "il sensore scelto",
   "status.humidity_kind.device_sensor": "sensore del dispositivo",
   "status.humidity_kind.thermostat": "termostato",

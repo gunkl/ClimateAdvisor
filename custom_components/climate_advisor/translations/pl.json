@@ -305,7 +305,9 @@
           "fan_state_feedback": "Wiarygodny stan wentylatora",
           "fan_remote_entity": "Encja zdarzeń pilota RF wentylatora",
           "fan_min_runtime_per_hour": "Minimalny czas pracy wentylatora na godzinę",
-          "nat_vent_soft_start_enabled": "Łagodny rozruch wentylacji naturalnej"
+          "nat_vent_soft_start_enabled": "Łagodny rozruch wentylacji naturalnej",
+          "humid_air_guard_enabled": "Ochrona przed wilgotnym powietrzem",
+          "humid_air_guard_ceiling_f": "Limit punktu rosy"
         },
         "data_description": {
           "door_window_sensors": "Wybierz dowolne encje czujników binarnych do monitorowania, także grupy czujników binarnych łączące kilka czujników.",
@@ -321,7 +323,9 @@
           "fan_state_feedback": "Włącz, jeśli encja wentylatora lub czujnik stanu raportuje rzeczywisty stan silnika (a nie tylko ostatnio wysłane polecenie). Zostaw wyłączone, jeśli nie masz pewności — CA będzie w każdym cyklu wysyłać do wentylatora żądany stan.",
           "fan_remote_entity": "Opcjonalna encja zdarzeń, która uruchamia się po naciśnięciu fizycznego pilota ściennego RF (np. z firmware gunkl/quietcool-house-fan). Wybór timera na pilocie (1/2/4/8/12 godzin) ustawia czas wstrzymania po ręcznej zmianie wentylatora. Zostaw puste, aby wyłączyć.",
           "fan_min_runtime_per_hour": "Minuty pracy wentylatora na godzinę (0 = wyłączone, 60 = zawsze włączony). Cykl nie jest zsynchronizowany z zegarem — przesuwa się naturalnie zależnie od tego, kiedy uruchomił się HA.",
-          "nat_vent_soft_start_enabled": "Po włączeniu wentylator całego domu może ruszyć przy równych temperaturach na zewnątrz i wewnątrz (bez czekania, aż na zewnątrz będzie wyraźnie chłodniej), gdy potwierdzono, że dzisiejsza temperatura zewnętrzna minęła szczyt i spada — dla ruchu powietrza i przewietrzenia strychu oraz masy termicznej, nie do intensywnego chłodzenia. Domyślnie włączone; wyłącz, jeśli wentylator ma pracować dopiero wtedy, gdy na zewnątrz jest wyraźnie chłodniej niż w środku. Obecnie żaden czujnik wilgotności ani punktu rosy tego nie zabezpiecza."
+          "nat_vent_soft_start_enabled": "Po włączeniu wentylator całego domu może ruszyć przy równych temperaturach na zewnątrz i wewnątrz (bez czekania, aż na zewnątrz będzie wyraźnie chłodniej), gdy potwierdzono, że dzisiejsza temperatura zewnętrzna minęła szczyt i spada — dla ruchu powietrza i przewietrzenia strychu oraz masy termicznej, nie do intensywnego chłodzenia. Domyślnie włączone; wyłącz, jeśli wentylator ma pracować dopiero wtedy, gdy na zewnątrz jest wyraźnie chłodniej niż w środku. W wilgotne noce ochrona przed wilgotnym powietrzem nie pozwala mu ruszyć.",
+          "humid_air_guard_enabled": "Gdy włączone, wentylator całego domu i wentylacja naturalna nie ruszają, dopóki powietrze na zewnątrz jest zbyt wilgotne: jego punkt rosy jest równy limitowi lub wyższy albo powietrze na zewnątrz jest wilgotne i wyraźnie wilgotniejsze niż w domu. Trwająca sesja nie jest przerywana. Bez odczytu wilgotności zewnętrznej nic się nie zmienia. Domyślnie włączone.",
+          "humid_air_guard_ceiling_f": "Zewnętrzny punkt rosy, od którego ochrona przed wilgotnym powietrzem nigdy nie uruchamia wentylatora, niezależnie od wilgotności w domu. Niżej blokuje więcej nocy. Ochrona zwalnia tuż poniżej."
         }
       },
       "occupancy": {

@@ -378,16 +378,19 @@ from .fan_status import (
 from .feels_like import feels_like_f, wind_speed_to_mph
 from .forecast_archive import ForecastArchive
 from .humidity_facts import (
-    LATCH_SPECS,
+    HUMID_AIR_CEILING_LATCH,
+    HUMID_AIR_WETTER_LATCH,
     SIGNAL_INDOOR,
     SIGNAL_OUTDOOR,
     DewPoint,
     DewPointHistory,
     ReconnectWatch,
     decision_dew_point,
+    fmt_dp_log,
+    humid_air_ceiling_from_config,
     paired_glitch,
     read_dew_point,
-    update_latches,
+    step_humid_latches,
 )
 from .humidity_sources import (
     ROLE_INDOOR_DAY,
@@ -6877,7 +6880,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Warms the device lookups the pure readers use, notes sensors coming back from unavailable (the
         ``paired_glitch`` "first reading after unavailable" rule for entities without a listener), stores one sample
         per signal (a lasting unknown forgets the old samples, a momentary glitch keeps them) and steps the humid
-        latches (``humidity_facts.LATCH_SPECS``; none yet). Logs at DEBUG only: nothing is decided here.
+        latches (``humidity_facts.step_humid_latches``: ``LATCH_SPECS`` plus the H1 ceiling from the options, Issue
+        #1691). Logs at DEBUG only: nothing is decided here.
         """
         watch = self._reconnect_watch_for()
         history = self.__dict__.get("_dew_point_history")
@@ -6907,12 +6911,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug(
                 "Dew point sample: signal=%s dp_f=%s reason=%s humidity=%s temperature=%s",
                 signal,
-                f"{reading.dp_f:.2f}" if reading.dp_f is not None else "unknown",
+                fmt_dp_log(reading.dp_f),
                 reading.reason,
                 reading.humidity_source,
                 reading.temp_source,
             )
-        self._humid_latch_state = update_latches(LATCH_SPECS, dew_points, self.__dict__.get("_humid_latch_state") or {})
+        self._humid_latch_state = step_humid_latches(
+            dew_points,
+            self.__dict__.get("_humid_latch_state") or {},
+            ceiling_f=humid_air_ceiling_from_config(getattr(self, "config", None)),
+        )
+        # Issue #1691 (review B1): the humid spell ends on this tick when no H1 latch is on, so the next refused fan
+        # start writes its Activity row again (the one reset site; it runs whether or not any start decision ran).
+        if not any(self._humid_latch_state.get(n) for n in (HUMID_AIR_CEILING_LATCH, HUMID_AIR_WETTER_LATCH)):
+            engine = getattr(self, "automation_engine", None)
+            note = getattr(engine, "note_humid_spell_over", None)
+            if callable(note):
+                note()
 
     def _humidity_source_kind(self, role: str, source: str | None, chosen: str | None) -> str | None:
         """Code of the kind of a humidity source (Issue #1455): ``chosen``, ``weather_service``, ``thermostat`` or
@@ -19875,13 +19890,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # the delay's end, before any forecast-grid time this scan can return.
             and self._any_sensor_open()
             and _predicted_indoor
+            # Issue #1691 (review B4): future hours have no humidity, so the prediction asks no humid-air guard; while
+            # the live guard blocks (the best forecast for the next hours), the card promises no fan start at all.
+            and getattr(decide_sync(self, ae.humid_air_verdict), "blocks", False) is not True
         ):
 
             def _nat_vent_gate_comparator(ts: datetime, outdoor: float, indoor: float) -> bool:
                 # Issue #1142 (step 7): the engine's own "may a fan session start?" question, asked as of ``ts`` on
                 # the forecast temperatures -- the same nat-vent FSM answer the engine acts on (full gate, soft start,
                 # a fan exists, forecast-peak / thermal-floor guards, lockout, override), so this card never promises
-                # a start the engine will veto and does not miss a soft start.
+                # a start the engine will veto and does not miss a soft start. The humid-air guard is the exception:
+                # it is not asked per future hour (no forecast humidity) but as the live verdict above (Issue #1691).
                 return decide_sync(
                     self,
                     ae._nat_vent_start_decision,

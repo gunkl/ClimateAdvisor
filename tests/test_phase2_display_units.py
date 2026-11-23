@@ -203,6 +203,7 @@ class TestConfigViewTemperatureUnits:
         "threshold_warm",
         "threshold_mild",
         "threshold_cool",
+        "humid_air_guard_ceiling_f",  # Issue #1691: an absolute dew point, not a delta despite the _f suffix
     )
     DELTA_KEYS = (
         "max_setback_depth_f",
@@ -239,6 +240,12 @@ class TestConfigViewTemperatureUnits:
         assert (s["comfort_heat"]["value"], s["comfort_heat"]["unit"]) == (22.0, "\u00b0C")
         assert s["comfort_cool"]["value"] == 24.0
         assert (s["threshold_hot"]["value"], s["threshold_hot"]["unit"]) == (29.0, "\u00b0C")
+
+    def test_celsius_humid_air_ceiling_is_an_absolute_temperature(self):
+        """Issue #1691: 65 F shows as 18.3 C on a Celsius install (absolute, +32 removed), not 36.1 C (a delta)."""
+        s = self._settings({"temp_unit": "celsius", "humid_air_guard_ceiling_f": 65.0})
+        assert s["humid_air_guard_ceiling_f"]["unit"] == "\u00b0C"
+        assert abs(s["humid_air_guard_ceiling_f"]["value"] - 18.3) < 0.05
 
     def test_fahrenheit_absolute_settings_unchanged_with_unit(self):
         s = self._settings({"comfort_heat": 71.6})

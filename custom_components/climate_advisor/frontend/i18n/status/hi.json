@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{ends} के पीक समय तक {mode, select, cool {पूर्व-कूलिंग} other {पूर्व-हीटिंग}} करके {target} तक पहुँचाना, फिर {after}",
   "status.hold.sentence_lc": "{ends} के पीक समय तक {mode, select, cool {पूर्व-कूलिंग} other {पूर्व-हीटिंग}} करके {target} तक पहुँचाना, फिर {after}",
+  "status.humid_air.blocking_ceiling": "पंखा शुरू नहीं किया: बाहर नमी है (ओसांक {outdoor}, सीमा {ceiling} के बराबर या ऊपर)",
+  "status.humid_air.blocking_wetter": "पंखा शुरू नहीं किया: बाहर नमी है (ओसांक {outdoor}, घर के {indoor} से अधिक नम)",
   "status.humidity_kind.chosen": "आपका चुना हुआ सेंसर",
   "status.humidity_kind.device_sensor": "डिवाइस का सेंसर",
   "status.humidity_kind.thermostat": "थर्मोस्टैट",

@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Prérefroidissement} other {Préchauffage}} à {target} jusqu’aux heures de pointe de {ends}, puis {after}",
   "status.hold.sentence_lc": "{mode, select, cool {prérefroidissement} other {préchauffage}} à {target} jusqu’aux heures de pointe de {ends}, puis {after}",
+  "status.humid_air.blocking_ceiling": "Ventilateur non démarré : humide dehors (point de rosée {outdoor}, au plafond {ceiling} ou au-dessus)",
+  "status.humid_air.blocking_wetter": "Ventilateur non démarré : humide dehors (point de rosée {outdoor}, plus humide que la maison à {indoor})",
   "status.humidity_kind.chosen": "votre capteur choisi",
   "status.humidity_kind.device_sensor": "capteur de l’appareil",
   "status.humidity_kind.thermostat": "thermostat",

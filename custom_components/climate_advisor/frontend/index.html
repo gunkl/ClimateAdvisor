@@ -1276,6 +1276,8 @@
       outNote += `<div class="note" title="The weather service’s figure for this hour against what your outdoor sensor reads now: a gap between two readings, not a temperature.">${escapeHtml(_saysVs('The weather service', svc, data.outdoor_temp, unitSym, 'your outdoor sensor'))}</div>`;
     }
     if (corrNow != null) outNote += `<div class="note" title="The weather service’s forecast as Climate Advisor corrects it: it starts from your outdoor sensor’s reading and lets this gap fade over the next few hours (plus what it has learned about the service’s usual miss at each hour).">Climate Advisor’s corrected forecast ${corrNow.toFixed(1)}${unitSym}</div>`;
+    // Issue #1691: the humid-air guard's line while it refuses fan starts (the same API field as the new dashboard).
+    if (data.humid_air_guard && data.humid_air_guard.text) outNote += `<div class="note" id="status-humid-air">${escapeHtml(data.humid_air_guard.text)}</div>`;
     cards.push(`<div class="status-item"><div class="label">Outdoor sensor</div><div class="value">${outdoorDisplay}</div>${outNote}</div>`);
 
     // Today: day type, trend, how long the system ran.

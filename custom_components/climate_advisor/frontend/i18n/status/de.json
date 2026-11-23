@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Vorkühlen} other {Vorheizen}} auf {target} bis zur Spitzenzeit um {ends}, danach {after}",
   "status.hold.sentence_lc": "{mode, select, cool {vorkühlen} other {vorheizen}} auf {target} bis zur Spitzenzeit um {ends}, danach {after}",
+  "status.humid_air.blocking_ceiling": "Ventilator nicht gestartet: draußen feucht (Taupunkt {outdoor}, bei oder über der Obergrenze {ceiling})",
+  "status.humid_air.blocking_wetter": "Ventilator nicht gestartet: draußen feucht (Taupunkt {outdoor}, feuchter als im Haus mit {indoor})",
   "status.humidity_kind.chosen": "dein gewählter Sensor",
   "status.humidity_kind.device_sensor": "Sensor am Gerät",
   "status.humidity_kind.thermostat": "Thermostat",

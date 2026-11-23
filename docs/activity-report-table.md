@@ -188,6 +188,7 @@ These events carry no HVAC action — Settings is blank.
 |---|---|---|---|---|
 | `nat_vent_forecast_skip` | `automation.py` `handle_door_window_opened` | `forecast_peak`, `threshold` | "Nat-vent skipped — forecast too warm" | `peak: {forecast_peak}°F > threshold: {threshold}°F` |
 | `nat_vent_floor_imminent_skip` | `automation.py` `handle_door_window_opened` | `time_to_floor_hr` | "Nat-vent skipped — floor imminent" | `floor in {time_to_floor_hr:.1f} hr (thermal model)` |
+| `nat_vent_humid_skip` | `automation.py` `_report_humid_air_skip` (every fan start: the nat-vent start sites, the economizer, the mid-session cycling-on, the whole-house-fan min-runtime cycle; once per humid spell, Issue #1691) | `reason` (`ceiling` / `wetter_than_house`), `outdoor_dew_point`, `indoor_dew_point`, `ceiling`, `starter` | "Fan not started -- humid outside: dew point {outdoor} at or above the ceiling {ceiling}" / "Fan not started -- outdoor air wetter than the house (dew point {outdoor} vs {indoor})" | blank |
 | `bedtime_setback_skipped` | `automation.py` `handle_bedtime` | `reason` (manual_override / occupancy), optionally `occupancy` | "Bedtime setback skipped — {reason}" | blank |
 | `morning_wakeup_skipped` | `automation.py` `handle_morning_wakeup` | `reason` | "Morning wake-up skipped — {reason}" | blank |
 | `pre_cool_suppressed_nat_vent` | `automation.py` `handle_pre_cool` | `indoor`, `target`, `modifier` | "Pre-cool suppressed — nat-vent achieved target" | `indoor: {indoor}°F ≤ target: {target}°F` |
@@ -414,7 +415,6 @@ its renderer, its catalog row above and its strings in the PR that first emits t
 
 | Name | Lane | What the occupant will see |
 |---|---|---|
-| `nat_vent_humid_skip` | H1 (#1507 I2) | A window-open fan / nat-vent start refused because the outdoor air is humid (sibling of `nat_vent_forecast_skip`). |
 | `humid_windows_close_notice` | H1 (#1507 I3) | "Humid outside (dew point X): close the windows and the AC will take over." |
 | `overcool_started` | H3 (#1507 I5) | Humid overcool lowered the commanded cool setpoint. |
 | `overcool_ended` | H3 (#1507 I5) | Humid overcool released (dew point dropped, run ended, 60-minute cap, gate closed). |

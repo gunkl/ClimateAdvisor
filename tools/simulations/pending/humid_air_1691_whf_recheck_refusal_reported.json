@@ -1,0 +1,79 @@
+{
+  "name": "humid_air_1691_whf_recheck_refusal_reported",
+  "description": "A refusal found by a re-check (not by the window opening) is reported too: the open window's re-check sees humid air and writes the Activity row",
+  "source": "synthetic",
+  "issue": 1691,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: removing the report from the re-check path (_log_nat_vent_not_engaged) makes 20:30 read paused instead of nat_vent_humid_skip. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the fan stays off on a muggy evening and the Activity report never says why."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Re-check refusal reported",
+    "observed_behavior": "nat_vent_humid_skip at 20:30",
+    "expected_behavior": "nat_vent_humid_skip at 20:30"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "events": [
+    {
+      "time": "2026-07-12T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 78.0,
+      "humidity": 50.0,
+      "outdoor_humidity": 69.0,
+      "note": "Outdoor warmer than the house: no fan start by temperature."
+    },
+    {
+      "time": "2026-07-12T20:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day."
+    },
+    {
+      "time": "2026-07-12T20:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "Window opens: paused (temperature gate fails, so no humid refusal yet)."
+    },
+    {
+      "time": "2026-07-12T20:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 50.0,
+      "outdoor_humidity": 90.2,
+      "note": "Outdoor cools below the house, still humid (dew point ~67F): the paused-by-door re-check asks the start question."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T20:10:00",
+      "expect": "paused",
+      "reason": "Outdoor warmer than inside: the window pauses HVAC."
+    },
+    {
+      "at": "2026-07-12T20:30:00",
+      "expect": "nat_vent_humid_skip",
+      "reason": "The re-check would start the fan by temperature; the humid-air guard refuses it and reports it."
+    },
+    {
+      "at": "2026-07-12T20:30:00",
+      "expect": "fan_not_active",
+      "reason": "No fan."
+    }
+  ]
+}

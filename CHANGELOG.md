@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.75] — 2026-11-22
+
+### Added
+- #1691 (humidity, step 2 of #1507): on a muggy night Climate Advisor no longer pulls wet outdoor air into the house. Before the whole-house fan or the HVAC blower starts a ventilation session (including the parity "soft start"), before the morning/evening window-cooling economizer switches its fan on, before a session's fan is cycled back on, and before a whole-house fan's minimum-runtime cycle, it checks the outdoor dew point: at or above 65 °F, or at least 55 °F and 2 °F wetter than the house, the fan does not start. With a window open HVAC stays paused for it, as for any open window. A house with no fan keeps its morning/evening window-cooling AC run. The Next Automation card does not promise a natural-ventilation start while the guard blocks. A dry night still gets its free cooling, a session already running is not stopped, and a house without an outdoor humidity reading (sensor or weather service) behaves exactly as before. The Activity report shows one "Fan not started -- humid outside" row per humid spell, the Status page says so on the outdoor card while it applies (on installs with a fan, whatever the day type), and the log gives both dew points.
+- New options under Settings -> Sensors & Fan: **Humid-Air Guard** (On) and **Humid-Air Dew Point Ceiling** (65 °F, 55-70 °F; shown and entered in °C on a Celsius install).
+
+### Release notes
+- The Humid-Air Guard ships **On** for existing installs too. On a humid night your whole-house fan or blower may now stay off where it used to start; turn the guard Off under Settings -> Sensors & Fan to get the old behaviour. Raising the ceiling only lets more nights through when the house is about as humid as outside: the wetter-than-the-house rule stays.
+
 ## [0.9.74] — 2026-11-22
 
 ### Added

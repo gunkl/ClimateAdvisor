@@ -60,6 +60,8 @@
   "status.hold.range": "{lo, number}–{hi}",
   "status.hold.sentence": "{mode, select, cool {Preenfriando} other {Precalentando}} a {target} hasta las horas punta de las {ends}, y después {after}",
   "status.hold.sentence_lc": "{mode, select, cool {preenfriando} other {precalentando}} a {target} hasta las horas punta de las {ends}, y después {after}",
+  "status.humid_air.blocking_ceiling": "Ventilador no arrancado: húmedo fuera (punto de rocío {outdoor}, en el límite {ceiling} o por encima)",
+  "status.humid_air.blocking_wetter": "Ventilador no arrancado: húmedo fuera (punto de rocío {outdoor}, más húmedo que la casa con {indoor})",
   "status.humidity_kind.chosen": "el sensor que elegiste",
   "status.humidity_kind.device_sensor": "sensor del dispositivo",
   "status.humidity_kind.thermostat": "termostato",

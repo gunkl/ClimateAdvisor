@@ -1,0 +1,105 @@
+{
+  "name": "humid_air_1691_whf_ceiling_window_open_paused",
+  "description": "Humid night (outdoor dew point ~67F, at or above the 65F ceiling): opening a window does not start the whole-house fan; HVAC pauses for the open window",
+  "source": "synthetic",
+  "issue": 1691,
+  "notes": [
+    "Dew points (feels_like.dew_point_f): indoor 76.0F at 50.0% = 56.01F; outdoor 70.0F at 90.2% = 66.99F. Ceiling = default 65F (option On).",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: deleting the third guard in decide_nat_vent_start_veto makes 20:10 read natural_ventilation and the fan start. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: without the guard the fan pulls 67F-dew-point air into a 56F-dew-point house all night; the house turns sticky."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Humid night (outdoor dew point ~67F, at or above the 65F ceiling): opening a window does not start the whole-house fan; HVAC pauses for the open window",
+    "observed_behavior": "paused",
+    "expected_behavior": "paused"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "events": [
+    {
+      "time": "2026-07-12T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 50.0,
+      "outdoor_humidity": 90.2,
+      "note": "Summer evening, windows closed: outdoor cooler than the house, so free cooling is on offer by temperature."
+    },
+    {
+      "time": "2026-07-12T20:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day, cool mode: with the windows closed the AC holds the band (no fan starts in a sealed house)."
+    },
+    {
+      "time": "2026-07-12T20:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "The occupant opens a window."
+    },
+    {
+      "time": "2026-07-12T20:15:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 50.0,
+      "outdoor_humidity": 90.2,
+      "note": "Five minutes later, same air: the engine re-asks the start question (paused-reactivation / idle-open re-check)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T20:01:00",
+      "expect": "classification_applied",
+      "reason": "Windows closed: the cool band is armed and the AC holds it."
+    },
+    {
+      "at": "2026-07-12T20:10:00",
+      "expect": "paused",
+      "reason": "Humid night (outdoor dew point ~67F, at or above the 65F ceiling): opening a window does not start the whole-house fan; HVAC pauses for the open window"
+    },
+    {
+      "at": "2026-07-12T20:15:00",
+      "expect": "paused",
+      "reason": "Still humid at the re-check: still no fan, and no second refusal row (one row per humid spell; a repeat would read nat_vent_humid_skip here)."
+    },
+    {
+      "at": "2026-07-12T20:10:00",
+      "expect": "nat_vent_not_active",
+      "reason": "No nat-vent session started on humid air."
+    },
+    {
+      "at": "2026-07-12T20:10:00",
+      "expect": "fan_not_active",
+      "reason": "The fan was not switched on."
+    },
+    {
+      "at": "2026-07-12T20:10:00",
+      "expect": "paused_by_door",
+      "reason": "The open window pauses HVAC like any other open window (household rule 3)."
+    },
+    {
+      "at": "2026-07-12T20:10:00",
+      "expect": "event_emitted",
+      "event": "nat_vent_humid_skip",
+      "payload_subset": {
+        "reason": "ceiling",
+        "starter": "nat_vent"
+      },
+      "reason": "The refusal is reported once (Activity row) with reason ceiling."
+    }
+  ]
+}

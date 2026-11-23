@@ -265,6 +265,14 @@ PARITY = [
         "",
     ),
     (
+        ["status-humid-air"],
+        "humid_air_guard",
+        "Humid-air guard line on the outdoor card (Issue #1691): fan not started, humid outside, with the dew point",
+        ['id="status-humid-air"', "humid_air_guard"],
+        "placed",
+        "",
+    ),
+    (
         [],
         "sleep_indoor_sensor_active",
         "Sleep sensor note on the Bedroom card",

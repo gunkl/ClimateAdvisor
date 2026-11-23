@@ -36,6 +36,7 @@ heating shutdown, Issue #1676) and ``glitch`` (``paired_glitch``, or 0 % RH).
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -422,7 +423,7 @@ class LatchSpec:
 
 # H1 humid-air guard (Issue #1691, plan #1507 H1): the relative clause "outdoor air wetter than the house" as one
 # latch on a derived signal (see ``humid_air_signals``). The configurable ceiling latch is not a fixed spec: it is
-# built from the option by ``humid_air_latch_specs``. Later lanes (H2, H3) append their fixed specs here.
+# built from the option by ``humid_air_latch_specs``. H2 (Issue #1693) adds its fixed spec below; H3 appends its own.
 HUMID_AIR_CEILING_LATCH = "humid_air_ceiling"
 HUMID_AIR_WETTER_LATCH = "humid_air_wetter"
 SIGNAL_OUTDOOR_WETTER_MARGIN = "outdoor_wetter_margin"
@@ -430,8 +431,22 @@ HUMID_AIR_HYSTERESIS_F = 1.0  # every H1 latch releases 1 °F below where it eng
 HUMID_AIR_RELATIVE_FLOOR_F = 55.0  # below this outdoor dew point, wetter-than-house air never blocks (it is dry air)
 HUMID_AIR_RELATIVE_MARGIN_F = 2.0  # outdoor dew point at least this far above the house's = wetter than the house
 
+# H2 humid-aware HVAC-fan restrict (Issue #1693, plan #1507 H2): the indoor dew point at or above
+# HVAC_FAN_RESTRICT_DP_F (released at or below HVAC_FAN_RESTRICT_DP_RELEASE_F) keeps the "cooled within the last 2 h"
+# clause of the 'heat' restriction; see ``hvac_fan_restrict_humid``. A dry house has little condensate to
+# re-evaporate, so the blower may circulate; unknown = the 2 h rule as before. Internal constants, no option. The same
+# 55 F as HUMID_AIR_RELATIVE_FLOOR_F with a different meaning: never reuse one for the other. The "currently in cool
+# mode" clause and the 'cool' restriction ("heated within 2 h") ignore humidity.
+HVAC_FAN_RESTRICT_DP_F = 55.0
+HVAC_FAN_RESTRICT_DP_RELEASE_F = 54.0
+HVAC_FAN_RESTRICT_HUMID_LATCH = "hvac_fan_restrict_humid"
+HVAC_FAN_RESTRICT_LATCH_SPEC = LatchSpec(
+    HVAC_FAN_RESTRICT_HUMID_LATCH, SIGNAL_INDOOR, HVAC_FAN_RESTRICT_DP_F, HVAC_FAN_RESTRICT_DP_RELEASE_F
+)
+
 LATCH_SPECS: tuple[LatchSpec, ...] = (
     LatchSpec(HUMID_AIR_WETTER_LATCH, SIGNAL_OUTDOOR_WETTER_MARGIN, 0.0, -HUMID_AIR_HYSTERESIS_F),
+    HVAC_FAN_RESTRICT_LATCH_SPEC,
 )
 
 
@@ -547,14 +562,30 @@ def humid_air_blocks(
     return humid_air_verdict(indoor_dp_f, outdoor_dp_f, ceiling_f=ceiling_f, latched=latched).blocks
 
 
-def humid_air_verdict_from_facts(facts: Any, ceiling_f: float | None) -> HumidAirVerdict:
-    """``humid_air_verdict`` on an ``EngineFacts`` (duck-typed: its dew points and ``humid_latches``)."""
-    return humid_air_verdict(
-        getattr(facts, "indoor_dew_point_f", None),
-        getattr(facts, "outdoor_dew_point_f", None),
-        ceiling_f=ceiling_f,
-        latched=getattr(facts, "humid_latches", None) or (),
+def _finite_dp(value: Any) -> float | None:
+    """A dew point read from facts: a finite number, else None (unknown). A stub's placeholder (MagicMock, NaN, a
+    bool) never passes for a real reading."""
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def _facts_dew_points(facts: Any) -> tuple[float | None, float | None, frozenset[str]]:
+    """The one reader of an ``EngineFacts``' humidity fields (duck-typed) for every humid rule: indoor and outdoor
+    dew point (finite numbers only, else unknown) and the names of the latches that are on."""
+    latches = getattr(facts, "humid_latches", None)
+    latched = frozenset(latches) if isinstance(latches, frozenset | set | tuple | list) else frozenset()
+    return (
+        _finite_dp(getattr(facts, "indoor_dew_point_f", None)),
+        _finite_dp(getattr(facts, "outdoor_dew_point_f", None)),
+        latched,
     )
+
+
+def humid_air_verdict_from_facts(facts: Any, ceiling_f: float | None) -> HumidAirVerdict:
+    """``humid_air_verdict`` on an ``EngineFacts`` (through ``_facts_dew_points``)."""
+    indoor, outdoor, latched = _facts_dew_points(facts)
+    return humid_air_verdict(indoor, outdoor, ceiling_f=ceiling_f, latched=latched)
 
 
 def humid_air_ceiling_from_config(config: Mapping[str, Any] | None) -> float | None:
@@ -571,3 +602,30 @@ def humid_air_ceiling_from_config(config: Mapping[str, Any] | None) -> float | N
     if value != value:  # NaN
         return DEFAULT_HUMID_AIR_GUARD_CEILING_F
     return min(max(value, MIN_HUMID_AIR_GUARD_CEILING_F), MAX_HUMID_AIR_GUARD_CEILING_F)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# H2 humid-aware HVAC-fan restrict (Issue #1693, plan #1507 H2).
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def hvac_fan_restrict_humid(indoor_dp_f: float | None, *, latched: Iterable[str] = ()) -> bool | None:
+    """Is the house humid enough that the blower must wait out the 2 h after cooling (wet coil)? Pure, never raises.
+
+    True at an indoor dew point >= ``HVAC_FAN_RESTRICT_DP_F`` (55 F), held while above
+    ``HVAC_FAN_RESTRICT_DP_RELEASE_F`` (54 F) when the latch ``hvac_fan_restrict_humid`` is in ``latched`` (from
+    ``EngineFacts.humid_latches``: the coordinator's 5-minute tick steps it with the other humid latches); False
+    below. None when the indoor dew point is unknown: the caller applies the 2 h rule as before (plan #1507 table).
+    """
+    if indoor_dp_f is None:
+        return None
+    was = frozenset(latched)
+    spec = HVAC_FAN_RESTRICT_LATCH_SPEC
+    return update_latches((spec,), {spec.signal: indoor_dp_f}, {spec.name: spec.name in was})[spec.name]
+
+
+def hvac_fan_restrict_humid_from_facts(facts: Any) -> tuple[bool | None, float | None]:
+    """``hvac_fan_restrict_humid`` on an ``EngineFacts`` (through ``_facts_dew_points``), with the indoor dew point
+    it judged."""
+    indoor, _outdoor, latched = _facts_dew_points(facts)
+    return hvac_fan_restrict_humid(indoor, latched=latched), indoor

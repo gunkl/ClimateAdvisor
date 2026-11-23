@@ -317,7 +317,7 @@
           "automation_grace_seconds": "Cuánto esperar tras un cambio automático de Climate Advisor antes de permitir otro.",
           "override_confirm_seconds": "Tiempo entre los cambios del sistema y la confirmación de un cambio manual. Los eventos pasajeros (reinicio del termostato, ciclos del ventilador) que se resuelven dentro de este margen se ignoran automáticamente. Pon 0 para confirmar de inmediato.",
           "fan_mode": "Cómo controlar los ventiladores para ventilar. «Ventilador de toda la casa» controla una entidad de ventilador dedicada. «Ventilador de la climatización» usa el modo de ventilador del termostato.",
-          "hvac_fan_restrict_mode": "En climas húmedos, «Solo calefacción» no usa el ventilador de la climatización durante 2 horas tras enfriar, para evitar la humedad del serpentín mojado.",
+          "hvac_fan_restrict_mode": "En climas húmedos, «Solo calefacción» no usa el ventilador de la climatización durante 2 horas tras enfriar mientras la casa esté húmeda, para evitar la humedad del serpentín mojado.",
           "fan_entity": "La entidad de ventilador o interruptor que se controlará (solo necesaria para el modo de ventilador de toda la casa).",
           "fan_state_entity": "Sensor independiente opcional para leer el estado físico del ventilador (para ventiladores de toda la casa con dos entidades). Déjalo en blanco para usar también la entidad del ventilador para el estado.",
           "fan_state_feedback": "Actívalo si tu entidad de ventilador o sensor de estado informa del estado real del motor (no solo de la última orden enviada). Déjalo desactivado si no estás seguro: CA ordenará al ventilador el estado deseado en cada ciclo.",

@@ -7137,8 +7137,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Warms the device lookups the pure readers use, notes sensors coming back from unavailable (the
         ``paired_glitch`` "first reading after unavailable" rule for entities without a listener), stores one sample
         per signal (a lasting unknown forgets the old samples, a momentary glitch keeps them) and steps the humid
-        latches (``humidity_facts.step_humid_latches``: ``LATCH_SPECS`` plus the H1 ceiling from the options, Issue
-        #1691). Logs at DEBUG only: nothing is decided here.
+        latches (``humidity_facts.step_humid_latches``: ``LATCH_SPECS`` -- the H1 wetter latch and the H2 HVAC-fan
+        restrict latch, Issue #1693 -- plus the H1 ceiling from the options, Issue #1691). Logs at DEBUG only:
+        nothing is decided here.
         """
         watch = self._reconnect_watch_for()
         history = self.__dict__.get("_dew_point_history")

@@ -1,0 +1,336 @@
+{
+  "name": "humid_fan_restrict_1693_coordinator_latch_holds_then_releases",
+  "description": "Real coordinator: the restrict latch engages at a 55.5F indoor dew point, holds at 54.5F (inside the 1F band) and releases at 53.5F, still within 2 h of cooling",
+  "source": "synthetic",
+  "issue": 1693,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Indoor 76.0F at 47.3% = 54.49F; at 45.6% = 53.48F; 77.0F at 47.5% = 55.51F. Outdoor 70.0F at 49.1% = 50.01F dew point (dry: the #1691 humid-air guard does not block).",
+    "The coordinator's 5-minute dew-point tick (_sample_humidity_facts -> step_humid_latches) keeps the hvac_fan_restrict_humid latch; each decision re-steps it from the facts (15-minute median dew point).",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: without the latch 54.5F < 55F would lift the restriction and 20:45 would read natural_ventilation; without the humid clause 21:30 would still read paused (cooling ended 20:00). (b) docs-production: docs/08-COMPUTATION-REFERENCE.md states 55F on / 54F off through latch_above; production steps humidity_facts.HVAC_FAN_RESTRICT_LATCH_SPEC with the other humid latches. (c) occupant: the blower would chatter on and off as the dew point hovers at 55F."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Real coordinator: the restrict latch engages at a 55.5F indoor dew point, holds at 54.5F (inside the 1F band) and releases at 53.5F, still within 2 h of cooling",
+    "observed_behavior": "paused, paused, natural_ventilation",
+    "expected_behavior": "paused, paused, natural_ventilation"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "hvac_fan",
+    "hvac_fan_restrict_mode": "heat",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T19:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.9,
+      "outdoor_humidity": 49.1,
+      "note": "Hot evening, windows closed, the house is above the 76F ceiling."
+    },
+    {
+      "time": "2026-07-12T19:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day, cool band: the AC runs (the thermostat reports hvac_action cooling, which stamps the restriction's last-cooled time)."
+    },
+    {
+      "time": "2026-07-12T19:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.5,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T20:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "The occupant opens a window: HVAC pauses (cool -> off); the coil is still wet from the run that just stopped."
+    },
+    {
+      "time": "2026-07-12T20:05:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.3,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point eases to 54.5F: below the 55F trigger but above the 54F release, so the latch holds."
+    },
+    {
+      "time": "2026-07-12T20:10:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.3,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point eases to 54.5F: below the 55F trigger but above the 54F release, so the latch holds."
+    },
+    {
+      "time": "2026-07-12T20:15:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.3,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point eases to 54.5F: below the 55F trigger but above the 54F release, so the latch holds."
+    },
+    {
+      "time": "2026-07-12T20:20:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.3,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point eases to 54.5F: below the 55F trigger but above the 54F release, so the latch holds."
+    },
+    {
+      "time": "2026-07-12T20:25:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.3,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point eases to 54.5F: below the 55F trigger but above the 54F release, so the latch holds."
+    },
+    {
+      "time": "2026-07-12T20:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.3,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point eases to 54.5F: below the 55F trigger but above the 54F release, so the latch holds."
+    },
+    {
+      "time": "2026-07-12T20:35:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.3,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point eases to 54.5F: below the 55F trigger but above the 54F release, so the latch holds."
+    },
+    {
+      "time": "2026-07-12T20:40:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.3,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point eases to 54.5F: below the 55F trigger but above the 54F release, so the latch holds."
+    },
+    {
+      "time": "2026-07-12T20:45:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 47.3,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point eases to 54.5F: below the 55F trigger but above the 54F release, so the latch holds."
+    },
+    {
+      "time": "2026-07-12T20:50:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.6,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point 53.5F: at or below the 54F release, the latch lets go once the 15-minute median follows."
+    },
+    {
+      "time": "2026-07-12T20:55:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.6,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point 53.5F: at or below the 54F release, the latch lets go once the 15-minute median follows."
+    },
+    {
+      "time": "2026-07-12T21:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.6,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point 53.5F: released."
+    },
+    {
+      "time": "2026-07-12T21:05:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.6,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point 53.5F: released."
+    },
+    {
+      "time": "2026-07-12T21:10:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.6,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point 53.5F: released."
+    },
+    {
+      "time": "2026-07-12T21:15:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.6,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point 53.5F: released."
+    },
+    {
+      "time": "2026-07-12T21:20:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.6,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point 53.5F: released."
+    },
+    {
+      "time": "2026-07-12T21:25:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.6,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point 53.5F: released."
+    },
+    {
+      "time": "2026-07-12T21:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 45.6,
+      "outdoor_humidity": 49.1,
+      "note": "Indoor dew point 53.5F: released."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T20:00:00",
+      "expect": "paused",
+      "reason": "55.5F engages the latch: restricted after cooling."
+    },
+    {
+      "at": "2026-07-12T20:45:00",
+      "expect": "paused",
+      "reason": "54.5F is inside the 1F band: the latch holds, still no blower."
+    },
+    {
+      "at": "2026-07-12T21:30:00",
+      "expect": "natural_ventilation",
+      "reason": "53.5F is at or below the 54F release: the paused window gets its blower session, although cooling ended only 90 minutes ago."
+    }
+  ]
+}

@@ -875,7 +875,7 @@
     "key": "hvac_fan_restrict_mode",
     "value": "both",
     "label": "HVAC Fan Restriction",
-    "description": "Restricts when the HVAC fan (thermostat blower circulation) is allowed to run, based on which HVAC mode last ran. Does not affect the whole-house fan. 'Heat only' blocks the HVAC fan while the thermostat is in cool mode, or off within 2 hours of a cooling cycle \u2014 avoids raising humidity by re-evaporating condensate off wet coils, useful in humid climates. 'Cool only' is the symmetric restriction. 'Both' (default) applies no restriction \u2014 current behavior.",
+    "description": "Restricts when the HVAC fan (thermostat blower circulation) is allowed to run, based on which HVAC mode last ran. Does not affect the whole-house fan. 'Heat only' blocks the HVAC fan while the thermostat is in cool mode, or off within 2 hours of a cooling cycle while the house is humid \u2014 avoids raising humidity by re-evaporating condensate off wet coils, useful in humid climates. 'Cool only' is the symmetric restriction. 'Both' (default) applies no restriction \u2014 current behavior.",
     "category": "fan",
     "label_msg": {
      "key": "settings.hvac_fan_restrict_mode.label",

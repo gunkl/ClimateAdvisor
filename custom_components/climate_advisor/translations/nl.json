@@ -317,7 +317,7 @@
           "automation_grace_seconds": "Hoe lang er na een automatische wijziging van Climate Advisor wordt gewacht voordat een volgende is toegestaan.",
           "override_confirm_seconds": "Tijd tussen systeemwijzigingen en de bevestiging van een handmatige wijziging. Kortstondige gebeurtenissen (herstart van de thermostaat, ventilatorcycli) die binnen dit venster verdwijnen, worden automatisch genegeerd. Stel in op 0 om handmatige wijzigingen direct te bevestigen.",
           "fan_mode": "Hoe ventilatoren voor ventilatie worden bediend. ‘Huisventilator’ bedient een aparte ventilatorentiteit. ‘HVAC-ventilator’ gebruikt de ventilatorstand van de thermostaat.",
-          "hvac_fan_restrict_mode": "Voor vochtige klimaten: ‘Alleen verwarmen’ laat de HVAC-ventilator na het koelen 2 uur uit om vocht van de natte verdamper te voorkomen.",
+          "hvac_fan_restrict_mode": "Voor vochtige klimaten: ‘Alleen verwarmen’ laat de HVAC-ventilator na het koelen 2 uur uit zolang het huis vochtig is, om vocht van de natte verdamper te voorkomen.",
           "fan_entity": "De ventilator- of schakelaarentiteit die wordt bediend (alleen nodig voor de huisventilatormodus).",
           "fan_state_entity": "Optionele aparte sensor om de fysieke ventilatorstatus uit te lezen (voor huisventilatoren met twee entiteiten). Laat leeg om ook voor de status de ventilatorentiteit te gebruiken.",
           "fan_state_feedback": "Zet aan als je ventilatorentiteit of statussensor de werkelijke motorstatus meldt (niet alleen de laatst verstuurde opdracht). Laat uit als je het niet zeker weet — CA stuurt dan elke cyclus de gewenste status naar de ventilator.",

@@ -317,7 +317,7 @@
           "automation_grace_seconds": "Jak długo czekać po automatycznej zmianie wprowadzonej przez Climate Advisor, zanim dozwolona będzie kolejna.",
           "override_confirm_seconds": "Czas między zmianami systemowymi a potwierdzeniem ręcznej zmiany. Przejściowe zdarzenia (restart termostatu, cykle wentylatora), które ustąpią w tym czasie, są automatycznie ignorowane. Ustaw 0, aby potwierdzać ręczne zmiany natychmiast.",
           "fan_mode": "Jak sterować wentylatorami do wietrzenia. „Wentylator całego domu” steruje dedykowaną encją wentylatora. „Wentylator HVAC” używa trybu wentylatora termostatu.",
-          "hvac_fan_restrict_mode": "W wilgotnym klimacie opcja „Tylko grzanie” wyłącza wentylator HVAC na 2 godziny po chłodzeniu, aby uniknąć wilgoci z mokrego parownika.",
+          "hvac_fan_restrict_mode": "W wilgotnym klimacie opcja „Tylko grzanie” wyłącza wentylator HVAC na 2 godziny po chłodzeniu, gdy w domu jest wilgotno, aby uniknąć wilgoci z mokrego parownika.",
           "fan_entity": "Encja wentylatora lub przełącznika do sterowania (potrzebna tylko w trybie wentylatora całego domu).",
           "fan_state_entity": "Opcjonalny osobny czujnik do odczytu fizycznego stanu wentylatora (dla wentylatorów całego domu z dwiema encjami). Zostaw puste, aby stan również odczytywać z pola „Encja wentylatora”.",
           "fan_state_feedback": "Włącz, jeśli encja wentylatora lub czujnik stanu raportuje rzeczywisty stan silnika (a nie tylko ostatnio wysłane polecenie). Zostaw wyłączone, jeśli nie masz pewności — CA będzie w każdym cyklu wysyłać do wentylatora żądany stan.",

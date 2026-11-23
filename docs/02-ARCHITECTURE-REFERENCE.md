@@ -622,7 +622,7 @@ an event into the production event log) as a concrete negative example for revie
 ## Engine-State Ownership (Issue #1443)
 
 Occupant view: the decisions Climate Advisor makes for the house (may a window-open fan session start, the nat-vent
-soft start, the time-of-use Away bank, the remote-sensor swing, the "HVAC cooled within 2 h" fan restriction) act on
+soft start, the time-of-use Away bank, the remote-sensor swing, the "HVAC cooled within 2 h" fan restriction and its indoor dew point, #1693) act on
 the forecast, learned thermal model, today's outdoor peak and TOU window the coordinator holds when it asks, never on
 a copy one path forgot to refresh. Before #1443 the coordinator hand-pushed copies into engine privates; #1440 was one
 that drifted on the real-HA tier (the adapter seeded only the engine's forecast copy, the coordinator's refresh pushed

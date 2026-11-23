@@ -165,3 +165,7 @@ Tests: `tests/test_night_strategy.py` (physics, ranking, gate, fan modes, hidden
 ## Translation (Issue #1341, area `night`)
 
 Every occupant sentence is a catalog message in `frontend/i18n/night/en.json`: option labels and notes (`night.option_*`, `night.note_*`), the headline (`night.headline` nesting `night.headline_*` and `night.hold_*`), the trade-off lines (`night.tradeoff*`, parts joined as a locale list, so English reads "a, b, and c") and the step sentences (`night.sentence_<id>`, derived by `sentence_msg_key`). `NIGHT_SENTENCES` keeps the English template for the timeline's sentence table; a test pins it equal to the catalog entry. `StrategyOption.label_msg/note_msg`, `headline_msg()`, `sentence_msg()` build the `Msg`s; `api_payload(..., lang=)` renders the prose in the backend language and adds `label_msg`, `note_msg`, `headline_msg`, `source_note_msg` and per-trade-off `text_msg`/`label_msg` wire siblings. Timeline steps keep English `text` (a record) and carry the wire in `meta["text_msg"]`. Times are `i18n.Time` (aware local datetimes), temperatures `i18n.Temp` rounded to the half degree.
+
+## Zone capability (Issue #1544)
+
+`NightInputs.can_heat` / `can_cool` come from the timeline snapshot (`coordinator.zone_service()`: equipment, outdoor lockouts, season), no longer from the thermostat's advertised modes, so a cool lockout tonight means no AC option in the bedroom plan. Test: `tests/test_zone_surfaces_1544.py::TestHeadlessCoordinator::test_night_plan_is_told_the_served_families`.

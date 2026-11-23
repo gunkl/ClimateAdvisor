@@ -49,6 +49,7 @@ from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .remote_offset import cap_f, max_magnitude_f
 from .temperature import outdoor_direction_ok_for_thermostat
 from .thermal_confidence import grade_hvac_confidence, grade_solar_confidence
+from .zone_capability import ZoneService
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -720,6 +721,9 @@ class TimelineSnapshot:
     primary_sensor_label: str = "thermostat"
     can_heat: bool = True
     can_cool: bool = True
+    # Issue #1544: families the zone does not serve (can_* False) but runs RIGHT NOW because a policy lock stepped
+    # aside for the safety release. Only the plan's current hour simulates them; later hours stay unserved.
+    released_now: tuple[str, ...] = ()
     # plan
     band_at: BandFn | None = None
     occupancy_mode: str = "home"
@@ -1395,11 +1399,14 @@ class _Simulator:
                 # The thermostat holds whichever edge the house would otherwise cross (both armed; an away or
                 # vacation band is just a wider band). The equipment rate is the learned one; the run is the
                 # fraction of the step needed to get back to the edge.
-                if free < hold_floor and snap.can_heat and heat_rate:
+                current = ts < snap.now + timedelta(hours=1)
+                can_heat = snap.can_heat or (current and "heat" in snap.released_now)
+                can_cool = snap.can_cool or (current and "cool" in snap.released_now)
+                if free < hold_floor and can_heat and heat_rate:
                     rate = heat_rate
                     gain = min(hold_floor - free, rate * dt_h)
                     nxt, hvac_min, hvac_mode = free + gain, gain / rate * 60.0, "heat"
-                elif free > hold_ceiling and snap.can_cool and cool_rate:
+                elif free > hold_ceiling and can_cool and cool_rate:
                     rate = cool_rate
                     gain = min(free - hold_ceiling, rate * dt_h)
                     nxt, hvac_min, hvac_mode = free - gain, gain / rate * 60.0, "cool"
@@ -1452,6 +1459,39 @@ def _direction_ok(snap: TimelineSnapshot, seg: Segment, outdoor: float, indoor: 
         swing_heat_f=rates.swing_heat,
         swing_cool_f=rates.swing_cool,
     )
+
+
+def zone_masked(snap: TimelineSnapshot) -> TimelineSnapshot:
+    """The snapshot as this zone can run it (Issue #1542 / #1544): no plan step about a family it does not serve.
+
+    Occupant view: a heat-only home (electric baseboards) on a hot day sees the heat held at the floor and window and
+    blind advice, never an AC run, a pre-cool, a cooling bank or "the AC switches on to hold the ceiling"; a cool-only
+    home gets the mirror. ``can_heat`` / ``can_cool`` come from the zone's served families
+    (``AutomationEngine.zone_service()``). The day modes (and each plan day's ``hvac_mode``) become the mode the zone
+    actually runs (``ZoneService.shown_mode``), the overnight pre-cool and the ceiling guard need cooling, a time-of-use
+    bank its own family, and the away/vacation high-cost widening the family of the edge it widens. Idempotent; a zone
+    that serves both families is returned unchanged.
+    """
+    if snap.can_heat and snap.can_cool:
+        return snap
+    service = ZoneService(heat=snap.can_heat, cool=snap.can_cool)
+    changes: dict[str, Any] = {
+        "day_modes": {d: service.shown_mode(m) or "off" for d, m in snap.day_modes.items()},
+        "plan_days": tuple(
+            {**day, "hvac_mode": service.shown_mode(day.get("hvac_mode"))} if "hvac_mode" in day else day
+            for day in snap.plan_days
+        ),
+    }
+    if not snap.can_cool:
+        changes.update(pre_cool_trigger=None, pre_cool_target=None, ceiling_breach=None)
+    if snap.tou_mode in ("heat", "cool") and not service.serves(snap.tou_mode):
+        changes.update(tou_precondition_start=None, tou_schedule_start=None, tou_target=None, tou_mode=None)
+    if snap.tou_av_start is not None:
+        raw = snap.day_modes.get(snap.tou_av_start.date())
+        widened = "heat" if raw == "heat" else "cool"  # the edge build_timeline widens: the floor only on a heat day
+        if not service.serves(widened):
+            changes.update(tou_av_start=None, tou_av_end=None, tou_av_expansion_f=None)
+    return replace(snap, **changes)
 
 
 def promise_end(now: datetime) -> datetime:
@@ -1546,13 +1586,15 @@ def _scan_candidates(
         seg = st.seg
         if seg.occupancy not in ("home", "guest") or seg.asleep:
             kind = None  # nobody to open a window: away, or asleep
-        elif st.free > seg.ceiling and st.out <= st.temp - FREE_COOL_MIN_DELTA_F and snap.can_cool:
+        # Issue #1544 (review): no can_cool / can_heat gate here. Window advice is exactly what the side the zone cannot
+        # serve gets (a heat-only home on a hot evening is told to open up); the benefit gate counts the discomfort
+        # saved when there are no AC minutes to save.
+        elif st.free > seg.ceiling and st.out <= st.temp - FREE_COOL_MIN_DELTA_F:
             kind = "free_cooling"
         elif (
             FREE_HEAT_START_H <= st.ts.hour < FREE_HEAT_END_H
             and st.out >= st.temp + FREE_HEAT_MIN_DELTA_F
             and st.temp < (seg.floor + seg.ceiling) / 2.0
-            and snap.can_heat
         ):
             kind = "free_heating"
         if kind is not None and not _direction_ok(snap, seg, st.out, st.temp, rates):
@@ -1888,6 +1930,7 @@ def build_timeline(
     snap: TimelineSnapshot, *, generation: int = 1, regenerated_for: Sequence[str] = ()
 ) -> DetailedTimeline:
     """The whole plan from one snapshot. Never raises on missing optional inputs: steps whose facts are missing drop."""
+    snap = zone_masked(snap)  # Issue #1542: never plan a family the zone does not serve
     now = snap.now
     end = timeline_end(snap)
     unit = snap.unit
@@ -2447,6 +2490,10 @@ class PlanSignature:
     automation_enabled: bool
     windows_span: tuple[str, str] | None
     forecast: tuple[tuple[float, float], ...]
+    # Issue #1544: the families the zone serves; a lockout or season change regenerates (reason "zone") even when the
+    # day mode stays the same (a heat day whose cooling locks out drops tonight's pre-cool / ceiling-guard steps).
+    can_heat: bool = True
+    can_cool: bool = True
 
     @classmethod
     def of(cls, snap: TimelineSnapshot, segments: Sequence[Segment]) -> PlanSignature:
@@ -2472,6 +2519,8 @@ class PlanSignature:
             bool(snap.automation_enabled),
             span,
             tuple(_forecast_signature(snap)),
+            bool(snap.can_heat),
+            bool(snap.can_cool),
         )
 
 
@@ -2481,8 +2530,8 @@ def material_changes(old: PlanSignature, new: PlanSignature, now: datetime) -> l
     "Material" (documented in docs/operation-timeline-spec.md): a classification change (day type, mode, windows
     recommendation or span), a setpoint or band change (any segment edge moves >= 0.5 F, a segment appears or goes),
     an occupancy change, a fan-mode change, a sensor-driven pause starting or ending, an override or grace starting or
-    ending, automation switched on or off, or the forecast moving by more than N (mean change of the next 12 h >= 2 F,
-    or the next-24-h high or low moved >= 3 F).
+    ending, automation switched on or off, the zone's served families changing (Issue #1544, "zone"), or the forecast
+    moving by more than N (mean change of the next 12 h >= 2 F, or the next-24-h high or low moved >= 3 F).
     """
     reasons: list[str] = []
     if (old.day_type, old.hvac_mode) != (new.day_type, new.hvac_mode):
@@ -2501,6 +2550,8 @@ def material_changes(old: PlanSignature, new: PlanSignature, now: datetime) -> l
         reasons.append("override")
     if old.automation_enabled != new.automation_enabled:
         reasons.append("automation")
+    if (old.can_heat, old.can_cool) != (new.can_heat, new.can_cool):
+        reasons.append("zone")
     mean, peak = forecast_shift(old.forecast, new.forecast, now)
     if mean >= MATERIAL_FORECAST_MEAN_F or peak >= MATERIAL_FORECAST_PEAK_F:
         reasons.append("forecast")
@@ -2580,6 +2631,7 @@ class TimelineLatch:
         return self._timeline
 
     def update(self, snap: TimelineSnapshot, *, force: str | None = None) -> LatchOutcome:
+        snap = zone_masked(snap)  # Issue #1542: the signature sees the modes the zone actually runs
         end = timeline_end(snap)
         segments = build_segments(snap, end)
         sig = PlanSignature.of(snap, segments)

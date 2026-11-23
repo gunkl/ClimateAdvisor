@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "czujnik przestał się aktualizować",
   "status.indoor_source.why.unavailable": "czujnik niedostępny",
   "status.next_action.close_doors_heater": "Zamknij drzwi, aby wspomóc ogrzewanie.",
+  "status.next_action.close_up_keep_warmth": "Zamknij okna i drzwi, żeby zatrzymać ciepło.",
   "status.next_action.close_windows_by": "Zamknij okna do {t}",
   "status.next_action.close_windows_heater": "Zamknij okna, aby ogrzewanie mogło działać.",
   "status.next_action.close_windows_hold_heat": "Zamknij okna, aby zatrzymać ciepło — na zewnątrz jest chłodniej ({outdoor} wobec {indoor}).",

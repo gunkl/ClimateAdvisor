@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "stale",
   "status.indoor_source.why.unavailable": "unavailable",
   "status.next_action.close_doors_heater": "Close doors to help the heater.",
+  "status.next_action.close_up_keep_warmth": "Close windows and doors to keep the warmth in.",
   "status.next_action.close_windows_by": "Close windows by {t}",
   "status.next_action.close_windows_heater": "Close windows to enable the heater.",
   "status.next_action.close_windows_hold_heat": "Close windows to hold heat — outdoor's cooler ({outdoor} vs {indoor}).",

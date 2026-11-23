@@ -917,5 +917,6 @@
   "dashboard.night.level.medium": "中",
   "dashboard.status.fan_speed_high": "高速",
   "dashboard.status.fan_speed_low": "低速",
-  "dashboard.status.fan_speed_medium": "中速"
+  "dashboard.status.fan_speed_medium": "中速",
+  "dashboard.chart.ds.band_advisory": "目標範圍（{family, select, cool {冷氣} other {暖氣}}邊界僅供參考：{reason, select, equipment {無設備} outdoor_lockout {室外鎖定} season {季節設定} other {無法使用}}）"
 }

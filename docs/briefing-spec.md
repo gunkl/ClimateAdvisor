@@ -27,6 +27,7 @@ learning suggestions, and any required human actions.
 | How does the grace period state appear in briefing output? | [§ Grace Period Injection](#grace-period-injection) |
 | How does the header table stay consistent with the conversational body? | [§ Single Source of Truth for Warm-Day Timing (Issue #518)](#single-source-of-truth-for-warm-day-timing-issue-518) |
 | What does each day-type briefing look like? | [Briefing Examples](04-BRIEFING-EXAMPLES.md) |
+| What does a heat-only or cool-only home (or one with a side locked out) read (Issue #1488)? | Only what its equipment will do: the day mode the zone runs, the unserved side as advice with its reason. | [§ Zone capability (Issue #1488)](#zone-capability-issue-1488) |
 | Why does the TLDR table stay under HA's 255-char sensor state limit? | [§ TLDR Table Length Budget (Issue #555)](#tldr-table-length-budget-issue-555) |
 
 ## Date Computation
@@ -304,3 +305,22 @@ sleep-band edge (`select_comfort_band(..., in_sleep_window=True)`, Issue #1231 �
 `DEFAULT_SETBACK_DEPTH_F` arithmetic in the briefing); `learning_suggestions=None` simply omits that
 section. There is no explicit "data is stale" messaging in the briefing itself — staleness is
 prevented upstream by the coordinator's early-return, not communicated to the user.
+
+## Zone capability (Issue #1488)
+
+**Occupant first:** a heat-only home on a 92 °F day was told "HVAC Mode: Cool at 75°F", "Tonight I'll pre-cool the house" and "I'll handle the AC transition"; the person could close up and leave expecting a cool house. Now it reads "HVAC Mode: Heat at 70°F (no cooling)" and window, blind and ventilation advice.
+
+`generate_briefing(..., zone_service=)` takes the zone service (the coordinator passes `coordinator.day_zone_service()`: an outdoor lockout the rest of today's forecast releases counts as served for the day, so a desert dawn lockout does not turn into "no cooling today"; None = both families, unchanged). When a family is not served:
+
+| Surface | Rule |
+|---|---|
+| Day mode (TLDR, leaving home, fresh air, bedtime) | `ZoneService.shown_mode(c.hvac_mode)` on a shallow copy of the classification (never `dataclasses.replace`, which re-derives `hvac_mode`). The coordinator sizes the bedtime set-back on the same mode. |
+| TLDR HVAC row | When the classifier's own day mode is the unserved family: `briefing.tldr.hvac_heat_advisory` / `hvac_cool_advisory` ("Heat at 70°F (no cooling)", "(cooling locked out)", "(heat-only season)"); neither family: `hvac_off_advisory`. |
+| Hot day, no cooling | `_hot_advisory_msg`: the reason (`briefing.advisory.no_cooling`: equipment / outdoor lockout / season), close up when outdoor passes the threshold, blinds drawn, open up once outdoor is cooler. No pre-cool, no AC. |
+| Warm day, no cooling | The AC sentence becomes `briefing.advisory.warm_no_cooling`; no pre-cool; the evening reopen never cancels an AC; the morning-air line drops "without the AC". |
+| Cool / cold day, no heating | `_cold_advisory_msg` ("close up, the sun is your heat"); no heater or bedtime set-back promise. |
+| Mild day, no heating | The close-up line keeps the warmth in (`briefing.advisory.mild_close`), never "the heater comes back on"; "I warmed to X" is never claimed. |
+| Bands | `_held_band_msg`: a single-family zone quotes "at least 70°F" / "at most 75°F". |
+| Tonight | "Less heating needed" / "expect the heater to run more" / the pre-heat tuning line only where heating is served. |
+
+Tests: `tests/test_zone_surfaces_1544.py::TestBriefing`, `::TestHeadlessCoordinator::test_briefing_bedtime_is_the_sleep_floor_on_a_heat_only_hot_day`, the golden matrix.

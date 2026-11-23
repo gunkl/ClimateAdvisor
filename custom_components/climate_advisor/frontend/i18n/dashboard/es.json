@@ -917,5 +917,6 @@
   "dashboard.night.level.medium": "media",
   "dashboard.status.fan_speed_high": "alta",
   "dashboard.status.fan_speed_low": "baja",
-  "dashboard.status.fan_speed_medium": "media"
+  "dashboard.status.fan_speed_medium": "media",
+  "dashboard.chart.ds.band_advisory": "Rango objetivo (borde de {family, select, cool {refrigeración} other {calefacción}} orientativo: {reason, select, equipment {sin equipo} outdoor_lockout {bloqueo exterior} season {ajuste de temporada} other {no disponible}})"
 }

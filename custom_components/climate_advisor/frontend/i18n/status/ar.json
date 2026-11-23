@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "توقف المستشعر عن التحديث",
   "status.indoor_source.why.unavailable": "المستشعر غير متاح",
   "status.next_action.close_doors_heater": "أغلق الأبواب لمساعدة التدفئة.",
+  "status.next_action.close_up_keep_warmth": "أغلق النوافذ والأبواب لتحتفظ بالدفء.",
   "status.next_action.close_windows_by": "أغلق النوافذ قبل {t}",
   "status.next_action.close_windows_heater": "أغلق النوافذ لتتمكن التدفئة من العمل.",
   "status.next_action.close_windows_hold_heat": "أغلق النوافذ للحفاظ على الدفء — الجو في الخارج أبرد (الخارج {outdoor}، الداخل {indoor}).",

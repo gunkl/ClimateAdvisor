@@ -1327,6 +1327,10 @@ def _p7_runs(inp: PromiseInput, cfg: PromiseConfig) -> list[dict[str, Any]]:
     def in_control(idx: int, r: Reading, side: str, dist: float) -> bool:
         if r.hvac_mode is None or r.contacts_open is True or r.fan_on is True:
             return False
+        # Issue #1544: an edge the zone does not serve (no equipment, a lockout, the season) is advisory, so the room
+        # past it is outside what the equipment allows -- never Climate Advisor failing to keep it.
+        if (side == "above" and r.serves_cool is False) or (side == "below" and r.serves_heat is False):
+            return False
         if _p7_unoccupied(r, away_tl) or _state_at(vent_tl, r.ts):
             return False
         if any(e.start_ts <= r.ts and (e.end_ts is None or e.end_ts >= r.ts) for e in inp.episodes):

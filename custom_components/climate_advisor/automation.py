@@ -18016,6 +18016,26 @@ class AutomationEngine:
             _LOGGER.debug("ODE ceiling guard: dormant — no breach above %.1f°F predicted", _threshold)
             return
 
+        # Issue #1699: a predictive cool write in a zone that cannot cool now (cool lockout / season / equipment; a
+        # house deeper past the ceiling than the tolerance releases the lock and the selector arms cool itself).
+        # Issue #1544 (review): checked before the breach is logged. The predicted curve of a zone that cannot cool is
+        # honest drift (``_build_predicted_indoor_future(zone_service=)``), so it predicts breaches nothing can act on;
+        # without this ordering every cycle logged "breach predicted" at INFO for a guard that never writes.
+        _band_zone = self._last_comfort_band
+        if not self._zone_mode_allowed(
+            "cool",
+            floor=_band_zone.floor if _band_zone is not None else None,
+            ceiling=_band_zone.ceiling if _band_zone is not None else None,
+            indoor=_indoor_cg,
+            day_type=classification.day_type,
+        ):
+            _LOGGER.debug(
+                "ODE ceiling guard write skipped: cooling unavailable in this zone now (indoor=%s ceiling=%s)",
+                _indoor_cg,
+                _ceiling_cg,
+            )
+            return
+
         # STANDING_BY or ESCALATE — both logged a breach-predicted INFO line first.
         _breach_ts = outcome_obj.breach_ts
         _hours_to_breach = outcome_obj.hours_to_breach
@@ -18055,23 +18075,6 @@ class AutomationEngine:
                 " switching to cool",
                 _minutes_since_heat,
                 _recency_window,
-            )
-            return
-
-        # Issue #1699: a predictive cool write in a zone that cannot cool now (cool lockout / season / equipment; a
-        # house deeper past the ceiling than the tolerance releases the lock and the selector arms cool itself).
-        _band_zone = self._last_comfort_band
-        if not self._zone_mode_allowed(
-            "cool",
-            floor=_band_zone.floor if _band_zone is not None else None,
-            ceiling=_band_zone.ceiling if _band_zone is not None else None,
-            indoor=_indoor_cg,
-            day_type=classification.day_type,
-        ):
-            _LOGGER.info(
-                "ODE ceiling guard write skipped: cooling unavailable in this zone now (indoor=%s ceiling=%s)",
-                _indoor_cg,
-                _ceiling_cg,
             )
             return
 
@@ -22058,6 +22061,14 @@ class AutomationEngine:
         if family not in (zc.FAMILY_HEAT, zc.FAMILY_COOL):
             return True
         return self._zone_capability().bank_allowed(family)
+
+    def zone_service(self) -> zc.ZoneService:
+        """What the plan, briefing, promises and judges may count on now (Issue #1544, phase 2).
+
+        Served = available and not policy-locked (the safety release is a backstop, never planned or promised), from
+        the recorded resolver state. Every display surface reads this, never ``_get_thermostat_capabilities()``.
+        """
+        return zc.service_from(self._zone_capability())
 
     def _zone_unavailable_reason(self, mode: str, zone: zc.ZoneCapability) -> str:
         """The reason code a refused ``mode`` is logged with (a band mode names the first unavailable side)."""

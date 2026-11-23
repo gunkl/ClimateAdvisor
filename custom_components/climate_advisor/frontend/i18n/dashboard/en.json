@@ -917,5 +917,6 @@
   "dashboard.night.level.medium": "medium",
   "dashboard.status.fan_speed_high": "high",
   "dashboard.status.fan_speed_low": "low",
-  "dashboard.status.fan_speed_medium": "medium"
+  "dashboard.status.fan_speed_medium": "medium",
+  "dashboard.chart.ds.band_advisory": "Target Band ({family, select, cool {cooling} other {heating}} edge advisory: {reason, select, equipment {no equipment} outdoor_lockout {outdoor lockout} season {season setting} other {unavailable}})"
 }

@@ -313,3 +313,106 @@ def masked_modes(modes: Iterable[str], zone: ZoneCapability) -> tuple[str, ...]:
     locked side behaves exactly like a heat-only or cool-only thermostat. Every other mode (off, fan_only, dry) stays.
     """
     return tuple(m for m in modes if zone.mode_allowed(m))
+
+
+# ---- Phase 2 (#1544): what the plan, briefing and judges may count on ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class ZoneService:
+    """Which families the zone SERVES for planning, promising and judging (Issue #1544, phase 2).
+
+    Occupant view: a heat-only home is never promised air conditioning, planned with AC runs or told that Climate
+    Advisor failed to keep it cool; the side it cannot serve becomes advice (windows, blinds, ventilation; "close
+    up, the sun is your heat" for a cool-only home).
+
+    A family is served when it is available AND no policy lock (outdoor lockout, season) is engaged: the safety
+    release is a backstop the selector applies past the tolerance, never something to plan or promise. ``*_reason``
+    names why a family is not served (``equipment`` / ``outdoor_lockout`` / ``season``); None when it is served.
+
+    ``defended_*`` (None = same as served) is the JUDGING view: a family is defended while it can run right now,
+    which includes a policy lock stepping aside for the safety release. Incidents, the Comfort Score, the stall alert
+    and P7 judge a defended edge (a release that runs and still fails is a real failure); planning and promises use
+    the served view.
+    """
+
+    heat: bool = True
+    cool: bool = True
+    heat_reason: str | None = None
+    cool_reason: str | None = None
+    defended_heat: bool | None = None
+    defended_cool: bool | None = None
+
+    @property
+    def full(self) -> bool:
+        """Both families are served (every surface behaves exactly as before #1544)."""
+        return self.heat and self.cool
+
+    def serves(self, family: str | None) -> bool:
+        """True for a served family; any other mode (off, fan_only, a band mode, unknown) is not a family."""
+        if family == FAMILY_HEAT:
+            return self.heat
+        if family == FAMILY_COOL:
+            return self.cool
+        return True
+
+    def defends(self, family: str | None) -> bool:
+        """True while ``family`` can run now (served, or a policy lock released by the safety rule); judging view."""
+        if family == FAMILY_HEAT:
+            return self.heat if self.defended_heat is None else self.defended_heat
+        if family == FAMILY_COOL:
+            return self.cool if self.defended_cool is None else self.defended_cool
+        return True
+
+    @property
+    def defends_both(self) -> bool:
+        """Both families can run now (nothing is excused from judging)."""
+        return self.defends(FAMILY_HEAT) and self.defends(FAMILY_COOL)
+
+    def released(self, family: str) -> bool:
+        """``family`` is not served (planned) but runs now: a policy lock stepping aside for the safety release."""
+        return not self.serves(family) and self.defends(family)
+
+    def reason(self, family: str) -> str | None:
+        """Why ``family`` is not served (None when it is)."""
+        return self.heat_reason if family == FAMILY_HEAT else self.cool_reason
+
+    def unserved_reason(self) -> tuple[str, str] | None:
+        """``(family, reason)`` of the first family the zone does not serve (cool, then heat), or None."""
+        if not self.cool:
+            return FAMILY_COOL, self.cool_reason or REASON_EQUIPMENT
+        if not self.heat:
+            return FAMILY_HEAT, self.heat_reason or REASON_EQUIPMENT
+        return None
+
+    def shown_mode(self, mode: str | None) -> str | None:
+        """The day mode as this zone will actually run it (the classifier's ``hvac_mode`` for display and planning).
+
+        Both families served: unchanged. One family: that family, whatever the day says (a heat-only zone holds heat
+        at the floor on a hot day, and on a warm "off" day the single-family leaf arms that family). Neither: off.
+        """
+        if self.full:
+            return mode
+        if self.heat:
+            return FAMILY_HEAT
+        if self.cool:
+            return FAMILY_COOL
+        return "off"
+
+
+FULL_SERVICE = ZoneService()
+
+
+def service_from(zone: ZoneCapability) -> ZoneService:
+    """The resolver's answer for display: served = available and not policy-locked (``bank_allowed``, planning and
+    promises); defended = available now, safety release included (judging)."""
+    heat = zone.bank_allowed(FAMILY_HEAT)
+    cool = zone.bank_allowed(FAMILY_COOL)
+    return ZoneService(
+        heat=heat,
+        cool=cool,
+        heat_reason=None if heat else (zone.heat.reason or REASON_EQUIPMENT),
+        cool_reason=None if cool else (zone.cool.reason or REASON_EQUIPMENT),
+        defended_heat=zone.heat.available,
+        defended_cool=zone.cool.available,
+    )

@@ -917,5 +917,6 @@
   "dashboard.night.level.medium": "média",
   "dashboard.status.fan_speed_high": "alta",
   "dashboard.status.fan_speed_low": "baixa",
-  "dashboard.status.fan_speed_medium": "média"
+  "dashboard.status.fan_speed_medium": "média",
+  "dashboard.chart.ds.band_advisory": "Intervalo alvo (limite de {family, select, cool {arrefecimento} other {aquecimento}} indicativo: {reason, select, equipment {sem equipamento} outdoor_lockout {bloqueio exterior} season {definição de estação} other {indisponível}})"
 }

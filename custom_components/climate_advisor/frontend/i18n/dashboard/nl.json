@@ -917,5 +917,6 @@
   "dashboard.night.level.medium": "gemiddelde",
   "dashboard.status.fan_speed_high": "hoog",
   "dashboard.status.fan_speed_low": "laag",
-  "dashboard.status.fan_speed_medium": "gemiddeld"
+  "dashboard.status.fan_speed_medium": "gemiddeld",
+  "dashboard.chart.ds.band_advisory": "Doelbereik ({family, select, cool {koel} other {verwarmings}}grens alleen advies: {reason, select, equipment {geen installatie} outdoor_lockout {buitenblokkering} season {seizoensinstelling} other {niet beschikbaar}})"
 }

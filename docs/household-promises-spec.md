@@ -209,3 +209,7 @@ Occupant first: the person reads the Status card, chart, briefing and Next User 
 - `PromiseJournal` in `custom_components/climate_advisor/promise_journal.py`
 - `ClimateAdvisorCoordinator._evaluate_household_promises` in `coordinator.py`
 - `tools/sim_harness/promise_probe.py`, `generator.py`, `replay.py`, `trial_gate.py`
+
+### P7 and an edge the zone does not serve (Issue #1544)
+
+**Occupant first:** in a heat-only home on a hot afternoon the room is above the comfort ceiling and nothing can cool it. That is outside what the equipment can do (or outside what the cool lockout / season allows), never Climate Advisor failing to keep the house comfortable, so P7 does not judge it. `Reading.serves_heat` / `serves_cool` (production `_promise_reading_now` and the harness `PromiseProbe`, both from `zone_service().defends()`) are False when the zone cannot run that family now; a side the safety release is running counts as running and is judged; a reading past that edge is not "in control" (None = unknown: judged as before). The other edge is judged as usual. Test: `tests/test_zone_surfaces_1544.py::TestPromisesAndAi`.

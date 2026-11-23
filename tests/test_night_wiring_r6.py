@@ -574,7 +574,8 @@ def test_night_wiring_is_advisory_only() -> None:
                 if isinstance(node, ast.Attribute):
                     assert node.attr not in forbidden, f"{fn.name} reaches {node.attr}"
     assert found == names
-    # the one engine member it may read is the thermostat capability getter (read-only)
+    # Issue #1544: it reads no engine member at all -- the served families come from the timeline snapshot
+    # (coordinator.zone_service()); it used to read the engine's thermostat capability getter
     for fn in cls.body:
         if isinstance(fn, ast.FunctionDef) and fn.name == "_timeline_night_plan":
             engine_attrs = {
@@ -584,7 +585,7 @@ def test_night_wiring_is_advisory_only() -> None:
                 and isinstance(n.value, ast.Attribute)
                 and n.value.attr == "automation_engine"
             }
-            assert engine_attrs == {"_get_thermostat_capabilities"}
+            assert engine_attrs == set()
 
 
 def test_the_night_methods_are_in_the_timeline_shadow_guard_list() -> None:

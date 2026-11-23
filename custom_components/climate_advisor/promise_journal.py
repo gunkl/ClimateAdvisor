@@ -92,6 +92,11 @@ class Reading:
     # or the setback mark has aged out of the window. None = the source does not know (P7 then falls back to the
     # occupancy marks).
     occupancy: str | None = None
+    # Issue #1544: the families the zone serves now (``AutomationEngine.zone_service()``): False when it has no heating
+    # (cooling) equipment, or a lockout / the season takes that side away. P7 never judges the room past an edge the
+    # zone does not serve (that breach is outside what the equipment or the lockout allows). None = unknown: judged.
+    serves_heat: bool | None = None
+    serves_cool: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,6 +529,8 @@ class PromiseJournal:
             or last.fan_on != new.fan_on
             or last.contacts_open != new.contacts_open
             or last.occupancy != new.occupancy
+            or last.serves_heat != new.serves_heat
+            or last.serves_cool != new.serves_cool
             or (last.indoor_f is None) != (new.indoor_f is None)
         ):
             return True

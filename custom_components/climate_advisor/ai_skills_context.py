@@ -761,6 +761,35 @@ async def build_last_briefing_context(hass: Any, coordinator: Any, **kwargs: Any
         return "=== LAST BRIEFING ===\n  unavailable\n"
 
 
+def _zone_unserved_reason(coordinator: Any, family: str, *, judging: bool = False) -> str | None:
+    """Issue #1544: why the zone does not serve ``family`` now (equipment / outdoor_lockout / season), or None.
+
+    ``judging``: the defended view (a side the safety release runs now counts as defended)."""
+    fn = getattr(coordinator, "zone_service", None)
+    if fn is None:
+        return None
+    try:
+        service = fn()
+        if service.defends(family) if judging else service.serves(family):
+            return None
+        reason = service.reason(family)
+    except Exception:  # noqa: BLE001 - context only; an unreadable zone counts as both families
+        return None
+    return str(reason or "equipment")
+
+
+def _zone_service_line(coordinator: Any) -> str | None:
+    """Issue #1544: the families the zone serves, for the investigator (None when it serves both)."""
+    parts = []
+    for family in ("heat", "cool"):
+        reason = _zone_unserved_reason(coordinator, family)
+        if reason is not None:
+            parts.append(f"{family}=advisory ({reason})")
+    if not parts:
+        return None
+    return "  zone_service:     " + ", ".join(parts) + " -- no command, plan step or promise about that side"
+
+
 async def build_hvac_entity_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
     """Build HVAC ENTITY section from HA state.
 
@@ -793,6 +822,9 @@ async def build_hvac_entity_context(hass: Any, coordinator: Any, **kwargs: Any) 
             f"  target_temp_low:  {target_temp_low}",
             f"  target_temp_high: {target_temp_high}",
         ]
+        _zone_line = _zone_service_line(coordinator)
+        if _zone_line is not None:
+            lines.append(_zone_line)
         # Issue #1194 (d): the remote-sensor outer loop, so an investigation can see WHY the thermostat sits at
         # target + offset (loop state and reason, comfort target vs commanded setpoint, the remote reading's age).
         _ro_view = remote_offset_view_for(
@@ -4976,6 +5008,12 @@ async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kw
             _flag = _gap > COMFORT_DEVIATION_FLOOR_F and not within_thermostat_hysteresis(
                 ct, ch, cc, _swing_heat_f, _swing_cool_f, hvac_mode
             )
+            # Issue #1544: same as the incident scan -- an edge the zone does not serve is advisory, never a failure.
+            _unserved = _zone_unserved_reason(coordinator, "heat" if _below else "cool", judging=True)
+            if _unserved is not None:
+                _flag = False
+                _no = "heating" if _below else "cooling"
+                _tol_s = f"advisory edge: no {_no} ({_unserved}), outside what the zone can do"
             state_flags.append(
                 f"{'[FLAG]' if _flag else '[OK]'} Indoor {_ct_s} {_cmp} {_edge_name} "
                 f"{format_temp(_edge, _temp_unit, 1)} -- {_side} by {format_temp_delta(_gap, _temp_unit, 1)} "

@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "le capteur ne se met plus à jour",
   "status.indoor_source.why.unavailable": "capteur indisponible",
   "status.next_action.close_doors_heater": "Fermez les portes pour aider le chauffage.",
+  "status.next_action.close_up_keep_warmth": "Fermez fenêtres et portes pour garder la chaleur.",
   "status.next_action.close_windows_by": "Fermez les fenêtres avant {t}",
   "status.next_action.close_windows_heater": "Fermez les fenêtres pour activer le chauffage.",
   "status.next_action.close_windows_hold_heat": "Fermez les fenêtres pour conserver la chaleur — il fait plus frais dehors ({outdoor} contre {indoor}).",

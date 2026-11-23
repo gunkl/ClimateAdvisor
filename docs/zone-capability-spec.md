@@ -2,7 +2,7 @@
 
 # Zone Capability — Territory Spec (Tier 3)
 
-Issue #1699 (phase 1: the resolver, the controls and every command path). Feature request #1560; heat-only / cool-only zones #1544 (phase 2 finishes the plan, briefing, promises, incidents, chart, Comfort Score, cost and AI context on top of this resolver). Authoritative owner of: what a zone can do right now (heat, cool, both, neither), why not, and how every Climate Advisor command respects it.
+Issue #1699 (phase 1: the resolver, the controls and every command path). Feature request #1560; heat-only / cool-only zones #1544 (phase 2, done in 0.9.75: the plan, briefing, promises, incidents, chart, Comfort Score, cost and AI context read this resolver through `zone_service()`, section 10). Authoritative owner of: what a zone can do right now (heat, cool, both, neither), why not, and how every Climate Advisor command respects it.
 
 ## Anchors
 
@@ -14,7 +14,8 @@ Issue #1699 (phase 1: the resolver, the controls and every command path). Featur
 | Can a lockout leave the house too cold or too hot? | No: a policy lock (outdoor or season) steps aside once the house is deeper past that side's edge than the day's settling tolerance (`comfort_deadband_*_f`, R1: strictly greater), and locks again only when the house is back at the edge (depth ≤ 0) and the mode-switch dwell allows it (no chatter). Missing equipment never releases. Unknown indoor or band: stays locked. | [Safety release](#4-safety-release) |
 | What happens to a write CA should not send? | Refused at the choke points (`_set_hvac_mode`, `_ensure_hvac_mode_for_write`, `_set_temperature_impl`) as `HvacCommandResult.CAPABILITY_BLOCKED`: INFO log, no event, not a failure (no #1302/#1308 re-send, no incident, no `hvac_mode_not_applied`). | [Backstop](#6-backstop) |
 | Which Activity rows and Status line? | `hvac_lockout_engaged` / `hvac_lockout_released` (one per genuine change, plus `safety` rows for the release); Status: "Cooling off: outdoor 3 °C (below 16 °C)". | [Events](#8-events-status-diagnostics) |
-| Which test proves what? | `tests/test_zone_capability_1699.py`. | [Test map](#test-map) |
+| What do the plan, briefing, promises and judges count on (phase 2)? | `AutomationEngine.zone_service()` (`zc.ZoneService`): served = available AND not policy-locked (`bank_allowed`); a safety release is never planned or promised. The unserved side is advice; a breach of it is outside what the equipment (or lockout) allows. | [Phase 2 surfaces](#10-phase-2-1544-every-surface) |
+| Which test proves what? | `tests/test_zone_capability_1699.py` (phase 1), `tests/test_zone_surfaces_1544.py` and `tools/zone_matrix.py` (phase 2). | [Test map](#test-map) |
 
 ## 1. Purpose
 
@@ -33,7 +34,7 @@ Settings (options flow only, all off by default; nothing changes for anyone who 
 | Zone state | House inside the band | Near / past the ceiling | Near / past the floor | Outdoor missing |
 |---|---|---|---|---|
 | Both available (today) | nearest edge armed, as now | cool armed | heat armed | unchanged |
-| Heat-only (equipment) | heat armed | advisory, not a CA failure (no cool write; phase 2: wording) | heat armed | n/a |
+| Heat-only (equipment) | heat armed | advisory, not a CA failure (no cool write; phase 2: advice wording, no plan step or incident) | heat armed | n/a |
 | Cool-only (equipment) | cool armed | cool armed | advisory, not a CA failure | n/a |
 | Cool locked out (outdoor / season) | heat armed | advisory with reason; cool runs past the tolerance (safety release) | heat armed | keep last state |
 | Heat locked out (outdoor / season) | cool armed | cool armed | advisory with reason; heat runs past the tolerance | keep last state |
@@ -93,9 +94,36 @@ The occupant's own thermostat changes are never reversed because of a lockout; m
 | `LOCKOUT_RELEASE_HYSTERESIS_F` | 3.6 | F | constant | `zone_capability.py` | Release point past the threshold (2 °C) |
 | Safety-release tolerance | `comfort_deadband_*_f` | F | see comfort-edge spec | `AutomationEngine._comfort_deadband_for_day_type()` | Depth past the edge that releases a policy lock |
 
-## 10. Not in phase 1 (phase 2 / #1544)
+## 10. Phase 2 (#1544): every surface
 
-The day plan and timeline, briefing, promises, incidents and compliance, Comfort Score, chart band, cost estimate and AI context still read the equipment / classification and may describe the locked side; the chart's TOU bank and pre-cool band are not yet masked. The unserved-edge advisory wording ("no cooling equipment" vs "Cooling off: …") beyond the Status line is phase 2.
+**Occupant first:** a heat-only home (electric baseboards, #1348) on a hot day is never promised AC or a pre-cool, never planned with an AC run and never told Climate Advisor failed to keep it cool; it gets windows, blinds and ventilation advice. A cool-only home gets "close up, the sun is your heat". A seasonal home with cooling locked out (outdoor lockout, Heat-only season) is treated the same way, with the lockout named as the reason.
+
+**One source, two views.** `AutomationEngine.zone_service()` -> `zc.service_from(self._zone_capability())` (recorded state; never moves the safety release). `ZoneService(heat, cool, heat_reason, cool_reason, defended_heat, defended_cool)`:
+- **served** (`serves`, `heat` / `cool`) = `bank_allowed(family)`: PLANNING and PROMISING (plan, briefing, chart band, banks, Next Automation). A safety release is never planned or promised.
+- **defended** (`defends`) = `zone.family(f).available`, the safety release included: JUDGING (incidents, Comfort Score, the stall alert, P7, the AI cross-validation line). A release that runs and still fails to hold the edge is a real failure (review finding, owner decision 1 narrowed to planning). `released(f)` = defended but not served: the plan's and the chart's CURRENT hour show that side running; later hours stay unserved.
+- **day-level** (`coordinator.day_zone_service()`): the briefing, the day mode it shows and the daily record's `hvac_mode_recommended` project an OUTDOOR lockout over the rest of today's hourly forecast (`step_cool_lockout` / `step_heat_lockout`, same hysteresis); a lockout the forecast releases today counts as served for the day (a desert summer: locked at a 57 °F dawn, released by the 98 °F afternoon). Equipment and the season are not projected.
+
+ `shown_mode(mode)`: both served -> unchanged; one -> that family (the single-family leaf arms it whatever the day says); none -> off. The coordinator reads it as `coordinator.zone_service()` (both families when there is no engine or it cannot answer). No display surface reads `_get_thermostat_capabilities()` (that stays the equipment input for diagnostics and the thermostat profile).
+
+| Surface | Where | Rule |
+|---|---|---|
+| Day plan / timeline (#1542) | `coordinator._timeline_snapshot` -> `can_heat` / `can_cool` / `released_now`; `operation_timeline.zone_masked` (in `build_timeline` and `TimelineLatch.update`); `PlanSignature` carries `can_heat` / `can_cool` (reason `zone`) | Day modes shown; no pre-cool, ceiling guard, unserved TOU bank or away widening. Window periods are NOT gated on the families: they are the unserved side's advice (a heat-only hot evening is told to open up; the benefit gate counts the discomfort saved). [operation-timeline-spec](operation-timeline-spec.md#zone-capability-issue-1542) |
+| Night strategy | `coordinator._timeline_night_plan` | `can_heat` / `can_cool` from the snapshot |
+| Briefing (#1488) | `briefing.generate_briefing(zone_service=)`, `coordinator._build_briefing_text` | Advisory bodies and TLDR row with the reason. [briefing-spec](briefing-spec.md#zone-capability-issue-1488) |
+| Classifier day mode shown | briefing (above); daily record `hvac_mode_recommended` (Analysis "HVAC mode"); degraded Next Automation | `shown_mode` |
+| TOU bank / pre-cool | `_tou_precondition_window_tuple` (chart band, predicted curve) None for an unserved bank; Status TOU line gated by `_tou_bank_family_allowed`; `_maybe_schedule_pre_cool` schedules nothing without cooling (asks again next cycle); a fired trigger answering `skipped_cool_unavailable` clears the Status line; `_shown_pre_cool_status` hides a "scheduled" line while cooling is unserved | No bank or pre-cool shown that will not run |
+| ODE ceiling guard | Plan step via `ceiling_breach` (masked); degraded Next Automation "AC holds the ceiling" needs cooling; the chart's forward regime draws an unserved family's hour as off (the current hour shows a released side running) | The CONTROL guard reads the masked (honest) curve but asks `_zone_mode_allowed("cool")` before it logs a breach or writes (moved ahead of the breach log in the review), so a zone that cannot cool gets no breach INFO line and no write |
+| Predicted indoor curve | `_build_predicted_indoor_future(zone_service=)` (every coordinator caller) | An unserved day mode is passive drift; the nearest-edge heat override needs heat; no pre-cool target without cooling |
+| Chart band | `get_chart_data`: `band_advisory` `{family, reason}`; `defense_lines` None on the unserved side; `chart_v2.js` draws that edge sparser and names it ("Target Band (cooling edge advisory: no equipment)") | Advisory, never a promise |
+| Incidents / compliance / Comfort Score | `_is_tolerated_comfort_deviation` | Past an edge the zone does not DEFEND: tolerated (no incident, no minutes); a released side is judged. [incident-classes](incident-classes.md#unserved-edge-issue-1544) |
+| Stall alert | `_update_comfort_stall` -> `decide_comfort_stall(defended=)` | A direction the zone does not defend is `excluded_by="zone_not_defended"` (season Cool only on a cold day: no "house is cold, nothing running" push) |
+| Promises (P7) | `Reading.serves_heat` / `serves_cool` = the defended view (production and `PromiseProbe`), `check_p7_comfort_kept` | Not judged past an edge the zone does not defend. [household-promises-spec](household-promises-spec.md#p7-and-an-edge-the-zone-does-not-serve-issue-1544) |
+| Next User Action | `_compute_next_action` | No heating served and a window open: "Close windows and doors to keep the warmth in", never "help / enable the heater" |
+| AI context | `ai_skills_context.build_hvac_entity_context` (`zone_service:` line), `build_state_cross_validation_context` ("advisory edge", never `[FLAG]`) | |
+| Cost estimate | `learning.estimate_daily_cost` | Verified, unchanged: measured per-family minutes; an unserved family runs 0 minutes and needs no power rating |
+| Status lockout line | `zone_lockout_status` (phase 1) | Unchanged: policy locks only; a heat-only zone gets no permanent Status line (the chart band and briefing carry "no equipment") |
+
+**Matrix (the #1544 method, made permanent).** `tools/zone_matrix.py` runs every golden through the real engine (headless harness, the coordinator where the scenario uses one) as `[off, heat]`, `[off, cool]`, and a heat-and-cool thermostat with the season Heat only, the season Cool only, and an outdoor cool lockout no forecast releases (a run where no outdoor reading ever arrives has no lockout and is marked `not_locked`), plus the golden as authored (`both`, the positive window baseline). Any failure building a surface is the run's error, never "not checked"; the test asserts a plan was judged for every coordinator scenario with a classification and both briefing variants (full and TLDR) for every scenario with one, and that a free-cooling (free-heating) window the `both` run is offered is still offered heat-only (cool-only). It asserts: no `climate.set_hvac_mode` / `set_temperature` naming a missing mode and no dual setpoint on a single-mode device (devices only: the season run's safety release may cool by design); no plan step or plan day in the missing family, no pre-cool / ceiling guard (heat-only) or pre-heat (cool-only); no briefing line promising the missing family. The golden files are not edited and their own assertions are not judged there. `tests/test_zone_surfaces_1544.py::test_matrix_no_surface_names_a_missing_mode` runs the full set in the unit tier (one case per golden).
 
 ## Test Map
 
@@ -121,3 +149,4 @@ The day plan and timeline, briefing, promises, incidents and compliance, Comfort
 | Heat lockout, house past the tolerance: heat runs, then locks again | `test_heat_lockout_warm_day_cold_house_heats_past_the_tolerance_then_locks_again` |
 | Occupant change not reversed | `test_occupant_cool_change_is_not_reversed_by_the_lockout` |
 | Options stored in °F, blank clears, off by default | `test_options_*` |
+| Phase 2: every surface, per family and for a policy lock; the golden matrix | `tests/test_zone_surfaces_1544.py` |

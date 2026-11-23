@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.78] — 2026-11-22
+
+### Fixed
+- Fix #1488: on a hot day a heat-only home's briefing now says "HVAC Mode: Heat at 70°F (no cooling)" and gives window, blind and ventilation advice, instead of promising air conditioning and a pre-cool that never come. A cooling-only home on a cold day is told to close up and let the sun warm the house, not that the heater will run. When cooling or heating is locked out by your outdoor lockout or the season, the briefing names that as the reason; an outdoor lockout that today's forecast lifts (a cold dawn before a hot afternoon) does not count as off for the day.
+- Fix #1542: the day plan and the Status "Next 24 hours" list no longer show air-conditioning runs, a pre-cool or "the AC switches on" for a heat-only home (or heating runs for a cooling-only one); the plan shows the heat held at the floor and still suggests opening the windows when the evening air is cooler (or, for a cooling-only home, warmer).
+
+### Added
+- Feat #1544: a heat-only home (for example electric baseboards) or a cooling-only one, and a home whose heating or cooling is locked out by the outdoor temperature or the season, is now described only by what it can do. The chart, Next Automation and the predictions no longer show a pre-cool or a cooling bank that will never happen (or the heating mirror), the "Pre-cool scheduled" Status line no longer stays up for a pre-cool that cannot run, and a hot afternoon with no cooling is not counted as a comfort failure, an incident, Comfort Score minutes or a "house is cold/hot, nothing running" alert. While a lockout steps aside because the house went too far past the edge, that side is judged as usual. The chart marks the edge the home cannot serve as advisory, with the reason.
+
 ## [0.9.77] — 2026-11-22
 
 ### Changed

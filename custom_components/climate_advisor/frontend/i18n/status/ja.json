@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "センサーの更新が止まっています",
   "status.indoor_source.why.unavailable": "センサーが利用できません",
   "status.next_action.close_doors_heater": "暖房の効きを良くするため、ドアを閉めてください。",
+  "status.next_action.close_up_keep_warmth": "暖かさを逃がさないよう、窓とドアを閉めてください。",
   "status.next_action.close_windows_by": "{t}までに窓を閉めてください",
   "status.next_action.close_windows_heater": "暖房を使えるように、窓を閉めてください。",
   "status.next_action.close_windows_hold_heat": "熱を保つため窓を閉めてください — 屋外のほうが涼しくなっています（屋外 {outdoor}、室内 {indoor}）。",

@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "传感器已停止更新",
   "status.indoor_source.why.unavailable": "传感器不可用",
   "status.next_action.close_doors_heater": "请关好门，帮助供暖。",
+  "status.next_action.close_up_keep_warmth": "关好门窗，留住暖意。",
   "status.next_action.close_windows_by": "请在 {t} 前关闭窗户",
   "status.next_action.close_windows_heater": "请关闭窗户，以便启用供暖。",
   "status.next_action.close_windows_hold_heat": "请关闭窗户以保温 — 室外更凉（室外 {outdoor}，室内 {indoor}）。",

@@ -110,3 +110,7 @@ Tests: `tests/test_night_comfort_incidents_1678.py` (a quantised 0.18 F bedroom 
 | All others | Post-cycle | `coordinator.py _detect_and_emit_incidents()` |
 
 The `incident_detected` event is appended to `coordinator._event_log` in both cases. It is visible in the event log API at `GET /api/climate_advisor/event_log`.
+
+## Unserved edge (Issue #1544)
+
+`coordinator._is_tolerated_comfort_deviation()` (the one gate for the `comfort_violation` / `comfort_undertemp` scan and `comfort_violations_minutes`, so the Comfort Score) also tolerates a reading past an edge the zone does not DEFEND (`zone_service().defends()`: no cooling equipment, a cool lockout or the Heat-only season above the ceiling; the mirror below the floor). No incident, no Comfort Score minutes: the breach is outside what the equipment (or the lockout) allows. While the safety release is running a locked side that side IS defended and judged as usual (a release that fails is a real failure). The #1050 stall alert does not go through this gate: `decide_comfort_stall(defended=)` excludes an undefended direction (`excluded_by="zone_not_defended"`). The AI cross-validation line applies the same defended rule ("advisory edge"). Test: `tests/test_zone_surfaces_1544.py::TestCoordinatorSurfaces::test_unserved_edge_is_tolerated_for_incidents_and_score`.

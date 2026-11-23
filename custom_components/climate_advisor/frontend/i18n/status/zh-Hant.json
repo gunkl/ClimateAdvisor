@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "感測器已停止更新",
   "status.indoor_source.why.unavailable": "感測器不可用",
   "status.next_action.close_doors_heater": "請關上門，讓暖氣更有效率。",
+  "status.next_action.close_up_keep_warmth": "關好門窗，留住暖意。",
   "status.next_action.close_windows_by": "請在 {t} 前關窗",
   "status.next_action.close_windows_heater": "請關窗，暖氣才能啟動。",
   "status.next_action.close_windows_hold_heat": "請關窗保暖——外面比較冷（戶外 {outdoor}，室內 {indoor}）。",

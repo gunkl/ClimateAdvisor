@@ -5,7 +5,8 @@
   "issue": 1691,
   "notes": [
     "Dew points: indoor 78F at 46.8% = 56.02F; outdoor 72F at 84.3% = 67.0F (at or above the 65F ceiling). The dry twin is the golden economizer-cool-down-to-maintain (same temperatures, no humidity): cool-down engages.",
-    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: deleting the economizer guard makes 07:00 read the economizer's fan activation (cool-down) instead. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the economizer's fan would push 67F-dew-point morning air through the house while the AC tries to dry it."
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: deleting the economizer guard makes 07:00 read the economizer's fan activation (cool-down) instead. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the economizer's fan would push 67F-dew-point morning air through the house while the AC tries to dry it.",
+    "Issue #1507 review: the outdoor humidity is paired with a dedicated outdoor temperature sensor (outdoor_temp_source sensor), as a real install needs for an outdoor dew point, so the coordinator-hosted golden tiers (P8 surfaces, promise parity, real HA) can run this scenario."
   ],
   "verdict": {
     "type": "positive",
@@ -19,7 +20,9 @@
     "economizer_temp_delta": 3.0,
     "natural_vent_delta": 3.0,
     "aggressive_savings": false,
-    "fan_mode": "hvac_fan"
+    "fan_mode": "hvac_fan",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
   },
   "events": [
     {

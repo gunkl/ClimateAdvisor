@@ -7,7 +7,8 @@
   "skip_startup_coalesce": true,
   "notes": [
     "Occupant: the thermostat is Off (switched off by the occupant at 14:05) and Climate Advisor's own blower circulation run starts. Before #1705 any thermostat report that still read Off (the echo of CA's own fan command, or the next poll) cleared CA's blower flag, so the Fan (HVAC) card stopped showing CA's run and the untracked-fan backstop had to deal with it.",
-    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: the only guard this scenario needs is the real-change-to-Off check (old_state.state != 'off') in coordinator.py's #89 clear: no economizer or nat-vent session exists, so the exemptions do not apply; removing that check fails the 14:12 assertion (verified by mutation). (b) docs-production: docs/fan-lifecycle-spec.md 'Thermostat Off Clears CA's Blower Flag Only on a Real Change to Off (Issue #1705)' states that an off -> off event never clears the flag; production does exactly that. (c) occupant: if this regressed, the blower window cooling of #1705 would again be cleared by its own echo whenever an exemption failed, and CA's own circulation run would read as an untracked fan."
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: the only guard this scenario needs is the real-change-to-Off check (old_state.state != 'off') in coordinator.py's #89 clear: no economizer or nat-vent session exists, so the exemptions do not apply; removing that check fails the 14:12 assertion (verified by mutation). (b) docs-production: docs/fan-lifecycle-spec.md 'Thermostat Off Clears CA's Blower Flag Only on a Real Change to Off (Issue #1705)' states that an off -> off event never clears the flag; production does exactly that. (c) occupant: if this regressed, the blower window cooling of #1705 would again be cleared by its own echo whenever an exemption failed, and CA's own circulation run would read as an untracked fan.",
+    "Issue #1507 review: the classification no longer hand-sets windows_recommended; classifier.py derives it for this mild day (True), as production would."
   ],
   "verdict": {
     "type": "positive",
@@ -39,7 +40,6 @@
       "type": "classification",
       "day_type": "mild",
       "hvac_mode": "off",
-      "windows_recommended": false,
       "note": "Mild day: the comfort band arms cool."
     },
     {

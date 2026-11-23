@@ -8,7 +8,8 @@
   "notes": [
     "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: without the overcool term no 75/74 write exists (setpoint_writes would be empty); without the cap the 76 write at 15:05 is missing; without the step 74 is missing.",
     "(b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid overcool (Issue #1694)' states this rule; production applies it through humid_overcool.decide_overcool and AutomationEngine._command_adjustments (the one setpoint path).",
-    "(c) occupant: on a muggy afternoon the AC runs longer and dries the house; without this check a regression would leave the house sticky (no overcool) or over-chilled (no cap)."
+    "(c) occupant: on a muggy afternoon the AC runs longer and dries the house; without this check a regression would leave the house sticky (no overcool) or over-chilled (no cap).",
+    "Issue #1507 review (real-HA tier): the house reads 77.6F while the scenario's AC cools (at least the setpoint + 1.5F, so the real-HA simulated thermostat really starts its compressor and reports cooling, as a real one does) and 73.0F once a run ends (at or below its stop point, so it really stops); a cooling -> fan -> cooling blip under 5 minutes keeps the house warm. Each reading's humidity is recomputed so its dew point is exactly the one this scenario was written with."
   ],
   "verdict": {
     "type": "positive",
@@ -45,9 +46,9 @@
     {
       "time": "2026-07-12T14:05:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:05:00",
@@ -59,147 +60,147 @@
     {
       "time": "2026-07-12T14:10:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:15:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:20:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:25:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:30:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:35:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:40:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:45:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:50:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:55:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:00:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:05:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:10:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:15:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:20:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:25:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:30:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:35:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:40:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     }
   ],
   "assertions": [
     {
-      "at": "2026-07-12T14:05:00",
+      "at": "2026-07-12T14:06:00",
       "expect": "event_emitted",
       "event": "overcool_started",
       "payload_subset": {
         "lowering_f": 1.0,
         "target": 76.0
       },
-      "reason": "The run starts with the house at a 63.9 F dew point: overcool engages one step."
+      "reason": "The run starts with the house at a 63.9 F dew point: overcool engages one step. (Checked a minute after the event: a real thermostat reports cooling and stops on its own sensing tick, up to about 30 s after the reading.)"
     },
     {
       "at": "2026-07-12T15:40:00",
@@ -219,14 +220,14 @@
       "reason": "The second step waits the full 30 minutes."
     },
     {
-      "at": "2026-07-12T15:05:00",
+      "at": "2026-07-12T15:06:00",
       "expect": "event_emitted",
       "event": "overcool_ended",
       "payload_subset": {
         "reason": "cap",
         "lowering_f": 2.0
       },
-      "reason": "At most 60 minutes per run."
+      "reason": "At most 60 minutes per run. (Checked a minute after the event: a real thermostat reports cooling and stops on its own sensing tick, up to about 30 s after the reading.)"
     }
   ]
 }

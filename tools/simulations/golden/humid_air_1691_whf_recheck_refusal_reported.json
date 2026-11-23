@@ -4,7 +4,8 @@
   "source": "synthetic",
   "issue": 1691,
   "notes": [
-    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: removing the report from the re-check path (_log_nat_vent_not_engaged) makes 20:30 read paused instead of nat_vent_humid_skip. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the fan stays off on a muggy evening and the Activity report never says why."
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: removing the report from the re-check path (_log_nat_vent_not_engaged) makes 20:30 read paused instead of nat_vent_humid_skip. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the fan stays off on a muggy evening and the Activity report never says why.",
+    "Issue #1507 review: the outdoor humidity is paired with a dedicated outdoor temperature sensor (outdoor_temp_source sensor), as a real install needs for an outdoor dew point, so the coordinator-hosted golden tiers (P8 surfaces, promise parity, real HA) can run this scenario."
   ],
   "verdict": {
     "type": "positive",
@@ -23,7 +24,9 @@
     ],
     "fan_mode": "whole_house_fan",
     "fan_entity": "fan.whf",
-    "fan_state_feedback": true
+    "fan_state_feedback": true,
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
   },
   "events": [
     {

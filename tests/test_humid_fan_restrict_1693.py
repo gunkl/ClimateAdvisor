@@ -13,8 +13,8 @@ before #1693 (it refused every start within 2 h): they are CONTROLS that guard a
 never restricting, unknown read as dry); the humid test additionally pins the extended log reason. The ``both`` tests
 fail if the blower verdict is taken before the whole-house-fan leg switches the thermostat off.
 
-Tier-A scenarios (the real engine and coordinator, headless): tools/simulations/pending/humid_fan_restrict_1693_*.json,
-run by test_pending_humid_fan_restrict_scenario_passes_production_engine below.
+Tier-A scenarios (the real engine and coordinator, headless): tools/simulations/golden/humid_fan_restrict_1693_*.json,
+promoted after owner review (#1507) and run once by tests/test_production_harness.py.
 """
 
 from __future__ import annotations
@@ -25,8 +25,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from custom_components.climate_advisor.automation import FanCommandResult
 from custom_components.climate_advisor.const import (
@@ -307,29 +305,28 @@ class TestUnchanged:
 
 
 # ---------------------------------------------------------------------------
-# Tier A: the real engine and coordinator, headless (pending scenarios)
+# Tier A: the real engine and coordinator, headless (golden scenarios, #1507)
 # ---------------------------------------------------------------------------
 
-_SCENARIOS = sorted((ROOT / "tools" / "simulations" / "pending").glob("humid_fan_restrict_1693_*.json"))
+# Promoted to golden/ after owner review (#1507): they run once, through tests/test_production_harness.py.
+_SCENARIOS = sorted((ROOT / "tools" / "simulations" / "golden").glob("humid_fan_restrict_1693_*.json"))
+_PENDING = sorted((ROOT / "tools" / "simulations" / "pending").glob("humid_fan_restrict_1693_*.json"))
 
 
 def test_scenarios_exist():
-    assert len(_SCENARIOS) == 4
+    assert len(_SCENARIOS) == 4, [p.stem for p in _SCENARIOS]
+    assert not _PENDING, [p.stem for p in _PENDING]
 
 
-@pytest.mark.parametrize("scenario_path", _SCENARIOS, ids=lambda p: p.stem)
-def test_pending_humid_fan_restrict_scenario_passes_production_engine(scenario_path: Path) -> None:
-    import sys
+def test_humid_fan_restrict_goldens_evaluate_every_assertion() -> None:
+    """The golden run accepts an all-deferred scenario; none of these may have a skippable assertion."""
+    import json
 
-    sys.path.insert(0, str(ROOT / "tools"))
-    from simulate import run_scenario_production  # noqa: PLC0415
-
-    result = run_scenario_production(scenario_path, state="pending")
-    assert not result.get("callback_errors"), result.get("callback_errors")
-    real = [x for x in result["assertions"] if not x.get("skipped")]
-    assert real and len(real) == len(result["assertions"]), "no assertion of a humid restrict scenario may be skipped"
-    assert result["passed"] is True, "; ".join(
-        f"@{x['at']} expected={x['expected']!r} actual={x['actual']!r}"
-        for x in result["assertions"]
-        if not x.get("pass")
-    )
+    offenders = []
+    for path in _SCENARIOS:
+        scenario = json.loads(path.read_text(encoding="utf-8"))
+        coordinator = bool(scenario.get("use_coordinator", False))
+        assertions = scenario.get("assertions") or []
+        if not assertions or any(a.get("track") == "integration" and not coordinator for a in assertions):
+            offenders.append(path.stem)
+    assert not offenders, offenders

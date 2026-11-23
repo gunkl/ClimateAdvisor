@@ -337,7 +337,8 @@ class FakeHassPromiseSource:
         self._events_seen = 0
         # Issue #1153: why each command went out, captured at send time (the engine's mode-change
         # reason is only set inside the sending call) from the same observer hook production uses.
-        self._cmd_causes: list[tuple[str, str, str | None, str | None]] = []
+        # (domain, service, entity, cause, automation_enabled) captured when each command is sent.
+        self._cmd_causes: list[tuple[str, str, str | None, str | None, bool]] = []
         self._install_cause_capture()
         session.fake_hass.states.add_observer(self._on_state_write)
 
@@ -390,10 +391,21 @@ class FakeHassPromiseSource:
 
     # ── internals ──────────────────────────────────────────────────────────────
     def _install_cause_capture(self) -> None:
-        """Record the engine's ``_mode_change_reason`` for every command, chaining any existing observer.
+        """Record the engine's ``_mode_change_reason`` and the automation state for every command, at send time.
 
-        Same value production journals as ``Command.cause`` (``coordinator._promise_observe_command``).
-        Read-only: the original observer still runs first and nothing is sent or changed here."""
+        Same values production journals as ``Command.cause`` / ``Command.automation_enabled``
+        (``coordinator._promise_observe_command``, which runs in the same hook, before the command goes out).
+        Read-only: the original observer still runs first and nothing is sent or changed here.
+
+        Issue #1717 (test-infrastructure change, rule-8 justification): the automation state used to be read at
+        POLL time, after the whole scenario event had finished, so a command was judged by a state that did not
+        exist when it was sent. Switching automation off sends the plain-setpoint restore while automation is
+        still on and only then flips the flag; the poll-time stamp labelled that restore "sent while off" (a false
+        hard ``observe_only_silence`` hit). The mirror was a false negative: a command sent while still in
+        observe-only, inside the event that turns automation ON, was stamped "on" and P3 missed it. Could this let
+        a real failure pass silently? No: a command sent after the flag flips to off is still stamped off and still
+        breaks P3, and the mirror case is now caught. A command that never passed this hook falls back to the
+        poll-time read, exactly as before."""
         engine = self._s.engine
         original = getattr(engine, "_command_observer", None)
 
@@ -404,17 +416,18 @@ class FakeHassPromiseSource:
             cause = getattr(engine, "_mode_change_reason", None)
             self._cmd_causes = [
                 *self._cmd_causes[-255:],
-                (domain, service, entity, cause if isinstance(cause, str) else None),
+                (domain, service, entity, cause if isinstance(cause, str) else None, self._automation_enabled()),
             ]
 
         engine._command_observer = capture
 
-    def _take_cause(self, domain: str, service: str, entity: Any) -> str | None:
-        for i, (d, sv, ent, cause) in enumerate(self._cmd_causes):
+    def _take_cause(self, domain: str, service: str, entity: Any) -> tuple[str | None, bool | None]:
+        """The (cause, automation_enabled) captured when this command was sent; (None, None) if it never was."""
+        for i, (d, sv, ent, cause, enabled) in enumerate(self._cmd_causes):
             if (d, sv, ent) == (domain, service, entity):
                 del self._cmd_causes[i]
-                return cause
-        return None
+                return cause, enabled
+        return None, None
 
     def _on_state_write(self, entity_id: str) -> None:
         if entity_id in self._watched:
@@ -553,9 +566,10 @@ class FakeHassPromiseSource:
             return None
         service = str(entry.get("service", ""))
         data = entry.get("data") or {}
-        cause = self._take_cause(domain, service, data.get("entity_id"))
+        cause, sent_enabled = self._take_cause(domain, service, data.get("entity_id"))
         ts = entry.get("ts") or now
-        enabled = self._automation_enabled()
+        # Issue #1717: the state when the command was sent; the poll-time read only for one that bypassed the hook.
+        enabled = sent_enabled if sent_enabled is not None else self._automation_enabled()
         if domain == "climate":
             setpoint = data.get("temperature")
             if setpoint is not None:

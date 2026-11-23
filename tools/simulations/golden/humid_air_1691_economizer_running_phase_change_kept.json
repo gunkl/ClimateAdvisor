@@ -1,0 +1,272 @@
+{
+  "name": "humid_air_1691_economizer_running_phase_change_kept",
+  "description": "An economizer that started on dry air keeps its running fan when it moves from cool-down to maintain after the air turns humid (start-only: the guard refuses starts, it never strands or stops a running fan)",
+  "source": "synthetic",
+  "issue": 1691,
+  "notes": [
+    "Coordinator scenario (Issue #1507 review): the window really is open (door_window_sensors + sensor_open), so the coordinator's own 5-minute cycle keeps the window-cooling session alive, as on a real install; the old bare-engine version said 'windows open' only inside the economizer_check event, so real HA saw closed windows and stopped the blower at 07:05.",
+    "08:00 dew points: indoor 74F at 53.4% = ~56F; outdoor 71F at 87.2% = 67.0F (at or above the 65F ceiling), humid since 07:15 so the 15-minute median reads humid. Before 07:15 no outdoor humidity is known.",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: a guard applied to the cool-down -> maintain transition (not only to a start) makes 08:00 read an inactive economizer while its fan keeps running. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: a fan left running with no economizer session to stop it; or, the other way, a fan the occupant sees stop and start on a phase change.",
+    "Issue #1507 review: the outdoor humidity is paired with a dedicated outdoor temperature sensor (outdoor_temp_source sensor), as a real install needs for an outdoor dew point, so the coordinator-hosted golden tiers (P8 surfaces, promise parity, real HA) can run this scenario."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Running economizer keeps its fan across a phase change on humid air",
+    "observed_behavior": "economizer maintain",
+    "expected_behavior": "economizer maintain"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "economizer_temp_delta": 3.0,
+    "natural_vent_delta": 3.0,
+    "aggressive_savings": false,
+    "fan_mode": "hvac_fan",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp",
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "sensor_debounce_seconds": 300
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8,
+      "note": "Early morning: indoor dew point ~56F; no outdoor humidity reading yet (= today's behaviour)."
+    },
+    {
+      "time": "2026-07-10T06:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "today_high": 90,
+      "today_low": 70,
+      "note": "Hot day."
+    },
+    {
+      "time": "2026-07-10T06:05:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:10:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:15:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:20:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:25:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:30:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:35:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:40:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:45:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:50:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:55:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 72.0,
+      "humidity": 46.8
+    },
+    {
+      "time": "2026-07-10T06:58:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "The occupant opens the window (the 5-minute open-window delay lets window cooling start first)."
+    },
+    {
+      "time": "2026-07-10T07:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": true,
+      "hour": 7,
+      "note": "No humidity known: cool-down engages, the fan starts."
+    },
+    {
+      "time": "2026-07-10T07:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 72.0,
+      "humidity": 47.6
+    },
+    {
+      "time": "2026-07-10T07:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 72.0,
+      "humidity": 48.3
+    },
+    {
+      "time": "2026-07-10T07:15:00",
+      "type": "temp_update",
+      "indoor_f": 76.5,
+      "outdoor_f": 71.0,
+      "humidity": 49.2,
+      "outdoor_humidity": 87.2,
+      "note": "The outdoor air turns humid (71F at 87.2% = 67F dew point, at or above the 65F ceiling) while window cooling runs, before the house reaches comfort."
+    },
+    {
+      "time": "2026-07-10T07:20:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 71.0,
+      "humidity": 50.0,
+      "outdoor_humidity": 87.2
+    },
+    {
+      "time": "2026-07-10T07:25:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 71.0,
+      "humidity": 50.8,
+      "outdoor_humidity": 87.2
+    },
+    {
+      "time": "2026-07-10T07:30:00",
+      "type": "temp_update",
+      "indoor_f": 75.5,
+      "outdoor_f": 71.0,
+      "humidity": 50.8,
+      "outdoor_humidity": 87.2
+    },
+    {
+      "time": "2026-07-10T07:35:00",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 71.0,
+      "humidity": 51.7,
+      "outdoor_humidity": 87.2
+    },
+    {
+      "time": "2026-07-10T07:40:00",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 71.0,
+      "humidity": 51.7,
+      "outdoor_humidity": 87.2
+    },
+    {
+      "time": "2026-07-10T07:45:00",
+      "type": "temp_update",
+      "indoor_f": 74.5,
+      "outdoor_f": 71.0,
+      "humidity": 52.5,
+      "outdoor_humidity": 87.2
+    },
+    {
+      "time": "2026-07-10T07:50:00",
+      "type": "temp_update",
+      "indoor_f": 74.5,
+      "outdoor_f": 71.0,
+      "humidity": 52.5,
+      "outdoor_humidity": 87.2
+    },
+    {
+      "time": "2026-07-10T07:55:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 71.0,
+      "humidity": 53.4,
+      "outdoor_humidity": 87.2
+    },
+    {
+      "time": "2026-07-10T07:59:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 71.0,
+      "humidity": 53.4,
+      "outdoor_humidity": 87.2,
+      "note": "The outdoor air turns humid while the economizer runs."
+    },
+    {
+      "time": "2026-07-10T08:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 71,
+      "indoor_temp": 74,
+      "windows_open": true,
+      "hour": 8,
+      "note": "Indoor reached comfort: cool-down -> maintain (no new fan start)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "economizer_phase",
+      "phase": "cool-down",
+      "reason": "Dry (unknown) air: the economizer starts."
+    },
+    {
+      "at": "2026-07-10T08:00:00",
+      "expect": "economizer_final_phase",
+      "phase": "maintain",
+      "reason": "The running economizer moves to maintain; humidity does not stop or strand it."
+    },
+    {
+      "at": "2026-07-10T08:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": true,
+      "reason": "The economizer's fan is still running and still owned by an economizer session (not stranded)."
+    }
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

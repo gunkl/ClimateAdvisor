@@ -717,5 +717,200 @@
     "sha256": "1c4a919fd2bb7addab22f66088d93805aa73855b558b834f48a158e5e0f7cbb4",
     "signed": "2026-11-07",
     "issue": 1378
+  },
+  "humid_air_1691_coordinator_ceiling_latch_holds_then_releases": {
+    "sha256": "17527d3ede530a130845532f0b20647790108cb1cdc268b55aa3c435b9c46da6",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_fan_restrict_1693_blower_humid_after_cooling_restricted": {
+    "sha256": "443f3692028e4d700332f4c2e19120eb1ea978103da982fa4f09500959907627",
+    "signed": "2026-11-23",
+    "issue": 1693
+  },
+  "humid_fan_restrict_1693_blower_unknown_humidity_todays_rule": {
+    "sha256": "38aba0c16c641d41da6cb99df76c6762e1c62d77b8c18e89a1e6f7da466ecc3f",
+    "signed": "2026-11-23",
+    "issue": 1693
+  },
+  "humid_fan_restrict_1693_coordinator_latch_holds_then_releases": {
+    "sha256": "beb80f0dde52de345ade581869864a12547c84794ed23f3800412a3f4f6e5abc",
+    "signed": "2026-11-23",
+    "issue": 1693
+  },
+  "humid_overcool_1694_dry_run_unchanged": {
+    "sha256": "e7bc1cd2b7bd0c171ae729fe7d106df6693bae1b8864935f0ba4c040ec1e353d",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_gap_rule_no_room": {
+    "sha256": "24545b6b22055a9ad2cdf557f28f4e69df31ed5fdc20a28cc5f84d166b102789",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_no_hvac_action_inert": {
+    "sha256": "bd664a5e287ce9421649b4087a564cd68146d440781ba1666c1d196c8d91f792",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_restart_writes_normal": {
+    "sha256": "1e169f70c2061007d68fb3c04d6d6a5c0b6b4fb6d113b0f96c2b109f939bb725",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_sleep_window_off": {
+    "sha256": "dcc701eb138ec8dc6f362fa72776d9d787ab3e26dbb993d7bfe3f0e278ac96eb",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "issue_1705_economizer_running_when_pause_turns_thermostat_off": {
+    "sha256": "df2db3a2f8025c6e1e08d9ce94d28d5a6a1143b515dde051ceec505affabac14",
+    "signed": "2026-11-23",
+    "issue": 1705
+  },
+  "issue_1705_occupant_off_still_clears_blower_flag": {
+    "sha256": "176c0bc2e1769ef1c09842d4c5922aa8a6d1b9d689f621cf6d09520d43585e4a",
+    "signed": "2026-11-23",
+    "issue": 1705
+  },
+  "humid_air_1691_blower_ceiling_window_open_paused": {
+    "sha256": "abaa956cc1dcbbf408b0437bba95909b8b8288f957c3ac5fa8cefe65afc55913",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_cycling_on_refused_session_kept": {
+    "sha256": "a138d6a1ed94292e95949aabaf7f275c2b780f71a723f46e24aae4cccd4f8064",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_cycling_on_released_after_dry": {
+    "sha256": "a5cf3235ffba0df9ad05a2ffc1a332e02c9d4c6eed7e085afc796c284df3e5fe",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_economizer_fan_refused": {
+    "sha256": "d3b28013946209af85299c22798459b481b2e7d52723d658209375a78d24d8c5",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_economizer_fanless_keeps_ac_run": {
+    "sha256": "de3f1f5543727ae77190ee634ee5dffadb6848bf7c28520f6bfda0d04e1ce310",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_economizer_running_phase_change_kept": {
+    "sha256": "a663c181cb19e0bca8ed65c95269fb80091f1986cb747470babd32b6c8f08299",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_economizer_starts_after_air_dries": {
+    "sha256": "de80ac52a10ce23b52724d1f7ea47d8827b6b1cbcd0e0ed7eb49988806585b8f",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_whf_ceiling_window_open_paused": {
+    "sha256": "0414369fbd986a416ea931174ae078641e490c8cd841ebfb1c57fdbf01d87dbd",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_whf_drier_than_house_starts": {
+    "sha256": "7b048be7cfc81755141a837a3ce12312a3136ef13d8896ffb24cee8d2f6d1028",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_whf_dry_control_starts": {
+    "sha256": "9fb77e78b030ab252788929f18e485a1f098c3e646cca9dc634673e41956feaa",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_whf_recheck_refusal_reported": {
+    "sha256": "88333838e9b7ade09872224f6ec8f7a52651ca105c4d82fe88d7179a62467253",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_whf_wetter_than_house_paused": {
+    "sha256": "697abd4cd9c11339bc2ed7245f8d84cad11f3052cab48a885fee09cbfade34b7",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_air_1691_windows_only_unchanged": {
+    "sha256": "855e0f4b0c1a60c56b3270cf0a014ff84fe6a2745cf624ca3352b58049ef5bdd",
+    "signed": "2026-11-23",
+    "issue": 1691
+  },
+  "humid_fan_restrict_1693_blower_dry_after_cooling_runs": {
+    "sha256": "3ccac6e156511a28b07f022bc9b70f44576d4ecaa25b967ea63747d59ad61a04",
+    "signed": "2026-11-23",
+    "issue": 1693
+  },
+  "humid_overcool_1694_active_overcool_crosses_sleep_time": {
+    "sha256": "fa826beb3bd6462dfc1382dac4ab56e1c889fa4d65e93ca7673bc3ff07892762",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_automation_off_restores_plain_target": {
+    "sha256": "132a7c1947b28cf4683996e49351bc9eefba8f0d4881305b82b370f5bb0b3ea5",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_back_to_back_runs_share_the_spell_budget": {
+    "sha256": "2e747dab11f51367a5857489d68c5926a99b218118649cb13875c6d6e3562a8a",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_blip_kept": {
+    "sha256": "0e06f46372d70765a060fe4c68aa24269f642441d6af4751f6a98a79f3fc9766",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_engage_step_cap": {
+    "sha256": "8680580b7aaad5ed5cc1a9161b6fd45d801deeef69d13f2c9c860fbf954f090d",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_idle_end_next_run_restores": {
+    "sha256": "88fd0ef7397bdf342dde528ae7cd5bc46eadd1db29db5ca63451a9ede314476a",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_occupant_change_kept": {
+    "sha256": "651a73b9fe48b92907fcd96bf7b88ae7dfa26dd6fb5a72748ec49790daa0ecac",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_off_cool_toggle_not_held": {
+    "sha256": "e15da954d430e420d43ad8fd40bfc79ccda2ba697f035b6fe9abb15e89dabeb0",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_release_on_dry": {
+    "sha256": "11506722a0d080d8b568c914a6c69504c090fc3c8c67f2e042418c5d5231d9b3",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_run_end_coast_restore": {
+    "sha256": "a7e12a60670c27165d3c693ec2d2f271e30d4e1454f39dabf29f23394f183e4b",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_survives_30min_cycle": {
+    "sha256": "7ed63bac297c364cba3a19d7994e970e1db640cc0209b32768280f45148386de",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "humid_overcool_1694_window_pause_zeroes": {
+    "sha256": "c8f9964803dab8ded04b4eae3ffb18166047b3341552c8b0843e3d11203b6e27",
+    "signed": "2026-11-23",
+    "issue": 1694
+  },
+  "issue_1705_economizer_blower_not_stopped_by_its_own_echo": {
+    "sha256": "4e7931d0a3938b184ef14520844feb1e265a5c02708fb0c26fa9763161d7d191",
+    "signed": "2026-11-23",
+    "issue": 1705
+  },
+  "issue_1705_off_to_off_echo_keeps_circulation_blower_flag": {
+    "sha256": "e5bd20aa454fe944112976d990639c5cc387b4dce59839dbcf8647c8b4d87fc0",
+    "signed": "2026-11-23",
+    "issue": 1705
   }
 }

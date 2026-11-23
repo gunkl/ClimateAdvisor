@@ -5,8 +5,8 @@ economizer does not switch its fan on, a session whose fan cycled off does not s
 fan's min-runtime cycle waits; a dry night is unchanged. The "Next Automation" prediction is unchanged (future hours
 have no humidity). Each test fails if the guard it names is deleted.
 
-Tier-A scenarios (the real engine, headless) for the same rules: tools/simulations/pending/humid_air_1691_*.json,
-run by test_pending_humid_air_scenario_passes_production_engine below.
+Tier-A scenarios (the real engine, headless) for the same rules: tools/simulations/golden/humid_air_1691_*.json
+(promoted after owner review, #1507; run once by tests/test_production_harness.py).
 """
 
 from __future__ import annotations
@@ -334,29 +334,29 @@ class TestTwoZones:
             assert va.blocks and vb.blocks and vb.reason == HUMID_AIR_REASON_CEILING
 
 
+# Promoted to golden/ after owner review (#1507): they run once, through tests/test_production_harness.py, and the
+# check below keeps their pending-era "no assertion is skipped" guarantee statically.
 _PENDING = sorted((ROOT / "tools" / "simulations" / "pending").glob("humid_air_1691_*.json"))
-
-
-@pytest.mark.parametrize("scenario_path", _PENDING, ids=lambda p: p.stem.removeprefix("humid_air_1691_"))
-def test_pending_humid_air_scenario_passes_production_engine(scenario_path: Path) -> None:
-    import sys
-
-    sys.path.insert(0, str(ROOT / "tools"))
-    from simulate import run_scenario_production  # noqa: PLC0415
-
-    result = run_scenario_production(scenario_path, state="pending")
-    assert not result.get("callback_errors"), result.get("callback_errors")
-    real = [x for x in result["assertions"] if not x.get("skipped")]
-    assert real and len(real) == len(result["assertions"]), "no assertion of a humid-air scenario may be skipped"
-    assert result["passed"] is True, "; ".join(
-        f"@{x['at']} expected={x['expected']!r} actual={x['actual']!r}"
-        for x in result["assertions"]
-        if not x.get("pass")
-    )
+_GOLDEN = sorted((ROOT / "tools" / "simulations" / "golden").glob("humid_air_1691_*.json"))
 
 
 def test_humid_air_scenarios_discovered() -> None:
-    assert len(_PENDING) == 14, [p.stem for p in _PENDING]
+    assert not _PENDING, [p.stem for p in _PENDING]
+    assert len(_GOLDEN) == 14, [p.stem for p in _GOLDEN]
+
+
+def test_humid_air_goldens_evaluate_every_assertion() -> None:
+    """The golden run accepts an all-deferred scenario; none of these may have a skippable assertion."""
+    import json
+
+    offenders = []
+    for path in _GOLDEN:
+        scenario = json.loads(path.read_text(encoding="utf-8"))
+        coordinator = bool(scenario.get("use_coordinator", False))
+        assertions = scenario.get("assertions") or []
+        if not assertions or any(a.get("track") == "integration" and not coordinator for a in assertions):
+            offenders.append(path.stem)
+    assert not offenders, offenders
 
 
 # ── review W2A fixes ──────────────────────────────────────────────────────────────────────────────────────────────

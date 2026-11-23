@@ -289,10 +289,10 @@
   ],
   "assertions": [
     {
-      "at": "2026-07-12T20:00:00",
+      "at": "2026-07-12T20:01:00",
       "expect": "economizer_phase",
       "phase": "cool-down",
-      "reason": "The window opens with outdoor air 7F cooler than a house above its ceiling: the economizer starts the blower (cool-down)."
+      "reason": "The window opens with outdoor air 7F cooler than a house above its ceiling: the economizer starts the blower (cool-down). (Checked at 20:01: on real Home Assistant the window-cooling start runs in the refresh HA debounces by 10 s after the open.)"
     },
     {
       "at": "2026-07-12T21:30:00",

@@ -47,8 +47,10 @@ from typing import Any
 from .const import (
     CONF_HUMID_AIR_GUARD_CEILING_F,
     CONF_HUMID_AIR_GUARD_ENABLED,
+    CONF_HUMID_OVERCOOL_ENABLED,
     DEFAULT_HUMID_AIR_GUARD_CEILING_F,
     DEFAULT_HUMID_AIR_GUARD_ENABLED,
+    DEFAULT_HUMID_OVERCOOL_ENABLED,
     MAX_HUMID_AIR_GUARD_CEILING_F,
     MAX_PLAUSIBLE_OUTDOOR_F,
     MIN_HUMID_AIR_GUARD_CEILING_F,
@@ -635,3 +637,29 @@ def hvac_fan_restrict_humid_from_facts(facts: Any) -> tuple[bool | None, float |
     it judged."""
     indoor, _outdoor, latched = _facts_dew_points(facts)
     return hvac_fan_restrict_humid(indoor, latched=latched), indoor
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# H3 humid overcool (Issue #1694, plan #1507 H3): the option and the one latch reader (shared with the #1695 advice).
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def humid_overcool_enabled(config: Mapping[str, Any] | None) -> bool:
+    """The Humid Overcool option (``humid_overcool_enabled``), the one reader with the one default (Off)."""
+    return bool((config or {}).get(CONF_HUMID_OVERCOOL_ENABLED, DEFAULT_HUMID_OVERCOOL_ENABLED))
+
+
+def overcool_humid_from_facts(facts: Any) -> tuple[bool, bool, float | None]:
+    """``(humid, at_trigger, indoor_dp_f)`` for humid overcool on an ``EngineFacts`` (through ``_facts_dew_points``).
+
+    ``humid`` is the ``OVERCOOL_HUMID_LATCH`` stepped with the decision's dew point from the tick's state (on at 60 °F,
+    off at or below 58 °F; unknown releases), ``at_trigger`` whether that dew point is at or above the trigger now
+    (the second step needs it). The one reader every overcool consumer uses (the decision, the #1695 advice)."""
+    indoor, _outdoor, latched = _facts_dew_points(facts)
+    state = update_latches(
+        (spec for spec in LATCH_SPECS if spec.name == OVERCOOL_HUMID_LATCH),
+        {SIGNAL_INDOOR: indoor},
+        {OVERCOOL_HUMID_LATCH: OVERCOOL_HUMID_LATCH in latched},
+    )
+    humid = bool(state.get(OVERCOOL_HUMID_LATCH, False))
+    return humid, indoor is not None and indoor >= OVERCOOL_TRIGGER_DP_F, indoor

@@ -435,9 +435,9 @@ HUMID_WINDOWS_NOTICE_MIN_INTERVAL_MINUTES = 60
 
 # Humid overcool (Issue #1694, plan #1507 H3, owner decisions D3/D5): opt-in, Off by default. While a cooling run is
 # active on a muggy day (indoor dew point latched at or above the trigger) Climate Advisor lowers the COMMANDED cool
-# setpoint by 1 °F, by 2 °F after 30 minutes if still humid, for at most 60 minutes per run, so the AC runs longer and
-# dries the air; never in the sleep window. The comfort target and band never move (humid_overcool.py). Trigger, max
-# and cap are internal constants (the D3 defaults), not options.
+# setpoint by 1 °F, by 2 °F after 30 minutes if still humid, for at most 60 minutes per humid spell, so the AC runs
+# longer and dries the air; never in the sleep window. The comfort target and band never move (humid_overcool.py).
+# Trigger, max and cap are internal constants (the D3 defaults; the per-spell cap is a decision held for the owner).
 CONF_HUMID_OVERCOOL_ENABLED = "humid_overcool_enabled"
 DEFAULT_HUMID_OVERCOOL_ENABLED = False
 OVERCOOL_TRIGGER_DP_F = 60.0  # indoor dew point at or above which a cooling run is overcooled (latch on)
@@ -445,8 +445,9 @@ OVERCOOL_RELEASE_DP_F = 58.0  # indoor dew point at or below which overcool lets
 OVERCOOL_STEP_F = 1.0  # each step lowers the commanded cool setpoint by this much
 OVERCOOL_MAX_F = 2.0  # never more than this below the comfort target
 OVERCOOL_STEP_AFTER_S = 30 * 60  # the second step, if the house is still at or above the trigger
-OVERCOOL_RUN_CAP_S = 60 * 60  # at most this long per cooling run, then released for the rest of the run
+OVERCOOL_RUN_CAP_S = 60 * 60  # at most this long lowered per humid spell (back-to-back runs share it)
 OVERCOOL_RUN_END_GRACE_S = 5 * 60  # a run has ended once the thermostat has not reported cooling this long
+OVERCOOL_IN_FLIGHT_RETRY_S = 15.0  # a check that found another write in flight re-checks this soon
 
 # Degrees below today's observed outdoor peak required before soft-start considers the
 # day "declining" — mirrors NAT_VENT_HYSTERESIS_F's role as a noise-margin buffer.
@@ -1555,9 +1556,10 @@ CONFIG_METADATA = {
             "When on, on a muggy day Climate Advisor lets the AC run a little longer to dry the air: while the AC"
             " is cooling and the house's dew point is 60 Fahrenheit (15.6 Celsius) or more, the thermostat is set"
             " one Fahrenheit degree below your cool temperature, two after 30 minutes if it is still humid, for at"
-            " most 60 minutes per run. The room ends about one degree cooler and drier, inside your comfort range;"
-            " your temperatures do not change. Never in the sleep window, with windows open, while away, paused or"
-            " during your own change. Needs a thermostat that reports when it is cooling. Off by default."
+            " most 60 minutes per humid spell (back-to-back runs share it). The room ends about one degree cooler"
+            " and drier, inside your comfort range; your temperatures do not change. Never in the sleep window,"
+            " with windows open, while away, paused or during your own change. Needs a thermostat that reports"
+            " when it is cooling. Off by default."
         ),
         "category": "advanced",
     },

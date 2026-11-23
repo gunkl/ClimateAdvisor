@@ -4480,16 +4480,19 @@ default** (owner decision D3); never in the sleep window (D5).
 | Phase | Condition | Action | Thermostat told | Activity |
 |---|---|---|---|---|
 | idle | a cooling run is REPORTED (`hvac_action` cooling only, owner rule), the overcool latch is on, the gate is open, the gap rule leaves room | engage | target - 1 °F | `overcool_started` |
-| idle, observe-only (automation off) | the same | log `[DRY RUN] Humid overcool would start` once per run | nothing | none |
+| idle | the same, but this humid spell's 60 lowered minutes are used | nothing until the latch releases and re-arms | target | none |
+| idle, observe-only (automation off) | the same | once per run, the write path's own `[DRY RUN] Would set temperature to <target - 1> ... overcool=-1` line (nothing sent) | nothing | none |
 | active | 30 min after engaging, still cooling, the decision dew point still >= 60 °F, room under the gap rule | step | target - 2 °F (max) | none (the write's own row) |
 | active | the latch let go (dew point <= 58 °F, or unknown) | release now | target | `overcool_ended` `dried` |
-| active | 60 min after engaging | release now, no re-engage this run | target | `overcool_ended` `cap` |
+| active | the humid spell's budget is used: 60 lowered minutes (active and coasting, `OVERCOOL_RUN_CAP_S`) since the latch last re-armed, across back-to-back runs | release now; no re-engage until the latch releases (dew point <= 58 °F) and re-arms | target | `overcool_ended` `cap` |
 | active | not cooling for 5 min (`OVERCOOL_RUN_END_GRACE_S`; a shorter cooling -> fan / idle -> cooling blip is the same run) | run ended: HOLD the lowered value | unchanged | `overcool_ended` `run_ended` |
 | coasting | the 45-min post-run coast (`CYCLE_POST_OFF_WINDOW_S`, the #1512 coast window) closed | restore | target | none |
-| coasting | the next cooling run starts first | restore, then the new run may engage (a new 60-min budget) | target, or target - 1 °F | `overcool_started` when it engages |
+| coasting | the next cooling run starts first | re-engage on the same lowered stretch while the spell has budget, else restore | target - 1 °F, or target | `overcool_started` when it engages |
+| coasting | the spell's budget ran out during the coast | nothing early: the coast restores as usual (at its end or the next run) | unchanged | none |
 | any lowering | the gate closed (an owner took the thermostat) | zero the term, no write of its own (the owner writes; the occupant's value is never restored over); no re-engage this run | the owner's | `overcool_ended` `gate:<why>` |
 | any lowering | the gate closed for a window open past its debounce with no pause (no owner writes) | one plain-target write | target | `overcool_ended` `gate:window_open` |
 | any | `FREEZE` (a door/window open inside its debounce) | hold everything (no step, cap, release) | unchanged | none |
+| any lowering | automation is switched off (switch entity or dashboard: `coordinator.async_set_automation_enabled(False)`) | one plain-target write while automation is still on, then observe-only (review W3A-A A1). The bedroom loop's offset is released the same way (the mirror had the same strand) | target | `overcool_ended` `gate:automation_off` |
 
 - **Latch:** `humidity_facts.OVERCOOL_HUMID_LATCH` on the indoor dew point (60 °F on, 58 °F off), in `LATCH_SPECS`,
   stepped on the coordinator's 5-minute dew-point tick and re-stepped by each decision from `EngineFacts.humid_latches`
@@ -4502,7 +4505,7 @@ default** (owner decision D3); never in the sleep window (D5).
   `_set_temperature_impl` (`_command_adjustments`: `("remote", offset)` then `("overcool", -lowering)`), summed through
   ONE clamp, `remote_offset.combine_adjustments`: the remote-sensor offset keeps its own cap and band-edge rule
   unchanged, and overcool may only lower the commanded cool setpoint to `MIN_HEAT_COOL_GAP_F` (4 °F) above the floor of
-  the band being written, after the remote offset (a band of 4 °F or less never overcools; at this house's 74/68 band
+  the comfort band in force, after the remote offset (a band of 4 °F or less never overcools; at this house's 74/68 band
   that caps it at 2 °F). Every writer (the 30-minute cycle, the reactive tick, the fan-off and WHF-release re-asserts,
   retries and nudges, the remote loop) keeps passing the comfort target, so none can undo or double it; a TOU bank write
   (`skip_setpoint_sanity_check`) and any heat write never carry it. `temperature` / `_pending_setpoint_target` stay the
@@ -4537,12 +4540,17 @@ default** (owner decision D3); never in the sleep window (D5).
   the commanded value is the `Thermostat set` series (`commanded_setpoint_history`); the Target Band
   (`_compute_target_band_schedule`) is the band. The ODE prediction (`_build_predicted_indoor_future`) gets the commanded
   cool setpoint for the hours the overcool can still be in force (`overcool_commanded_window`, until the 60-min cap plus
-  the coast; `coordinator._band_with_commanded_window`, a copy of the band for the ODE only). A thermostat echo of a CA write that changed only a command
-  adjustment (same comfort target and mode: an overcool step or restore, a bedroom-loop step) writes a generic chart_log
-  row `event="setpoint_change"` (see the chart-log spec), so v4 learns each step against the setpoint the thermostat
-  really held, read after the echo. A write with a new comfort target (a band change, the home restore) is not one: its
-  own row (classification, occupancy, hvac edge) already records it, and a row at its echo would carry the band before
-  the change.
+  the coast; `coordinator._band_with_commanded_window`, a copy of the band for the ODE and its fallback only). A thermostat echo of a CA write that changed ONLY the
+  humid-overcool term (same comfort target, mode and remote offset: engage, step, restore; `overcool_adjustment_echo`,
+  the shared own-write rule and window) writes a chart_log row `event="setpoint_change"` (see the chart-log spec), so
+  v4 learns each step against the setpoint the thermostat really held, read after the echo. Never with the option off:
+  a bedroom-loop step or a band change writes no such row, so every other install's chart log is unchanged (review
+  W3A-B B1; pinned by `test_option_off_bedroom_loop_chart_rows_and_logs_are_unchanged`). The echo memory is set
+  BEFORE the service call, next to `_pending_setpoint_single`, so a thermostat that reports while the call is awaited
+  is already recognised.
+- **Accepted edge (review W3A-B B10):** after an occupant change closed an overcool, a live setpoint equal to CA's own
+  lowered value (by the shared own-write rule) is read as CA's, also when the occupant chose exactly that value; once
+  their change has ended, CA may write the target back. Same rule as every own-write echo ("same value = echo").
 - **Judging:** comfort incidents, P7 (`remote_comfort_target_f`, now also the target while overcool holds a lowering),
   the Comfort Score and the ODE ceiling guard judge the normal band; the room stays inside it. P1 already skips a lowered
   cool setpoint (`invariant_watchdog`: `defending = setpoint >= edge - slack`).
@@ -4722,7 +4730,12 @@ The measured sensor reports on change in ~0.18 F steps and idled up to 105 min, 
 `_on_sleep_indoor_temp_changed` listener, inside the sleep window, after the reactive checks) and from a 1-minute
 `async_track_time_interval` floor (`REMOTE_OFFSET_CHECK_INTERVAL_S`, registered next to that listener). Re-entrancy
 guarded; a no-op in dry-run, after shutdown, with no setpoint written yet, or when the thermostat is not in the
-target's mode (the loop never changes the mode).
+target's mode (the loop never changes the mode). **Automation switched off (Issue #1694, the mirror of the humid-overcool fix):** since observe-only sends
+nothing, an offset on the thermostat used to stay there for as long as automation was off. Switching automation off now
+first writes the plain target once (`AutomationEngine.release_command_adjustments`, called from
+`coordinator.async_set_automation_enabled(False)` while automation is still on, so P3 observe-only silence holds), unless
+the occupant's change is protected or the thermostat is not in the target's mode; the loop then starts from offset 0
+when automation is switched back on.
 
 **Gates (Issue #1194 b; both fan modes).** ONE predicate, `AutomationEngine._remote_offset_gate()`, asked by the write
 path (`_remote_offset_for_write`) and by the check (`_remote_offset_check_locked`); neither carries a gate of its own.

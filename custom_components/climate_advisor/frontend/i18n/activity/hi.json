@@ -341,6 +341,7 @@
   "activity.pre_cool_overshoot": "पहले से ठंडा करना ज़्यादा हो गया -- जागने के समय अंदर का तापमान आराम की निचली सीमा से नीचे",
   "activity.pre_cool_overshoot_temps": "पहले से ठंडा करना ज़्यादा हो गया -- अंदर {indoor} < निचली सीमा {floor}",
   "activity.pre_cool_suppressed_nat_vent": "पहले से ठंडा करना रोका गया -- प्राकृतिक वेंटिलेशन लक्ष्य पहले ही पा चुका",
+  "activity.reason_adjustments_released": "स्वचालन बंद: आपकी सेटिंग पर वापस",
   "activity.reason_band_edge_used": "{band} -- {edge} किनारा इस्तेमाल हुआ ({shape}, {target} पर)",
   "activity.reason_band_select": "{ctx} सीमा [{floor}/{ceiling}] (दिन={day_type}, सक्रिय={active}{aggressive, select, yes {, आक्रामक} other {}}{has_tou, select, yes {, tou_expansion={tou}} other {}})",
   "activity.reason_bedtime_no_classification": "सोने का समय — कोई वर्गीकरण नहीं",

@@ -22,7 +22,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .coordinator import ClimateAdvisorCoordinator
+from .coordinator import ClimateAdvisorCoordinator, switch_automation
 from .entity import ClimateAdvisorEntity
 from .zone_registry import ClimateAdvisorConfigEntry
 
@@ -80,10 +80,10 @@ class ClimateAdvisorAutomationSwitch(ClimateAdvisorEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable automation actions."""
-        self.coordinator.set_automation_enabled(True)
+        await switch_automation(self.coordinator, True)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable automation actions (enter observe-only mode)."""
-        self.coordinator.set_automation_enabled(False)
+        await switch_automation(self.coordinator, False)
         self.async_write_ha_state()

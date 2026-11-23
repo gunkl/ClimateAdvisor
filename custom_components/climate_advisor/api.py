@@ -68,7 +68,6 @@ from .const import (
     CONF_ENERGY_RATE,
     CONF_GITHUB_REPO,
     CONF_GITHUB_TOKEN,
-    CONF_HUMID_OVERCOOL_ENABLED,
     CONFIG_METADATA,
     DEFAULT_AI_ENABLED,
     DEFAULT_AI_INVESTIGATOR_ENABLED,
@@ -81,6 +80,7 @@ from .const import (
     VERSION,
 )
 from .engine_inputs import decide, decide_sync
+from .humidity_facts import humid_overcool_enabled
 from .learning import SUGGESTION_KEYS
 from .remote_offset import remote_offset_view_for
 from .status_text import code_of
@@ -309,7 +309,7 @@ def _text_fields(field: str, value: Any, lang: str | None, *, code: bool = False
 def _thermostat_never_reports(coordinator: Any) -> bool:
     """The coordinator's "this thermostat never reports heating/cooling" notice is up (Issue #1694: humid overcool
     then cannot act and its Status line says so). Stub-safe."""
-    if not (getattr(coordinator, "config", None) or {}).get(CONF_HUMID_OVERCOOL_ENABLED, False):
+    if not humid_overcool_enabled(getattr(coordinator, "config", None)):
         return False  # only the overcool line reads it
     getter = getattr(coordinator, "thermostat_action_notice", None)
     if not callable(getter):
@@ -1257,7 +1257,9 @@ class ClimateAdvisorToggleAutomationView(HomeAssistantView):
 
         with log_capture.zone_scope(coordinator.zone_label):
             new_state = not coordinator.automation_enabled
-            coordinator.set_automation_enabled(new_state)
+            from .coordinator import switch_automation  # noqa: PLC0415 - coordinator is heavy
+
+            await switch_automation(coordinator, new_state)
 
             return self.json(
                 {

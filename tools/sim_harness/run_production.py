@@ -1185,7 +1185,11 @@ def _dispatch_event(
         # observe-only gate in ``_call_service_with_context`` reads.  ``enabled`` defaults to False.
         enabled = bool(event.get("enabled", False))
         if coordinator is not None:
-            coordinator.set_automation_enabled(enabled)
+            # Issue #1694: the switch and the dashboard now call the async entry (it first puts the plain target back
+            # when a setpoint adjustment is on the thermostat); the harness calls the same one.
+            from custom_components.climate_advisor.coordinator import switch_automation  # noqa: PLC0415
+
+            run_coro(switch_automation(coordinator, enabled))
         else:
             engine.dry_run = not enabled
 

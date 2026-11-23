@@ -3,7 +3,8 @@
 Occupant view: on a muggy day the AC's short runs cool the room but barely dry it, so the house stays sticky. With
 the option on (Off by default), while a cooling run is active and the house's dew point is latched at or above
 60 °F, Climate Advisor sets the thermostat 1 °F below the comfort target, 2 °F after 30 minutes if the house is still
-at or above 60 °F, for at most 60 minutes per run. The AC runs about 25 minutes longer, the room ends about 1 °F cooler
+at or above 60 °F, for at most 60 lowered minutes per humid spell (back-to-back runs share them).
+The AC runs about 25 minutes longer, the room ends about 1 °F cooler
 and about 1 °F dew point drier, still inside the comfort band. A dry day is unchanged. Never in the sleep window (D5).
 
 What this module decides (the engine owns the state, the gate and the writes):
@@ -13,8 +14,9 @@ What this module decides (the engine owns the state, the gate and the writes):
   gap rule leaves room for a step -> 1 °F, ``overcool_started``. Observe-only (automation off) only reports "would
   overcool", once per run, and changes nothing.
 * **Step** (``active``): 30 minutes after engaging, still cooling and still at or above the trigger -> 2 °F.
-* **Release mid-run** (``active`` -> ``done``): the latch let go (dried, or the dew point became unknown) or the
-  60-minute cap -> 0 at once (a write), no re-engage until the run has ended.
+* **Release mid-run** (``active`` -> ``done``): the latch let go (dried, or the dew point became unknown) or the humid
+  spell's 60 lowered minutes are used (active and coasting time, across back-to-back runs; renewed only when the latch
+  releases and re-arms; owner decision held, review W3A-A A2) -> 0 at once (a write), no re-engage this spell.
 * **Run ended** (``active`` -> ``coasting``): not cooling for ``OVERCOOL_RUN_END_GRACE_S`` (the Ecobee goes
   cooling -> fan 91 % of the time and restarts within 5 minutes 8 % of the time, so a blip keeps the overcool). The
   lowered setpoint is HELD through the post-run coast (``CYCLE_POST_OFF_WINDOW_S``, 45 min, the #1512 coast window),
@@ -77,6 +79,10 @@ class OvercoolState:
     not_cooling_since: datetime | None = None
     stopped_at: datetime | None = None  # the run's end (first non-cooling report) while coasting
     observe_reported: bool = False  # observe-only: "would overcool" already reported for this run
+    # The per-humid-spell budget (owner decision held, review W3A-A A2): lowered time (active and coasting) counted
+    # against OVERCOOL_RUN_CAP_S across back-to-back runs, reset when the overcool latch releases.
+    spell_used_s: float = 0.0  # lowered seconds of this humid spell already over (closed stretches)
+    lowered_since: datetime | None = None  # start of the lowered stretch in force (kept across a coast re-engage)
 
 
 @dataclass(frozen=True)
@@ -117,15 +123,39 @@ def _run_ended(state: OvercoolState, now: datetime) -> bool:
     return elapsed is not None and elapsed >= OVERCOOL_RUN_END_GRACE_S
 
 
+def budget_used_s(state: OvercoolState, now: datetime) -> float:
+    """Lowered seconds of this humid spell so far: the closed stretches plus the stretch in force."""
+    return state.spell_used_s + (_since(state.lowered_since, now) or 0.0)
+
+
+def _close_stretch(state: OvercoolState, now: datetime) -> OvercoolState:
+    """The lowered stretch ends (restore, release, gate): its time joins the spell's used budget."""
+    return replace(state, spell_used_s=budget_used_s(state, now), lowered_since=None)
+
+
+def _spent(state: OvercoolState, now: datetime) -> bool:
+    return budget_used_s(state, now) >= OVERCOOL_RUN_CAP_S - _EPS
+
+
 def _engage(state: OvercoolState, inp: OvercoolInputs) -> OvercoolDecision:
-    """A cooling run with the latch on and room under the gap rule: the first step (or "would", observe-only)."""
+    """A cooling run with the latch on, budget left and room under the gap rule: the first step (or "would",
+    observe-only). A stretch already in force (a coast re-engage) keeps counting from where it started."""
     if not (inp.cooling and inp.humid and inp.gate == "open") or inp.headroom_f < OVERCOOL_STEP_F - _EPS:
         return OvercoolDecision(state)
+    if _spent(state, inp.now):
+        return OvercoolDecision(state)  # this humid spell's 60 minutes are used: wait for the latch to re-arm
     if inp.observe_only:
         if state.observe_reported:
             return OvercoolDecision(state)
         return OvercoolDecision(replace(state, observe_reported=True), ACTION_WOULD_ENGAGE)
-    engaged = OvercoolState(PHASE_ACTIVE, OVERCOOL_STEP_F, inp.now, None, None, state.observe_reported)
+    engaged = OvercoolState(
+        phase=PHASE_ACTIVE,
+        magnitude_f=OVERCOOL_STEP_F,
+        engaged_at=inp.now,
+        observe_reported=state.observe_reported,
+        spell_used_s=state.spell_used_s,
+        lowered_since=state.lowered_since or inp.now,
+    )
     return OvercoolDecision(engaged, ACTION_ENGAGE, write=True, event=EVENT_STARTED)
 
 
@@ -139,15 +169,16 @@ def decide_overcool(state: OvercoolState, inp: OvercoolInputs) -> OvercoolDecisi
     )
     ended = _run_ended(tracked, inp.now)
     lowering = tracked.phase in (PHASE_ACTIVE, PHASE_COASTING)
+    if not inp.humid and not lowering and (tracked.spell_used_s or tracked.lowered_since is not None):
+        tracked = replace(tracked, spell_used_s=0.0, lowered_since=None)  # the humid spell is over: a fresh budget
     if inp.gate == "closed":
         if lowering:
+            closed = _close_stretch(tracked, inp.now)
             done = OvercoolState(
-                PHASE_IDLE if (ended or tracked.phase == PHASE_COASTING) else PHASE_DONE,
-                0.0,
-                None,
-                tracked.not_cooling_since,
-                None,
-                tracked.observe_reported,
+                phase=PHASE_IDLE if (ended or tracked.phase == PHASE_COASTING) else PHASE_DONE,
+                not_cooling_since=tracked.not_cooling_since,
+                observe_reported=tracked.observe_reported,
+                spell_used_s=closed.spell_used_s,
             )
             return OvercoolDecision(
                 done,
@@ -172,15 +203,26 @@ def decide_overcool(state: OvercoolState, inp: OvercoolInputs) -> OvercoolDecisi
         return _engage(tracked, inp)
     if tracked.phase == PHASE_COASTING:
         if inp.cooling:
-            restored = OvercoolState()
+            # The next run: re-engage on the same stretch while the spell has budget, else restore (and stay out
+            # until the latch releases and re-arms).
+            restored = OvercoolState(
+                observe_reported=tracked.observe_reported,
+                spell_used_s=tracked.spell_used_s,
+                lowered_since=tracked.lowered_since,
+            )
             nxt = _engage(restored, inp)
             if nxt.action == ACTION_ENGAGE:
                 return OvercoolDecision(nxt.state, ACTION_ENGAGE, REASON_NEXT_RUN, write=True, event=EVENT_STARTED)
-            return OvercoolDecision(nxt.state, ACTION_RESTORE, REASON_NEXT_RUN, write=True)
+            return OvercoolDecision(_close_stretch(nxt.state, inp.now), ACTION_RESTORE, REASON_NEXT_RUN, write=True)
         coast = _since(tracked.stopped_at, inp.now)
         if coast is not None and coast >= CYCLE_POST_OFF_WINDOW_S:
+            closed = _close_stretch(tracked, inp.now)
             return OvercoolDecision(
-                OvercoolState(not_cooling_since=tracked.not_cooling_since),
+                OvercoolState(
+                    not_cooling_since=tracked.not_cooling_since,
+                    observe_reported=tracked.observe_reported,
+                    spell_used_s=closed.spell_used_s,
+                ),
                 ACTION_RESTORE,
                 REASON_COAST_OVER,
                 write=True,
@@ -191,8 +233,10 @@ def decide_overcool(state: OvercoolState, inp: OvercoolInputs) -> OvercoolDecisi
         coasting = replace(tracked, phase=PHASE_COASTING, stopped_at=tracked.not_cooling_since)
         return OvercoolDecision(coasting, ACTION_RUN_ENDED, REASON_RUN_ENDED, event=EVENT_ENDED)
     engaged_s = _since(tracked.engaged_at, inp.now) or 0.0
-    if not inp.humid or engaged_s >= OVERCOOL_RUN_CAP_S:
-        done = replace(tracked, phase=PHASE_DONE, magnitude_f=0.0, engaged_at=None)
+    if not inp.humid or _spent(tracked, inp.now):
+        done = replace(_close_stretch(tracked, inp.now), phase=PHASE_DONE, magnitude_f=0.0, engaged_at=None)
+        if not inp.humid:
+            done = replace(done, spell_used_s=0.0)  # dried: the spell is over, the next one has its full budget
         reason = REASON_DRIED if not inp.humid else REASON_CAP
         return OvercoolDecision(done, ACTION_RELEASE, reason, write=True, event=EVENT_ENDED)
     if (
@@ -223,7 +267,7 @@ def next_deadline_s(state: OvercoolState, now: datetime) -> float | None:
     if state.phase == PHASE_ACTIVE:
         if state.magnitude_f < OVERCOOL_MAX_F - _EPS:
             _add(state.engaged_at, OVERCOOL_STEP_AFTER_S)
-        _add(state.engaged_at, OVERCOOL_RUN_CAP_S)
+        _add(state.lowered_since, OVERCOOL_RUN_CAP_S - state.spell_used_s)  # this spell's budget runs out
         _add(state.not_cooling_since, OVERCOOL_RUN_END_GRACE_S)
     elif state.phase == PHASE_COASTING:
         _add(state.stopped_at, CYCLE_POST_OFF_WINDOW_S)

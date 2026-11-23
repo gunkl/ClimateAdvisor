@@ -58,6 +58,7 @@ def _inp(now=T0, **kw):
 
 
 def _active(engaged=T0, magnitude=1.0, **kw):
+    kw.setdefault("lowered_since", engaged)
     return ho.OvercoolState(phase=ho.PHASE_ACTIVE, magnitude_f=magnitude, engaged_at=engaged, **kw)
 
 
@@ -429,7 +430,8 @@ class TestEngine:
         env.engine.dry_run = True
         with caplog.at_level("INFO"):
             env.check()
-        assert "Humid overcool would start" in caplog.text
+        # the write path's own dry-run line, with the lowering it would add (review W3A-B B6)
+        assert "[DRY RUN] Would set temperature to 75" in caplog.text and "overcool=-1" in caplog.text
         assert env.sp() == [76.0] and not env.events("overcool_started")
 
     def test_narrow_band_gets_no_overcool(self):
@@ -457,11 +459,10 @@ class TestEngine:
         env.check()
         assert env.engine.overcool_adjustment_echo(75.0, T0) is True  # only the overcool term changed
         assert env.engine.overcool_adjustment_echo(73.0, T0) is False
-        assert env.engine.overcool_adjustment_echo(75.0, T0 + timedelta(minutes=16)) is False  # too old
-        assert env.engine.is_own_commanded_setpoint(75.2) is True  # the engage write changed only the term
-        assert env.engine.is_own_commanded_setpoint(None) is False
-        env.write(75.5)  # a new comfort target: a real setpoint change, not an adjustment
-        assert env.engine.is_own_commanded_setpoint(74.5) is False
+        assert env.engine.overcool_adjustment_echo(75.0, T0 + timedelta(minutes=4)) is False  # past the echo window
+        assert env.engine.overcool_adjustment_echo(None, T0) is False
+        env.write(73.0)  # a new comfort target: a real setpoint change, the echo memory is not renewed
+        assert env.engine._overcool_echo[0] == 75.0
         env.engine._overcool_echo = None
         assert env.engine.overcool_adjustment_echo(74.5, T0) is False
 
@@ -642,7 +643,7 @@ def test_pending_humid_overcool_scenario_passes_production_engine(scenario_path)
 
 
 def test_humid_overcool_scenarios_discovered():
-    assert len(_PENDING) == 14, [p.stem for p in _PENDING]
+    assert len(_PENDING) == 17, [p.stem for p in _PENDING]
 
 
 def test_api_helper_without_a_notice_reader():
@@ -723,7 +724,7 @@ def test_coordinator_stub_safety():
     assert coord._cycle_overcool_echo(st) is False
     assert coord._overcool_commanded_window() is None
     coord.automation_engine = SimpleNamespace(
-        is_own_commanded_setpoint=lambda sp: 1 / 0, overcool_commanded_window=lambda: 1 / 0
+        overcool_adjustment_echo=lambda sp: 1 / 0, overcool_commanded_window=lambda: 1 / 0
     )
     assert co._is_own_setpoint_echo(coord, st) is False
     assert coord._overcool_commanded_window() is None
@@ -783,3 +784,224 @@ def test_briefing_and_ai_name_todays_overcooled_runs():
         {"time": "2026-07-11T13:00:00+00:00", "type": "overcool_started"},  # yesterday
     ]
     assert coord.humid_decisions_today(T0)["overcool_runs"] == 1
+
+
+# ── review W3A fixes ────────────────────────────────────────────────────────────────────────────────────────────────
+class TestSpellBudget:
+    """A2 (decision held for the owner): 60 lowered minutes per HUMID SPELL, shared by back-to-back runs."""
+
+    def test_coast_re_engage_keeps_counting_and_a_spent_spell_does_not_re_engage(self):
+        coasting = ho.OvercoolState(
+            phase=ho.PHASE_COASTING, magnitude_f=1.0, engaged_at=T0, stopped_at=T0, lowered_since=T0
+        )
+        again = ho.decide_overcool(coasting, _inp(now=T0 + timedelta(minutes=20)))
+        assert again.action == ho.ACTION_ENGAGE and again.state.lowered_since == T0  # the same stretch
+        capped = ho.decide_overcool(again.state, _inp(now=T0 + timedelta(seconds=OVERCOOL_RUN_CAP_S)))
+        assert (capped.action, capped.reason) == (ho.ACTION_RELEASE, ho.REASON_CAP)
+        assert capped.state.spell_used_s == pytest.approx(OVERCOOL_RUN_CAP_S)
+        # the run ends, the next run in the same spell is not overcooled
+        off = ho.decide_overcool(capped.state, _inp(cooling=False, now=T0 + timedelta(minutes=61)))
+        idle = ho.decide_overcool(off.state, _inp(cooling=False, now=T0 + timedelta(minutes=70)))
+        assert idle.state.phase == ho.PHASE_IDLE
+        assert ho.decide_overcool(idle.state, _inp(now=T0 + timedelta(minutes=80))).action == ho.ACTION_NONE
+        # the latch releases (dry), then re-arms: a fresh budget
+        dry = ho.decide_overcool(idle.state, _inp(cooling=False, humid=False, now=T0 + timedelta(minutes=90)))
+        assert dry.state.spell_used_s == 0.0
+        assert ho.decide_overcool(dry.state, _inp(now=T0 + timedelta(minutes=95))).action == ho.ACTION_ENGAGE
+
+    def test_spent_while_coasting_restores_as_usual(self):
+        st = ho.OvercoolState(
+            phase=ho.PHASE_COASTING,
+            magnitude_f=1.0,
+            stopped_at=T0,
+            lowered_since=T0 - timedelta(minutes=50),
+        )
+        late = T0 + timedelta(minutes=20)  # 70 lowered minutes: spent
+        nxt = ho.decide_overcool(st, _inp(now=late))  # the next run starts: restore, no re-engage
+        assert (nxt.action, nxt.reason, nxt.write) == (ho.ACTION_RESTORE, ho.REASON_NEXT_RUN, True)
+        assert nxt.state.spell_used_s == pytest.approx(70 * 60)
+        held = ho.decide_overcool(st, _inp(cooling=False, now=late))
+        assert held.action == ho.ACTION_NONE  # the coast itself is not cut short
+
+    def test_dried_release_resets_the_spell(self):
+        d = ho.decide_overcool(_active(spell_used_s=600.0), _inp(humid=False, now=T0 + timedelta(minutes=5)))
+        assert d.reason == ho.REASON_DRIED and d.state.spell_used_s == 0.0
+
+    def test_cap_deadline_counts_the_spell(self):
+        st = _active(engaged=T0, spell_used_s=40 * 60, magnitude=2.0)
+        assert ho.next_deadline_s(st, T0) == pytest.approx(20 * 60)
+
+
+class TestReleaseOnAutomationOff:
+    """A1 and its mirror: switching automation off puts the plain target back with one write, then stays silent."""
+
+    def test_overcool_lowering_is_released(self):
+        env = Env()
+        env.write()
+        env.check()
+        assert env.sp()[-1] == 75.0 and env.engine.command_adjustments_applied()
+        env.run(env.engine.release_command_adjustments())
+        assert env.sp()[-1] == 76.0
+        assert not env.engine.command_adjustments_applied() and env.engine.overcool_view()["active"] is False
+        env.engine.dry_run = True
+        env.advance(OVERCOOL_STEP_AFTER_S)
+        assert env.sp()[-1] == 76.0  # nothing re-engages while observe-only
+
+    def test_nothing_applied_or_owner_holds_sends_nothing(self):
+        env = Env()
+        env.write()
+        env.run(env.engine.release_command_adjustments())
+        assert env.sp() == [76.0]
+        env.check()
+        env.engine._manual_override_active = True
+        env.run(env.engine.release_command_adjustments())
+        assert env.sp() == [76.0, 75.0]  # the occupant's change is theirs
+        env.engine._manual_override_active = False
+        env.engine.dry_run = True
+        env.run(env.engine.release_command_adjustments())  # already observe-only: never writes
+
+    def test_bedroom_offset_mirror_is_released_too(self):
+        env = Env(enabled=False)
+        env.write()
+        env.engine._remote_offset_applied_f = 2.0  # the bedroom loop's offset is on the thermostat
+        env.engine._remote_offset_f = 2.0
+        env.run(env.engine.release_command_adjustments())
+        assert env.sp()[-1] == 76.0 and env.engine._remote_offset_applied_f == 0.0
+        assert env.engine._remote_offset_f == 0.0
+
+    def test_coordinator_entry_releases_before_switching_off(self):
+        import asyncio
+
+        from custom_components.climate_advisor import coordinator as co
+
+        calls = []
+
+        class _Engine:
+            def command_adjustments_applied(self):
+                return True
+
+            async def release_command_adjustments(self):
+                calls.append(("release", coord._automation_enabled))
+
+        coord = object.__new__(co.ClimateAdvisorCoordinator)
+        coord._automation_enabled = True
+        coord.automation_engine = _Engine()
+        coord.set_automation_enabled = lambda enabled: calls.append(("set", enabled))
+        asyncio.run(coord.async_set_automation_enabled(False))
+        assert calls == [("release", True), ("set", False)]  # written while automation is still on (P3)
+        calls.clear()
+        asyncio.run(coord.async_set_automation_enabled(True))
+        assert calls == [("set", True)]
+        coord._automation_enabled = True
+        coord.automation_engine = SimpleNamespace(command_adjustments_applied=lambda: 1 / 0)
+        asyncio.run(coord.async_set_automation_enabled(False))  # never raises
+        assert calls[-1] == ("set", False)
+        stub = SimpleNamespace(set_automation_enabled=lambda enabled: calls.append(("stub", enabled)))
+        asyncio.run(co.switch_automation(stub, True))
+        assert calls[-1] == ("stub", True)
+
+
+class TestEngineReviewFixes:
+    def test_window_open_past_debounce_with_no_owner_writes_the_plain_target_once(self):
+        from custom_components.climate_advisor.remote_offset import RemoteOffsetGate
+
+        env = Env()
+        env.write()
+        env.check()
+        assert env.sp()[-1] == 75.0
+        env.engine._remote_offset_gate_and_reason = lambda: (RemoteOffsetGate.CLOSED, "window_open")
+        env.check()
+        assert env.sp()[-1] == 76.0 and env.events("overcool_ended")[-1]["reason"] == "gate:window_open"
+        env.check()
+        assert env.sp().count(76.0) == 2  # the band and that one restore: no further write
+
+    def test_in_flight_write_rearms_a_short_retry(self):
+        env = Env()
+        env.write()
+        env.engine._temp_command_pending = True
+        env.check()
+        assert env.engine._overcool_timer_cancel is not None  # re-checks in seconds, not at the next tick
+        env.engine._temp_command_pending = False
+        env.advance(30)
+        assert env.sp()[-1] == 75.0
+
+    def test_echo_memory_is_set_before_the_service_call(self):
+        env = Env()
+        env.write()
+        seen = []
+
+        async def _service(call):
+            seen.append(env.engine._overcool_echo)
+
+        env.hass.services.async_register("climate", "set_temperature", _service)
+        env.check()
+        assert seen and seen[-1] is not None and seen[-1][0] == 75.0
+
+    def test_celsius_rounding_is_still_the_echo(self):
+        env = Env(cfg={"temp_unit": "celsius"})
+        env.engine._overcool_echo = (75.0, T0)  # 23.89 C commanded; a 0.5 C thermostat reports 24.0 C
+        assert env.engine.overcool_adjustment_echo(75.2, T0) is True
+
+
+# ── chart rows through the real coordinator ─────────────────────────────────────────────────────────────────────────
+def _chart_rows(scenario: dict) -> list[dict]:
+    from tools.sim_harness.run_production import FakeHassSession
+    from tools.sim_harness.session import drive_scenario
+
+    session = FakeHassSession(scenario, use_coordinator=True)
+    try:
+        drive_scenario(session, scenario)
+        return list(session.coordinator._chart_log._entries)
+    finally:
+        session.close()
+
+
+def test_each_overcool_step_echo_writes_one_setpoint_change_row():
+    import json
+
+    sc = json.loads((_ROOT / "tools/simulations/pending/humid_overcool_1694_engage_step_cap.json").read_text())
+    rows = [r for r in _chart_rows(sc) if r.get("event") == "setpoint_change"]
+    assert [r["setpoint"] for r in rows] == [75.0, 74.0, 76.0]  # engage, step, cap: read after the echo
+    assert all(r.get("comfort_target") in (76.0, None) for r in rows)
+    occupant = json.loads(
+        (_ROOT / "tools/simulations/pending/humid_overcool_1694_occupant_change_kept.json").read_text()
+    )
+    assert [r["setpoint"] for r in _chart_rows(occupant) if r.get("event") == "setpoint_change"] == [75.0]
+
+
+def test_option_off_bedroom_loop_chart_rows_and_logs_are_unchanged(caplog):
+    """B1/A4: on a bedroom-sensor install with the option off, the loop's steps add no chart row and no log text."""
+    import json
+
+    path = _ROOT / "tools/simulations/pending/remote_offset_1194e_heat_night_cold_bedroom_raise_hold_step_down.json"
+    sc = json.loads(path.read_text())
+    assert sc["config"].get(CONF_HUMID_OVERCOOL_ENABLED) is None  # the default: Off
+    with caplog.at_level("INFO"):
+        rows = _chart_rows(sc)
+    assert not [r for r in rows if r.get("event") == "setpoint_change"]
+    assert "overcool" not in caplog.text
+    assert "Set temperature to" in caplog.text  # the loop did write (its steps are the remote golden's own proof)
+
+
+def test_ai_context_gets_its_own_overcool_line_and_the_dry_run_preview_is_cool_only():
+    """B7: the AI investigator sees the overcool on its own line, never under the remote-sensor heading."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from custom_components.climate_advisor.ai_skills_context import build_hvac_entity_context
+
+    env = Env()
+    env.write()
+    env.check()
+    coord = MagicMock()
+    coord.automation_engine = env.engine
+    coord.config = {"temp_unit": "fahrenheit", "climate_entity": ENTITY}
+    coord.data = {"hvac_mode": "cool"}
+    hass = MagicMock()
+    hass.states.get.return_value = MagicMock(attributes={"current_temperature": 77})
+    ctx = asyncio.run(build_hvac_entity_context(hass, coord))
+    assert "humid_overcool: phase='active'" in ctx and "remote_sensor_offset:" not in ctx
+    env.engine.dry_run = True
+    env.engine._overcool_preview_f = 1.0
+    assert env.engine._overcool_for_write("heat") == 0.0  # a heat write never previews a lowering
+    assert env.engine._overcool_for_write("cool") == -1.0

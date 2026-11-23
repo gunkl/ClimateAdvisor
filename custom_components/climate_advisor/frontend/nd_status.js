@@ -158,7 +158,10 @@
     function temp1(v) { return v != null ? ND.bdi(ND.num(v, 1) + u) : '—'; }
     var indoor = temp1(d.indoor_temp);
     var hvacNote = '<div class="n" id="status-hvac-line">' + hvacSentence(d, u, true) + '</div>' +
-      (d.remote_offset && d.remote_offset.text ? '<div class="n remote-offset-line">' + esc(ND.text(d.remote_offset, 'text')) + '</div>' : '');
+      (d.remote_offset && d.remote_offset.text ? '<div class="n remote-offset-line">' + esc(ND.text(d.remote_offset, 'text')) + '</div>' : '') +
+      // Issue #1694: the humid-overcool sentence beside the remote loop's own (shown once when it is the only one)
+      (d.remote_offset && d.remote_offset.overcool && d.remote_offset.overcool.text && d.remote_offset.overcool.text !== d.remote_offset.text
+        ? '<div class="n overcool-line">' + esc(ND.text(d.remote_offset.overcool, 'text')) + '</div>' : '');
     // What is happening now, and why: the Status sentence rides on the hallway (thermostat) card. The header health
     // line only says whether automation is on; this says what it is doing (nat-vent, a grace period, a pause).
     var statusLine = '<div class="n" id="status-automation-line">' + ND.iso(t('automation_line', { phrase: automationPhrase(d) })) + '</div>';

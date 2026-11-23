@@ -1471,7 +1471,7 @@
     "key": "humid_overcool_enabled",
     "value": false,
     "label": "Humid Overcool",
-    "description": "When on, on a muggy day Climate Advisor lets the AC run a little longer to dry the air: while the AC is cooling and the house's dew point is 60 Fahrenheit (15.6 Celsius) or more, the thermostat is set one Fahrenheit degree below your cool temperature, two after 30 minutes if it is still humid, for at most 60 minutes per run. The room ends about one degree cooler and drier, inside your comfort range; your temperatures do not change. Never in the sleep window, with windows open, while away, paused or during your own change. Needs a thermostat that reports when it is cooling. Off by default.",
+    "description": "When on, on a muggy day Climate Advisor lets the AC run a little longer to dry the air: while the AC is cooling and the house's dew point is 60 Fahrenheit (15.6 Celsius) or more, the thermostat is set one Fahrenheit degree below your cool temperature, two after 30 minutes if it is still humid, for at most 60 minutes per humid spell (back-to-back runs share it). The room ends about one degree cooler and drier, inside your comfort range; your temperatures do not change. Never in the sleep window, with windows open, while away, paused or during your own change. Needs a thermostat that reports when it is cooling. Off by default.",
     "category": "advanced",
     "label_msg": {
      "key": "settings.humid_overcool_enabled.label",

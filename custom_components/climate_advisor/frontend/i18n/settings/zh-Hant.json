@@ -177,7 +177,7 @@
   "settings.humid_air_guard_ceiling_f.label": "潮濕空氣露點上限",
   "settings.humid_air_guard_enabled.description": "開啟後，在戶外空氣過於潮濕時，全屋換氣扇和自然通風不會啟動：戶外露點達到或超過上限，或戶外空氣潮濕且明顯比室內更潮濕。正在運轉的通風不會被停止。沒有戶外濕度讀數時一切照舊。預設為開啟。",
   "settings.humid_air_guard_enabled.label": "潮濕空氣保護",
-  "settings.humid_overcool_enabled.description": "開啟後，悶熱天氣時 Climate Advisor 會讓冷氣多運轉一會兒以乾燥空氣：冷氣運轉且室內露點達 60 °F（15.6 °C）以上時，溫控器設為比您的冷房溫度低 1 °F（0.6 °C），30 分鐘後仍潮濕則低 2 °F（1.1 °C），每次運轉最多 60 分鐘。房間在舒適範圍內約涼 1 °F 且更乾燥；您的溫度設定不變。睡眠時段、開窗、外出、暫停或您自行變更期間絕不啟用。需要能回報何時在冷房的溫控器。預設關閉。",
+  "settings.humid_overcool_enabled.description": "開啟後，悶熱天氣時 Climate Advisor 會讓冷氣多運轉一會兒以乾燥空氣：冷氣運轉且室內露點達 60 °F（15.6 °C）以上時，溫控器設為比您的冷房溫度低 1 °F（0.6 °C），30 分鐘後仍潮濕則低 2 °F（1.1 °C），每個潮濕時段最多 60 分鐘（連續運轉共用這段時間）。房間在舒適範圍內約涼 1 °F 且更乾燥；您的溫度設定不變。睡眠時段、開窗、外出、暫停或您自行變更期間絕不啟用。需要能回報何時在冷房的溫控器。預設關閉。",
   "settings.humid_overcool_enabled.label": "除濕額外冷房",
   "settings.hvac_fan_restrict_mode.description": "依最後運轉的 HVAC 模式，限制空調風扇（溫控器鼓風機循環）何時可以運轉。不影響全屋換氣扇。「僅限暖氣」會在溫控器處於冷氣模式時，或冷氣循環結束 2 小時內處於關閉且室內潮濕時，阻止空調風扇運轉，避免濕盤管上的冷凝水再次蒸發而使濕度升高，適合潮濕的氣候。「僅限冷氣」則是對應的反向限制。「兩者皆可」（預設）不做任何限制，即目前的行為。",
   "settings.hvac_fan_restrict_mode.label": "空調風扇限制",

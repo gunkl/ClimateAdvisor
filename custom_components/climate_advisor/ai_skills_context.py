@@ -831,9 +831,18 @@ async def build_hvac_entity_context(hass: Any, coordinator: Any, **kwargs: Any) 
         _ro_view = remote_offset_view_for(
             getattr(coordinator, "automation_engine", None), (coordinator.config or {}).get("temp_unit", "fahrenheit")
         )
-        if _ro_view is not None:
+        if _ro_view is not None and _ro_view.get("state") != "overcool":
             lines.append("  remote_sensor_offset:")
             lines.extend(remote_offset_lines(_ro_view))
+        _oc_view = _ro_view.get("overcool") if isinstance(_ro_view, dict) else None
+        if isinstance(_oc_view, dict):
+            # Issue #1694: humid overcool, its own line (review W3A-B B7), never under the remote-sensor heading.
+            lines.append(
+                f"  humid_overcool: phase={_oc_view.get('phase')!r} lowering={_oc_view.get('lowering')!r}"
+                f" commanded={_oc_view.get('commanded')!r} comfort_target={_oc_view.get('comfort_target')!r}"
+                f" indoor_dew_point={_oc_view.get('indoor_dew_point')!r} warning={_oc_view.get('warning')!r}"
+                f" text={_oc_view.get('text')!r}"
+            )
         lines.append("")
         return "\n".join(lines)
     except Exception:

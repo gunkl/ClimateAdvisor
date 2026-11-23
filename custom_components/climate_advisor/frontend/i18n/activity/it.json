@@ -341,6 +341,7 @@
   "activity.pre_cool_overshoot": "Preraffreddamento eccessivo -- interno sotto il minimo di comfort al risveglio",
   "activity.pre_cool_overshoot_temps": "Preraffreddamento eccessivo -- interno {indoor} < minimo {floor}",
   "activity.pre_cool_suppressed_nat_vent": "Preraffreddamento soppresso -- la ventilazione naturale ha già raggiunto l’obiettivo",
+  "activity.reason_adjustments_released": "automazione disattivata: ritorno alla tua impostazione",
   "activity.reason_band_edge_used": "{band} -- limite {edge} usato ({shape} a {target})",
   "activity.reason_band_select": "{ctx} intervallo [{floor}/{ceiling}] (giorno={day_type}, attivo={active}{aggressive, select, yes {, aggressivo} other {}}{has_tou, select, yes {, tou_expansion={tou}} other {}})",
   "activity.reason_bedtime_no_classification": "ora di andare a dormire — nessuna classificazione",

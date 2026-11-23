@@ -157,7 +157,6 @@ from .const import (
     CONF_HEAT_POWER_KW,
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
-    CONF_HUMID_OVERCOOL_ENABLED,
     CONF_INDOOR_HUMIDITY_ENTITY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_HYSTERESIS_F,
@@ -187,7 +186,6 @@ from .const import (
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
-    DEFAULT_HUMID_OVERCOOL_ENABLED,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NATURAL_VENT_DELTA,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
@@ -394,6 +392,7 @@ from .humidity_facts import (
     decision_dew_point,
     fmt_dp_log,
     humid_air_ceiling_from_config,
+    humid_overcool_enabled,
     paired_glitch,
     read_dew_point,
     step_humid_latches,
@@ -1195,6 +1194,16 @@ def _whf_safety_after_event(after: Callable[[Any, Any], None]) -> Callable[[Any]
     return decorate
 
 
+async def switch_automation(coordinator: Any, enabled: bool) -> None:
+    """The automation switch's one entry (switch entity, dashboard toggle): the real coordinator's
+    ``async_set_automation_enabled`` (which first puts the plain target back when a setpoint adjustment is on the
+    thermostat, Issue #1694); any other object (a test double) gets ``set_automation_enabled`` as before."""
+    if getattr(type(coordinator), "async_set_automation_enabled", None) is not None:
+        await coordinator.async_set_automation_enabled(enabled)
+    else:
+        coordinator.set_automation_enabled(enabled)
+
+
 def _overcool_after_thermostat_event(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Run the humid-overcool check once the thermostat listener has finished, when ``hvac_action`` changed (#1694).
 
@@ -1215,7 +1224,7 @@ def _overcool_after_thermostat_event(fn: Callable[..., Any]) -> Callable[..., An
                         old is not None
                         and new is not None
                         and old.attributes.get("hvac_action") != new.attributes.get("hvac_action")
-                        and bool((getattr(self, "config", None) or {}).get(CONF_HUMID_OVERCOOL_ENABLED, False))
+                        and humid_overcool_enabled(getattr(self, "config", None))
                     ):
                         tick = getattr(self, "_async_overcool_tick", None)
                         if callable(tick):
@@ -1957,6 +1966,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Whether automation actions are enabled (False = observe-only)."""
         return self._automation_enabled
 
+    async def async_set_automation_enabled(self, enabled: bool) -> None:
+        """The automation switch (switch entity and dashboard): ``set_automation_enabled`` after, when switching off,
+        putting the plain comfort target back if a command adjustment (humid overcool, the remote-sensor offset) is on
+        the thermostat (Issue #1694, review W3A-A A1). That one write is made while automation is still on, so
+        observe-only sends nothing; without it the thermostat stayed 1-2 F off the occupant's setting for as long as
+        automation was off. Never raises."""
+        engine = getattr(self, "automation_engine", None)
+        if not enabled and self._automation_enabled and engine is not None:
+            try:
+                if engine.command_adjustments_applied():
+                    await decide(self, engine.release_command_adjustments)
+            except Exception:  # noqa: BLE001 - switching automation off must always work
+                _LOGGER.warning("Releasing the setpoint adjustments before observe-only failed", exc_info=True)
+        self.set_automation_enabled(enabled)
+
     def set_automation_enabled(self, enabled: bool) -> None:
         """Enable or disable automation actions (observe-only mode)."""
         self._automation_enabled = enabled
@@ -2664,7 +2688,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001 - a humidity sample must never break thermal sampling
             _LOGGER.debug("dew point sample failed", exc_info=True)
         self._tick_humid_windows_notice(dt_util.now())  # Issue #1692: after the sample (never raises)
-        if bool((getattr(self, "config", None) or {}).get(CONF_HUMID_OVERCOOL_ENABLED, DEFAULT_HUMID_OVERCOOL_ENABLED)):
+        if humid_overcool_enabled(getattr(self, "config", None)):
             # Issue #1694: the humid-overcool decision on the same tick as its latch (option on only).
             self._spawn(self._async_overcool_tick())
         try:  # owner decision 2026-11-13: watch for a thermostat that never reports heating/cooling
@@ -13454,9 +13478,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and new_state.attributes.get("temperature") is not None
             and _is_own_setpoint_echo(self, new_state)
         ):
-            # Issue #1694 (plan #1507 H3, generic): the thermostat now reports a setpoint CA commanded. v4 learns the
-            # commanded setpoint from chart_log ``setpoint``, which otherwise refreshes only on 30-minute and edge
-            # rows; a row here records it AFTER the echo (a humid-overcool step, a bedroom-loop step, any CA write).
+            # Issue #1694 (plan #1507 H3): the thermostat now reports a setpoint CA commanded with ONLY the humid-
+            # overcool term changed (engage, step, restore). v4 learns the commanded setpoint from chart_log
+            # ``setpoint``, which otherwise refreshes only on 30-minute and edge rows; this row records it AFTER the
+            # echo. Never with the option off, so every other install's chart log is unchanged (review W3A-B B1).
             await _append_thermostat_chart_row(
                 self,
                 new_action,
@@ -20762,6 +20787,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # already-converted _conv_band as its `target_band` input, then its output was
             # converted a second time via _conv(e["target"]) below — a real double-conversion
             # for Celsius-display users, invisible on an all-Fahrenheit install.
+            # Issue #1694 (Chart Coverage): while humid overcool lowers the commanded cool setpoint, the ODE (and its
+            # fallback) gets the commanded value for the hours it can still be in force; the Target Band stays the band.
+            _ode_band = _band_with_commanded_window(_raw_band, self._overcool_commanded_window(), now)
             _raw_predicted_indoor = _build_predicted_indoor_future(
                 _extended_forecast,
                 self.config,
@@ -20770,14 +20798,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 thermal_model=thermal_model,
                 occupancy_mode=self._occupancy_mode,
                 classification=self._current_classification,
-                # Issue #1694 (Chart Coverage): while humid overcool lowers the commanded cool setpoint, the ODE gets
-                # the commanded value for the hours it can still be in force; the chart's Target Band stays the band.
-                band_schedule=_band_with_commanded_window(_raw_band, self._overcool_commanded_window(), now),
+                band_schedule=_ode_band,
                 tomorrow_window=self._tomorrow_window_plan(),
                 zone_service=_zone_service_of(self),
             )
             predicted_indoor = [{"ts": p["ts"], "temp": _conv(p["temp"])} for p in _raw_predicted_indoor]
-            _fallback_inputs = (_extended_forecast, now, _raw_band)
+            _fallback_inputs = (_extended_forecast, now, _ode_band)  # the fallback sees the same command (#1694)
             _raw_forecast_outdoor = _build_future_forecast_outdoor(
                 _extended_forecast,
                 classification=self._current_classification,
@@ -22544,9 +22570,9 @@ async def _append_thermostat_chart_row(self: Any, new_action: Any, *, event: str
 
 
 def _is_own_setpoint_echo(self: Any, new_state: Any) -> bool:
-    """The thermostat reports the setpoint Climate Advisor last commanded (Issue #1694; engine read, stub-safe)."""
+    """The thermostat reports CA's own write that changed only the humid-overcool term (Issue #1694; stub-safe)."""
     engine = getattr(self, "automation_engine", None)
-    check = getattr(engine, "is_own_commanded_setpoint", None)
+    check = getattr(engine, "overcool_adjustment_echo", None)
     if not callable(check):
         return False
     try:

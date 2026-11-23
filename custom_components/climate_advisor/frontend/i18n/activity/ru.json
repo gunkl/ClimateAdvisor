@@ -341,6 +341,7 @@
   "activity.pre_cool_overshoot": "Предварительное охлаждение переборщило -- утром в помещении ниже нижней границы комфорта",
   "activity.pre_cool_overshoot_temps": "Предварительное охлаждение переборщило -- в помещении {indoor} < нижняя граница {floor}",
   "activity.pre_cool_suppressed_nat_vent": "Предварительное охлаждение подавлено -- естественная вентиляция уже достигла цели",
+  "activity.reason_adjustments_released": "автоматизация выключена: возврат к вашей настройке",
   "activity.reason_band_edge_used": "{band} -- использована граница {edge} ({shape} при {target})",
   "activity.reason_band_select": "диапазон {ctx} [{floor}/{ceiling}] (день={day_type}, активный={active}{aggressive, select, yes {, агрессивный} other {}}{has_tou, select, yes {, tou_expansion={tou}} other {}})",
   "activity.reason_bedtime_no_classification": "время отхода ко сну — нет классификации",

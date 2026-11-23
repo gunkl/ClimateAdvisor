@@ -4,7 +4,8 @@
   "source": "synthetic",
   "issue": 1691,
   "notes": [
-    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: an economizer guard not gated on a fan existing makes 07:00 read nat_vent_humid_skip and drops the cool-down AC run. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the room would warm with HVAC paused, and the Activity report would claim a fan that does not exist was refused."
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: an economizer guard not gated on a fan existing makes 07:00 read nat_vent_humid_skip and drops the cool-down AC run. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the room would warm with HVAC paused, and the Activity report would claim a fan that does not exist was refused.",
+    "Issue #1507 review: the outdoor humidity is paired with a dedicated outdoor temperature sensor (outdoor_temp_source sensor), as a real install needs for an outdoor dew point, so the coordinator-hosted golden tiers (P8 surfaces, promise parity, real HA) can run this scenario."
   ],
   "verdict": {
     "type": "positive",
@@ -18,7 +19,9 @@
     "economizer_temp_delta": 3.0,
     "natural_vent_delta": 3.0,
     "aggressive_savings": false,
-    "fan_mode": "disabled"
+    "fan_mode": "disabled",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
   },
   "events": [
     {

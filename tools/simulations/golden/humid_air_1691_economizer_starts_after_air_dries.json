@@ -4,7 +4,8 @@
   "source": "synthetic",
   "issue": 1691,
   "notes": [
-    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: an economizer guard that never released leaves 07:30 reading nat_vent_humid_skip and the fan off. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: window cooling would stay off all morning after the air dried."
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: an economizer guard that never released leaves 07:30 reading nat_vent_humid_skip and the fan off. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: window cooling would stay off all morning after the air dried.",
+    "Issue #1507 review: the outdoor humidity is paired with a dedicated outdoor temperature sensor (outdoor_temp_source sensor), as a real install needs for an outdoor dew point, so the coordinator-hosted golden tiers (P8 surfaces, promise parity, real HA) can run this scenario."
   ],
   "verdict": {
     "type": "positive",
@@ -18,7 +19,9 @@
     "economizer_temp_delta": 3.0,
     "natural_vent_delta": 3.0,
     "aggressive_savings": false,
-    "fan_mode": "hvac_fan"
+    "fan_mode": "hvac_fan",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
   },
   "events": [
     {
@@ -50,13 +53,13 @@
       "note": "Refused."
     },
     {
-      "time": "2026-07-10T07:29:00",
+      "time": "2026-07-10T07:10:00",
       "type": "temp_update",
       "indoor_f": 78.0,
       "outdoor_f": 72.0,
       "humidity": 46.8,
       "outdoor_humidity": 45.9,
-      "note": "The outdoor air dries (dew point 50F)."
+      "note": "The outdoor air dries (dew point 50F), 20 minutes before the next check: the decision dew point is the median of 15 minutes of samples (Issue #1690), so it reads dry by 07:30."
     },
     {
       "time": "2026-07-10T07:30:00",

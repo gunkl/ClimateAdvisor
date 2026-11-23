@@ -127,6 +127,7 @@ _MODE_BY_TYPE = {
     "economizer_check": "direct-callback",
     "nat_vent_temperature_check": "direct-callback",
     "activate_fan_min_runtime": "direct-callback",
+    "automation_toggle": "direct-callback",
     "classification": "direct-callback",
     "occupancy_away": "direct-callback",
     "occupancy_home": "direct-callback",
@@ -752,6 +753,17 @@ class RealHASession:
 
         if etype == "activate_fan_min_runtime":
             await engine.start_min_fan_runtime_cycles()
+            return "direct-callback"
+
+        if etype == "automation_toggle":
+            # Issue #1507: the occupant flips the "automation" switch. The switch entity and the dashboard both call
+            # switch_automation() (it first puts the plain setpoint back when an adjustment is on the thermostat, then
+            # enters or leaves observe-only); the FakeHass tier calls the same entry. It used to be ignored here, so a
+            # scenario's switch-off never happened on real HA.
+            from custom_components.climate_advisor.coordinator import switch_automation  # noqa: PLC0415
+
+            await switch_automation(coordinator, bool(event.get("enabled", False)))
+            await self._drain()
             return "direct-callback"
 
         if etype == "coordinator_refresh":

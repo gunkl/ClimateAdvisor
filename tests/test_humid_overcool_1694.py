@@ -4,7 +4,8 @@ Occupant outcome: with the option on, on a muggy day a cooling run gets the ther
 comfort target for at most 60 minutes, so the AC runs longer and dries the house; a dry day, the sleep window, an
 open window, the occupant's own change and every other owner are left exactly as before. The comfort target and band
 never move. These tests drive the pure decision, the one clamp and the REAL engine's one setpoint path; the
-coordinator-mode goldens-to-be are ``tools/simulations/pending/humid_overcool_1694_*.json``.
+coordinator-mode goldens are ``tools/simulations/golden/humid_overcool_1694_*.json`` (promoted after owner review,
+#1507).
 """
 
 from __future__ import annotations
@@ -656,33 +657,31 @@ def test_status_view_with_a_remote_offset_keeps_its_sentence_and_adds_the_overco
     assert remote_offset_view_for(idle, "fahrenheit", "en") == plain  # nothing to add: exactly as before
 
 
-# ── the coordinator-mode Tier-A scenarios (pending owner review) ────────────────────────────────────────────────────
+# ── the coordinator-mode Tier-A scenarios ─────────────────────────────────────────────────────────────────────────
+# Golden after owner review (#1507): they run once, through tests/test_production_harness.py, and the checks below keep
+# their pending-era guarantees statically.
 _ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
+_GOLDEN = sorted((_ROOT / "tools" / "simulations" / "golden").glob("humid_overcool_1694_*.json"))
 _PENDING = sorted((_ROOT / "tools" / "simulations" / "pending").glob("humid_overcool_1694_*.json"))
 
 
-@pytest.mark.parametrize("scenario_path", _PENDING, ids=lambda p: p.stem.removeprefix("humid_overcool_1694_"))
-def test_pending_humid_overcool_scenario_passes_production_engine(scenario_path):
+def test_humid_overcool_goldens_use_the_coordinator_and_evaluate_every_assertion():
     import json
-    import sys
 
-    sys.path.insert(0, str(_ROOT / "tools"))
-    from simulate import run_scenario_production  # noqa: PLC0415
-
-    assert json.loads(scenario_path.read_text(encoding="utf-8"))["use_coordinator"] is True
-    result = run_scenario_production(scenario_path, state="pending")
-    assert not result.get("callback_errors"), result.get("callback_errors")
-    real = [x for x in result["assertions"] if not x.get("skipped")]
-    assert real and len(real) == len(result["assertions"]), "no assertion of a humid-overcool scenario may be skipped"
-    assert result["passed"] is True, "; ".join(
-        f"@{x['at']} expected={x['expected']!r} actual={x['actual']!r}"
-        for x in result["assertions"]
-        if not x.get("pass")
-    )
+    assert all(json.loads(p.read_text(encoding="utf-8"))["use_coordinator"] is True for p in _GOLDEN)
+    offenders = []
+    for path in _GOLDEN:
+        scenario = json.loads(path.read_text(encoding="utf-8"))
+        coordinator = bool(scenario.get("use_coordinator", False))
+        assertions = scenario.get("assertions") or []
+        if not assertions or any(a.get("track") == "integration" and not coordinator for a in assertions):
+            offenders.append(path.stem)
+    assert not offenders, offenders
 
 
 def test_humid_overcool_scenarios_discovered():
-    assert len(_PENDING) == 17, [p.stem for p in _PENDING]
+    assert len(_GOLDEN) == 17, [p.stem for p in _GOLDEN]
+    assert not _PENDING, [p.stem for p in _PENDING]
 
 
 def test_api_helper_without_a_notice_reader():
@@ -1080,12 +1079,12 @@ def _chart_rows(scenario: dict) -> list[dict]:
 def test_each_overcool_step_echo_writes_one_setpoint_change_row():
     import json
 
-    sc = json.loads((_ROOT / "tools/simulations/pending/humid_overcool_1694_engage_step_cap.json").read_text())
+    sc = json.loads((_ROOT / "tools/simulations/golden/humid_overcool_1694_engage_step_cap.json").read_text())
     rows = [r for r in _chart_rows(sc) if r.get("event") == "setpoint_change"]
     assert [r["setpoint"] for r in rows] == [75.0, 74.0, 76.0]  # engage, step, cap: read after the echo
     assert all(r.get("comfort_target") in (76.0, None) for r in rows)
     occupant = json.loads(
-        (_ROOT / "tools/simulations/pending/humid_overcool_1694_occupant_change_kept.json").read_text()
+        (_ROOT / "tools/simulations/golden/humid_overcool_1694_occupant_change_kept.json").read_text()
     )
     assert [r["setpoint"] for r in _chart_rows(occupant) if r.get("event") == "setpoint_change"] == [75.0]
 

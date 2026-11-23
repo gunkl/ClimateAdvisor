@@ -2064,7 +2064,7 @@ reason when unknown), and INFO `HVAC fan restriction lifted: cooled within the l
 indoor_dew_point_f=<x> release_f=54.0 -- the blower may run (<trigger>)` when dry (dew points through
 `humidity_facts.fmt_dp_log`). No Activity row (the restriction never had one) and no Status line.
 Tests: `tests/test_humid_fan_restrict_1693.py`; Tier-A scenarios
-`tools/simulations/pending/humid_fan_restrict_1693_*.json` (awaiting owner review for promotion to golden).
+`tools/simulations/golden/humid_fan_restrict_1693_*.json` (promoted after owner review, #1507).
 
 Implementation: `AutomationEngine._hvac_fan_restriction_verdict()` is the single choke point, read by `_activate_fan()` before the `climate.set_fan_mode(on)` write (at the early check for `hvac_fan`, at the blower write for `both`; see above) — both HVAC-fan trigger paths (the periodic duty-cycle circulation and the natural-vent/economizer free-cooling path) converge there before any hardware write happens, so no duplicated gate logic exists. When blocked, `_activate_fan()` returns `FanCommandResult.SUPPRESSED` and logs `"Feature suppressed: HVAC fan not activated — <reason>"` at INFO — no `fan_activated` event fires and `_fan_active` is not set, since nothing was actually commanded. This is a **start-gate only**: it does not force an already-running HVAC-fan cycle off mid-run if HVAC begins actively heating/cooling in the restricted direction partway through.
 
@@ -4428,8 +4428,9 @@ session is never ended by humidity (D4, start-only).
 - **Two-zone installs:** each zone judges its own indoor dew point; a zone without indoor humidity gets the ceiling
   only (missing-input table).
 
-Tests: `tests/test_humid_fan_guard_1691.py`; Tier-A scenarios `tools/simulations/pending/humid_air_1691_*.json`
-(awaiting owner review for promotion to golden).
+Tests: `tests/test_humid_fan_guard_1691.py`; Tier-A scenarios `tools/simulations/golden/humid_air_1691_*.json`
+(promoted after owner review, #1507). Each one pairs its outdoor humidity with a dedicated outdoor temperature sensor
+(`outdoor_temp_source: sensor`), so every golden tier, real Home Assistant included, can run it.
 ### Humid-air window advice (Issue #1692)
 
 **Occupant view:** on a muggy evening Climate Advisor no longer tells you to open the windows: muggy outdoor air makes
@@ -4594,8 +4595,10 @@ default** (owner decision D3); never in the sleep window (D5).
   (rule-8 note: a mapped row would shadow the run's real decision); scenarios assert the effect through
   `setpoint_writes` / `commanded_setpoint_at` and `event_emitted`.
 
-Tests: `tests/test_humid_overcool_1694.py`; Tier-A scenarios `tools/simulations/pending/humid_overcool_1694_*.json`
-(coordinator mode; awaiting owner review for promotion to golden).
+Tests: `tests/test_humid_overcool_1694.py`; Tier-A scenarios `tools/simulations/golden/humid_overcool_1694_*.json`
+(coordinator mode; promoted after owner review, #1507). The house reads 77.6 °F while a scenario's AC cools and 73.0 °F
+once a run ends, so the real-HA tier's simulated thermostat (cool start at setpoint + 1.5 °F, stop at setpoint - 1.5 °F)
+really runs and stops; the dew points are as written.
 
 ### Indoor sensor failure reasons and announcements (Issue #1033)
 

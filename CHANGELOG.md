@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.83] — 2026-11-23
+
+### Fixed
+- Fix #1717 (test harness only, nothing changes in your house): the household-promise checker in the test harness now judges each command Climate Advisor sends by whether automation was on at the moment it was sent, as Climate Advisor's own checker at home already does. Before, it looked only after the whole step had finished, so turning automation off (which first puts your normal setting back on the thermostat and only then goes quiet) was reported as "a command sent while automation was off", and a command sent while still in observe-only, in the same step that turned automation back on, could be missed.
+
+### Internal
+- Tests only, nothing changes in your house: 39 humidity and window-cooling scenarios promoted to golden after owner review (#1507). They lock in that the fan does not pull muggy air into the house and starts again once the air dries (#1691), that the blower does not blow coil moisture back into a humid house after cooling (#1693), that Humid Overcool dries the air within its limits and leaves your setting alone when it should (#1694), and that window cooling's blower keeps running through an open-window pause (#1705). All 39 also pass in a real Home Assistant run. In the test harness, an opened window in an engine-only scenario now also shows as open to the household-promise checker, and switching automation off in a scenario now happens in the real Home Assistant run too.
+
 ## [0.9.82] — 2026-11-23
 
 ### Changed

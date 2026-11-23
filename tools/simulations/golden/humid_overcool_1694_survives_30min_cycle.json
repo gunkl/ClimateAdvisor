@@ -1,20 +1,21 @@
 {
-  "name": "humid_overcool_1694_run_end_coast_restore",
-  "description": "The run ends (cooling -> fan): the lowered 75 is held through the 45-minute coast, then 76 is restored",
+  "name": "humid_overcool_1694_survives_30min_cycle",
+  "description": "The 30-minute cycle re-asserts the band mid-overcool: the thermostat is still told 75, never 76",
   "source": "synthetic",
   "issue": 1694,
   "use_coordinator": true,
   "skip_startup_coalesce": true,
   "notes": [
-    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: an immediate restore at the run end writes 76 at 14:20/14:25; no restore leaves the house at 75.",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: an overcool written as a separate setpoint would be undone by the cycle's 76 write.",
     "(b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid overcool (Issue #1694)' states this rule; production applies it through humid_overcool.decide_overcool and AutomationEngine._command_adjustments (the one setpoint path).",
-    "(c) occupant: the house keeps its normal setting after the muggy run; a regression would leave the AC set 1 F low all evening."
+    "(c) occupant: the dried air keeps drying; a regression would flicker the setpoint and stop the AC early.",
+    "Issue #1507 review (real-HA tier): the house reads 77.6F while the scenario's AC cools (at least the setpoint + 1.5F, so the real-HA simulated thermostat really starts its compressor and reports cooling, as a real one does) and 73.0F once a run ends (at or below its stop point, so it really stops); a cooling -> fan -> cooling blip under 5 minutes keeps the house warm. Each reading's humidity is recomputed so its dew point is exactly the one this scenario was written with."
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Held through the coast, then restored",
-    "observed_behavior": "75, 76 at 15:05",
-    "expected_behavior": "75, 76 at 15:05"
+    "summary": "Overcool survives a re-assert",
+    "observed_behavior": "75 held",
+    "expected_behavior": "75 held"
   },
   "config": {
     "comfort_heat": 68,
@@ -45,9 +46,9 @@
     {
       "time": "2026-07-12T14:05:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:05:00",
@@ -58,147 +59,161 @@
     {
       "time": "2026-07-12T14:10:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:15:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:20:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:20:00",
-      "type": "thermostat_state_changed",
+      "type": "classification",
+      "day_type": "hot",
       "hvac_mode": "cool",
-      "hvac_action": "fan",
-      "note": "The AC reaches 75 F and stops; the Ecobee runs its blower (cooling -> fan)."
+      "windows_recommended": false,
+      "note": "The classification is applied again (the 30-minute cycle's band writer re-sends the comfort target 76)."
     },
     {
       "time": "2026-07-12T14:25:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:30:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:35:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:40:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:45:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:50:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:55:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:00:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:05:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:10:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:15:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:20:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
+    },
+    {
+      "time": "2026-07-12T15:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.6,
+      "outdoor_f": 88.0,
+      "humidity": 62.7
+    },
+    {
+      "time": "2026-07-12T15:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.6,
+      "outdoor_f": 88.0,
+      "humidity": 62.7
+    },
+    {
+      "time": "2026-07-12T15:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.6,
+      "outdoor_f": 88.0,
+      "humidity": 62.7
+    },
+    {
+      "time": "2026-07-12T15:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.6,
+      "outdoor_f": 88.0,
+      "humidity": 62.7
     }
   ],
   "assertions": [
     {
-      "at": "2026-07-12T15:20:00",
+      "at": "2026-07-12T14:34:00",
+      "expect": "commanded_setpoint_at",
+      "value": 75.0,
+      "reason": "The band writer passes the comfort target; the one setpoint path re-applies the overcool term."
+    },
+    {
+      "at": "2026-07-12T14:34:00",
       "expect": "setpoint_writes",
       "since": "2026-07-12T14:02:00",
       "values": [
         75.0,
-        76.0
+        75.0
       ],
-      "reason": "One restore write, 45 minutes after the run stopped (14:20 + 45 min)."
-    },
-    {
-      "at": "2026-07-12T15:04:00",
-      "expect": "commanded_setpoint_at",
-      "value": 75.0,
-      "reason": "Held through the coast: a write during it would cut the coast sample and restart nothing."
-    },
-    {
-      "at": "2026-07-12T15:05:00",
-      "expect": "commanded_setpoint_at",
-      "value": 76.0,
-      "reason": "Restored when the coast window closes."
-    },
-    {
-      "at": "2026-07-12T14:25:00",
-      "expect": "event_emitted",
-      "event": "overcool_ended",
-      "payload_subset": {
-        "reason": "run_ended"
-      },
-      "reason": "The run is over once the thermostat has not reported cooling for 5 minutes."
+      "reason": "The re-assert is sent as 75 (target 76 minus the overcool term), never 76."
     }
   ]
 }

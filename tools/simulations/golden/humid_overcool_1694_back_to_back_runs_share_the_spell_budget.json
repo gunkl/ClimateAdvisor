@@ -8,7 +8,8 @@
   "notes": [
     "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: a per-run cap re-engaged every run would keep 75 from 13:05 to past 16:30 (four hours); the spell budget writes 76 at 14:05.",
     "(b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid overcool (Issue #1694)' states this rule; production applies it through humid_overcool.decide_overcool and AutomationEngine._command_adjustments (the one setpoint path).",
-    "(c) occupant: on a muggy afternoon the AC is not turned into a permanent 1 F lower band; a regression would cool the house below the setting for hours."
+    "(c) occupant: on a muggy afternoon the AC is not turned into a permanent 1 F lower band; a regression would cool the house below the setting for hours.",
+    "Issue #1507 review (real-HA tier): the house reads 77.6F while the scenario's AC cools (at least the setpoint + 1.5F, so the real-HA simulated thermostat really starts its compressor and reports cooling, as a real one does) and 73.0F once a run ends (at or below its stop point, so it really stops); a cooling -> fan -> cooling blip under 5 minutes keeps the house warm. Each reading's humidity is recomputed so its dew point is exactly the one this scenario was written with."
   ],
   "verdict": {
     "type": "positive",
@@ -45,9 +46,9 @@
     {
       "time": "2026-07-12T13:05:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T13:05:00",
@@ -59,30 +60,30 @@
     {
       "time": "2026-07-12T13:10:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T13:15:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T13:20:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T13:25:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T13:25:00",
@@ -94,37 +95,37 @@
     {
       "time": "2026-07-12T13:30:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T13:35:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T13:40:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T13:45:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T13:50:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T13:50:00",
@@ -136,30 +137,30 @@
     {
       "time": "2026-07-12T13:55:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:00:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:05:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:10:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T14:10:00",
@@ -171,37 +172,37 @@
     {
       "time": "2026-07-12T14:15:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T14:20:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T14:25:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T14:30:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T14:35:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:35:00",
@@ -213,30 +214,30 @@
     {
       "time": "2026-07-12T14:40:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:45:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:50:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:55:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T14:55:00",
@@ -248,37 +249,37 @@
     {
       "time": "2026-07-12T15:00:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T15:05:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T15:10:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T15:15:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T15:20:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:20:00",
@@ -290,30 +291,30 @@
     {
       "time": "2026-07-12T15:25:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:30:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:35:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:40:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T15:40:00",
@@ -325,37 +326,37 @@
     {
       "time": "2026-07-12T15:45:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T15:50:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T15:55:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T16:00:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T16:05:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T16:05:00",
@@ -367,30 +368,30 @@
     {
       "time": "2026-07-12T16:10:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T16:15:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T16:20:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T16:25:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T16:25:00",
@@ -402,51 +403,51 @@
     {
       "time": "2026-07-12T16:30:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T16:35:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T16:40:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T16:45:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T16:50:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T16:55:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     },
     {
       "time": "2026-07-12T17:00:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 73.0,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 73.1
     }
   ],
   "assertions": [
@@ -462,13 +463,13 @@
       "reason": "75 at the first run, 75 again at the second run (re-engaged from the coast, same stretch), 76 when the spell's 60 lowered minutes are used (14:05); the next three runs are not overcooled."
     },
     {
-      "at": "2026-07-12T14:05:00",
+      "at": "2026-07-12T14:06:00",
       "expect": "event_emitted",
       "event": "overcool_ended",
       "payload_subset": {
         "reason": "cap"
       },
-      "reason": "The spell budget, not the single run, ends it."
+      "reason": "The spell budget, not the single run, ends it. (Checked a minute after the event: a real thermostat reports cooling and stops on its own sensing tick, up to about 30 s after the reading.)"
     }
   ]
 }

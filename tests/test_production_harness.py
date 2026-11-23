@@ -105,28 +105,39 @@ def test_issue_1243_cancel_scenarios_discovered() -> None:
 
 
 # Issue #1705: the blower window-cooling scenarios (the economizer's own off -> off echo, a pause landing after window
-# cooling started, an off -> off report during CA's circulation run, the occupant's Off) live in pending/ (goldens are
-# locked) and are enforced here by name; every assertion is evaluated, none is skipped.
+# cooling started, an off -> off report during CA's circulation run, the occupant's Off) were promoted to golden/ after
+# owner review (#1507) and run once, through test_golden_passes_production_engine above; the check below keeps their
+# pending-era "no assertion is skipped" guarantee statically.
 _ECON_BLOWER_1705_FILES = sorted(PENDING_DIR.glob("issue_1705_*.json"))
-
-
-@pytest.mark.parametrize("scenario_path", _ECON_BLOWER_1705_FILES, ids=lambda p: p.stem.removeprefix("issue_1705_"))
-def test_issue_1705_econ_blower_pending_scenario_passes_production_engine(scenario_path: Path) -> None:
-    from simulate import run_scenario_production  # noqa: PLC0415
-
-    result = run_scenario_production(scenario_path, state="pending")
-    assert not result.get("callback_errors"), f"{scenario_path.stem}: callback errors: {result['callback_errors']}"
-    real = [a for a in result["assertions"] if not a.get("skipped")]
-    assert real and len(real) == len(result["assertions"]), "no assertion of a #1705 scenario may be skipped"
-    assert result["passed"] is True, f"{scenario_path.stem}: " + "; ".join(
-        f"@{a['at']} expected={a['expected']!r} actual={a['actual']!r}"
-        for a in result["assertions"]
-        if a.get("pass") is False
-    )
+_ECON_BLOWER_1705_GOLDEN = sorted(GOLDEN_DIR.glob("issue_1705_*.json"))
 
 
 def test_issue_1705_econ_blower_scenarios_discovered() -> None:
-    assert len(_ECON_BLOWER_1705_FILES) == 4, [p.stem for p in _ECON_BLOWER_1705_FILES]
+    assert not _ECON_BLOWER_1705_FILES, [p.stem for p in _ECON_BLOWER_1705_FILES]
+    assert len(_ECON_BLOWER_1705_GOLDEN) == 4, [p.stem for p in _ECON_BLOWER_1705_GOLDEN]
+
+
+def no_skippable_assertions(paths: list[Path]) -> list[str]:
+    """Scenarios with an assertion the default run would skip (an integration-track one in a bare-engine scenario).
+
+    The golden run accepts ``passed is None`` (only deferred assertions); a promoted scenario whose every assertion is
+    evaluated can only pass or fail there, so this static check keeps its pending-era "none is skipped" guarantee
+    without running it a second time.
+    """
+    import json  # noqa: PLC0415
+
+    offenders = []
+    for path in paths:
+        scenario = json.loads(path.read_text(encoding="utf-8"))
+        coordinator = bool(scenario.get("use_coordinator", False))
+        assertions = scenario.get("assertions") or []
+        if not assertions or any(a.get("track") == "integration" and not coordinator for a in assertions):
+            offenders.append(path.stem)
+    return offenders
+
+
+def test_issue_1705_econ_blower_goldens_evaluate_every_assertion() -> None:
+    assert not no_skippable_assertions(_ECON_BLOWER_1705_GOLDEN)
 
 
 def test_all_goldens_discovered() -> None:

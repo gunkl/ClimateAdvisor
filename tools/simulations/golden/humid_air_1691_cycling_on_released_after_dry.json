@@ -4,7 +4,9 @@
   "source": "synthetic",
   "issue": 1691,
   "notes": [
-    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: a cycling guard that never released (e.g. a sticky refusal) leaves 12:30 reading nat_vent_humid_skip. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the fan would stay off for the rest of the evening although the air outside dried."
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: a cycling guard that never released (e.g. a sticky refusal) leaves 12:30 reading nat_vent_humid_skip. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the fan would stay off for the rest of the evening although the air outside dried.",
+    "Issue #1507 review: the classification no longer hand-sets windows_recommended; classifier.py derives it for this mild day (True), as production would.",
+    "Issue #1507 review: the outdoor humidity is paired with a dedicated outdoor temperature sensor (outdoor_temp_source sensor), as a real install needs for an outdoor dew point, so the coordinator-hosted golden tiers (P8 surfaces, promise parity, real HA) can run this scenario."
   ],
   "verdict": {
     "type": "positive",
@@ -19,7 +21,9 @@
     "setback_cool": 80,
     "natural_vent_delta": 3.0,
     "nat_vent_hysteresis_f": 1.0,
-    "fan_mode": "hvac_fan"
+    "fan_mode": "hvac_fan",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
   },
   "events": [
     {
@@ -34,7 +38,6 @@
       "type": "classification",
       "day_type": "mild",
       "hvac_mode": "off",
-      "windows_recommended": false,
       "note": "Mild day."
     },
     {

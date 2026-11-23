@@ -782,6 +782,12 @@ def _dispatch_event(
                 # timer — none of that is approximated here.
                 fake_hass.states.async_set(entity_id, "on", {})
         else:
+            # Issue #1507 (event-layer change): the bare engine is told through the tracker, as before, and the
+            # contact's own state is now written too, silently (no listener dispatch: no coordinator is
+            # subscribed). Before, it stayed unset, so anything that reads the contact itself -- the promise
+            # probe's sealed-house check (P9 whf_sealed) -- saw every window closed while the whole-house fan
+            # ran on the opened one. The engine's own inputs are unchanged.
+            fake_hass.states.set_simple(entity_id, "on", {}, last_changed=scheduler.now())
             tracker.open(entity_id)
             run_coro(engine.handle_door_window_open(entity_id))
 
@@ -800,6 +806,8 @@ def _dispatch_event(
         if coordinator is not None:
             fake_hass.states.async_set(entity_id, "off", {})
         else:
+            # Mirror of sensor_open: the contact's own state reads closed again (silent write).
+            fake_hass.states.set_simple(entity_id, "off", {}, last_changed=scheduler.now())
             tracker.close(entity_id)
             if tracker.all_closed():
                 run_coro(engine.handle_all_doors_windows_closed())

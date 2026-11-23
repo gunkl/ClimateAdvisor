@@ -1,15 +1,16 @@
 {
-  "name": "humid_air_1691_whf_wetter_than_house_paused",
-  "description": "Outdoor dew point 58F against a 55F house (outdoor air wetter than the house, below the ceiling): no fan start",
+  "name": "humid_air_1691_whf_ceiling_window_open_paused",
+  "description": "Humid night (outdoor dew point ~67F, at or above the 65F ceiling): opening a window does not start the whole-house fan; HVAC pauses for the open window",
   "source": "synthetic",
   "issue": 1691,
   "notes": [
-    "Dew points (feels_like.dew_point_f): indoor 76.0F at 48.2% = 55.0F; outdoor 64.0F at 80.9% = 58.02F. Ceiling = default 65F (option On).",
-    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: deleting the relative clause (or the guard) makes 20:10 read natural_ventilation. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the fan would raise the house's dew point by ~3F; the occupant feels it as clammy air."
+    "Dew points (feels_like.dew_point_f): indoor 76.0F at 50.0% = 56.01F; outdoor 70.0F at 90.2% = 66.99F. Ceiling = default 65F (option On).",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: deleting the third guard in decide_nat_vent_start_veto makes 20:10 read natural_ventilation and the fan start. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: without the guard the fan pulls 67F-dew-point air into a 56F-dew-point house all night; the house turns sticky.",
+    "Issue #1507 review: the outdoor humidity is paired with a dedicated outdoor temperature sensor (outdoor_temp_source sensor), as a real install needs for an outdoor dew point, so the coordinator-hosted golden tiers (P8 surfaces, promise parity, real HA) can run this scenario."
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Outdoor dew point 58F against a 55F house (outdoor air wetter than the house, below the ceiling): no fan start",
+    "summary": "Humid night (outdoor dew point ~67F, at or above the 65F ceiling): opening a window does not start the whole-house fan; HVAC pauses for the open window",
     "observed_behavior": "paused",
     "expected_behavior": "paused"
   },
@@ -24,16 +25,18 @@
     ],
     "fan_mode": "whole_house_fan",
     "fan_entity": "fan.whf",
-    "fan_state_feedback": true
+    "fan_state_feedback": true,
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
   },
   "events": [
     {
       "time": "2026-07-12T20:00:00",
       "type": "temp_update",
       "indoor_f": 76.0,
-      "outdoor_f": 64.0,
-      "humidity": 48.2,
-      "outdoor_humidity": 80.9,
+      "outdoor_f": 70.0,
+      "humidity": 50.0,
+      "outdoor_humidity": 90.2,
       "note": "Summer evening, windows closed: outdoor cooler than the house, so free cooling is on offer by temperature."
     },
     {
@@ -54,9 +57,9 @@
       "time": "2026-07-12T20:15:00",
       "type": "temp_update",
       "indoor_f": 76.0,
-      "outdoor_f": 64.0,
-      "humidity": 48.2,
-      "outdoor_humidity": 80.9,
+      "outdoor_f": 70.0,
+      "humidity": 50.0,
+      "outdoor_humidity": 90.2,
       "note": "Five minutes later, same air: the engine re-asks the start question (paused-reactivation / idle-open re-check)."
     }
   ],
@@ -69,7 +72,7 @@
     {
       "at": "2026-07-12T20:10:00",
       "expect": "paused",
-      "reason": "Outdoor dew point 58F against a 55F house (outdoor air wetter than the house, below the ceiling): no fan start"
+      "reason": "Humid night (outdoor dew point ~67F, at or above the 65F ceiling): opening a window does not start the whole-house fan; HVAC pauses for the open window"
     },
     {
       "at": "2026-07-12T20:15:00",
@@ -96,10 +99,10 @@
       "expect": "event_emitted",
       "event": "nat_vent_humid_skip",
       "payload_subset": {
-        "reason": "wetter_than_house",
+        "reason": "ceiling",
         "starter": "nat_vent"
       },
-      "reason": "The refusal is reported once (Activity row) with reason wetter_than_house."
+      "reason": "The refusal is reported once (Activity row) with reason ceiling."
     }
   ]
 }

@@ -8,7 +8,8 @@
   "notes": [
     "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: without the stranded-value restore the thermostat would sit at 74 until the next 30-minute cycle; without the gate the 60-minute cap restore would write 76 only at 15:05.",
     "(b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid overcool (Issue #1694)' states this rule; production applies it through humid_overcool.decide_overcool and AutomationEngine._command_adjustments (the one setpoint path).",
-    "(c) occupant: an occupant who toggles the thermostat does not get stuck 2 F colder than planned; a regression would leave the room colder for up to 30 minutes."
+    "(c) occupant: an occupant who toggles the thermostat does not get stuck 2 F colder than planned; a regression would leave the room colder for up to 30 minutes.",
+    "Issue #1507 review (real-HA tier): the house reads 77.6F while the scenario's AC cools (at least the setpoint + 1.5F, so the real-HA simulated thermostat really starts its compressor and reports cooling, as a real one does) and 73.0F once a run ends (at or below its stop point, so it really stops); a cooling -> fan -> cooling blip under 5 minutes keeps the house warm. Each reading's humidity is recomputed so its dew point is exactly the one this scenario was written with."
   ],
   "verdict": {
     "type": "positive",
@@ -45,9 +46,9 @@
     {
       "time": "2026-07-12T14:05:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:05:00",
@@ -58,44 +59,44 @@
     {
       "time": "2026-07-12T14:10:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:15:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:20:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:25:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:30:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:35:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:40:00",
@@ -122,30 +123,30 @@
     {
       "time": "2026-07-12T14:45:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:50:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T14:55:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     },
     {
       "time": "2026-07-12T15:00:00",
       "type": "temp_update",
-      "indoor_f": 77.0,
+      "indoor_f": 77.6,
       "outdoor_f": 88.0,
-      "humidity": 64
+      "humidity": 62.7
     }
   ],
   "assertions": [

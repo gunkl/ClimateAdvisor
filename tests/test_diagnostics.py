@@ -439,3 +439,34 @@ class TestDebugTabKeysInTheDownload:
         payload = asyncio.run(async_get_diagnostics_payload(_make_hass({"entry_a": coord}, [entry]), entry))
         for key in keys | download_only:
             assert payload["debug_state"].get(key) == f"value-of-{key}", f"{key} missing or redacted in the download"
+
+
+class TestZoneCapabilitySection:
+    """Issue #1699: the diagnostics carry the zone's capability snapshot and never raise building it."""
+
+    def test_the_snapshot_is_passed_through(self):
+        from custom_components.climate_advisor.diagnostics import _zone_capability
+
+        coordinator = MagicMock()
+        coordinator.zone_capability_snapshot.return_value = {"heat": {"available": True}}
+        assert _zone_capability(coordinator) == {"heat": {"available": True}}
+
+    def test_no_snapshot_method_gives_none(self):
+        from custom_components.climate_advisor.diagnostics import _zone_capability
+
+        coordinator = MagicMock(spec=["config"])
+        assert _zone_capability(coordinator) is None
+
+    def test_a_failing_snapshot_gives_none(self):
+        from custom_components.climate_advisor.diagnostics import _zone_capability
+
+        coordinator = MagicMock()
+        coordinator.zone_capability_snapshot.side_effect = RuntimeError("boom")
+        assert _zone_capability(coordinator) is None
+
+    def test_a_non_dict_snapshot_gives_none(self):
+        from custom_components.climate_advisor.diagnostics import _zone_capability
+
+        coordinator = MagicMock()
+        coordinator.zone_capability_snapshot.return_value = ["not", "a", "dict"]
+        assert _zone_capability(coordinator) is None

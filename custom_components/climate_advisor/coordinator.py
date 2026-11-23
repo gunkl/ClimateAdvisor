@@ -4481,7 +4481,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ae = getattr(self, "automation_engine", None)
             if callable(getattr(ae, "humid_air_verdict", None)):
                 # Issue #1691's engine read (this coordinator's facts passed in): the very verdict the fan starts ask
-                return decide_sync(self, ae.humid_air_verdict, at, facts_at=at)
+                verdict = decide_sync(self, ae.humid_air_verdict, at, facts_at=at)
+                if isinstance(verdict, HumidAirVerdict):  # a stand-in engine (tests) answers something else
+                    return verdict
             # no engine yet (startup, partially built coordinators): the same predicate on the same facts
             return humid_air_verdict_from_facts(
                 self.engine_facts(at), humid_air_ceiling_from_config(getattr(self, "config", None))

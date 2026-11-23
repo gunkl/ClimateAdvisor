@@ -2874,10 +2874,12 @@ class AutomationEngine:
         """The coordinator's self-heal found the ownership flag with the blower physically off and nothing behind it."""
         self._fan_active = False
         self._fan_on_since = None
+        self._end_economizer_session_for_stopped_fan("self_heal", "fan_ownership_self_healed")  # Issue #1705 mirror
 
     def clear_stale_hvac_fan_flag(self) -> None:
         """The thermostat went fully off while an HVAC-fan (not nat-vent) session was still marked active."""
         self._fan_active = False
+        self._end_economizer_session_for_stopped_fan("thermostat_off", "fan_flags_cleared")  # Issue #1705 (no-op today)
 
     def mark_ha_stopping(self) -> None:
         """EVENT_HOMEASSISTANT_STOP (#1183): every refusal site of the #1102 latch skips from now on."""
@@ -4029,6 +4031,7 @@ class AutomationEngine:
                 # sure the flags reflect reality.
                 self._fan_active = False
                 self._fan_on_since = None
+                self._end_economizer_session_for_stopped_fan("timer_boundary_settle", "fan_flags_cleared")  # #1705
 
             self._resolve_fan_fsm_state(
                 kind=FanFsmEventKind.TIMER_BOUNDARY_SETTLE,
@@ -4178,6 +4181,9 @@ class AutomationEngine:
         if not preserve_nat_vent_session:
             self._natural_vent_active = False
             self._nat_vent_soft_start = False
+        # Issue #1705 (mirror): an economizer session cannot outlive its fan; ended here its next tick re-decides
+        # (a start is still refused for the occupant's whole fan-off hold, #1205).
+        self._end_economizer_session_for_stopped_fan(trigger_label, "fan_flags_cleared")
 
         _LOGGER.info(
             "Fan flags cleared (%s): _fan_active/_fan_on_since cleared, _natural_vent_active %s; %s",
@@ -6876,7 +6882,9 @@ class AutomationEngine:
             # re-commands fan_mode=auto itself once the real command does go through.
             # Issue #1180: not while the OCCUPANT has the thermostat blower on for circulation --
             # turning the heating/cooling off must not stop the fan they asked for.
-            if mode == "off" and not self._natural_vent_active:
+            # Issue #1705 (mirror of #134): nor while an economizer session runs the blower -- a door/window pause
+            # landing after window cooling started would stop its fan with nothing telling the economizer.
+            if mode == "off" and not self._natural_vent_active and not self.economizer_session_active:
                 _fan_cfg = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
                 if _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH) and self._occupant_blower_override_active():
                     _LOGGER.info(
@@ -11735,6 +11743,30 @@ class AutomationEngine:
                 archetype,
             )
 
+    def _end_economizer_session_for_stopped_fan(self, trigger: str, cause: str) -> None:
+        """End an economizer session whose fan was stopped or recorded off by anything but the economizer (#1705).
+
+        The one hook for every such path: ``_deactivate_fan()`` (a stop that went out or found the fan already off)
+        and the flag-clear helpers (``_clear_fan_flags_and_start_grace()``, ``clear_stale_fan_ownership()``, the
+        RF-timer settle clear). The economizer acts only when its phase changes, so a session left recorded with no
+        fan never restarts it. Recording it INACTIVE (through the economizer's own state writer) lets its next tick
+        re-check the window and start the fan again if free cooling still applies. Session bookkeeping only: no
+        command is sent. No-op with no session.
+
+        No comfort restore runs here, unlike ``_deactivate_economizer()`` (#1208). That is safe only because the
+        economizer never writes the HVAC mode or setpoint itself (the band stays armed, #264): if it ever does, this
+        path must restore what it wrote, or ending a session this way would leave that write in place.
+        """
+        if not self.economizer_session_active:
+            return
+        _LOGGER.info(
+            "Economizer session ended: its fan is off (cause=%s trigger=%s phase=%s) -- next tick re-checks",
+            cause,
+            trigger,
+            self._economizer_phase,
+        )
+        self._apply_economizer_fsm_state(EconomizerLifecycleState.INACTIVE)
+
     def _arm_deferred_reconcile_retry(self, trigger: str) -> None:
         """Re-run the fan reconcile once its deferred turn-off can land (Issue #1390).
 
@@ -13011,7 +13043,7 @@ class AutomationEngine:
                     # shared sole writer so a rate-limited/deferred command doesn't
                     # strand the fan running with the retry mechanism disarmed.
                     self._end_nat_vent_session(_no_class_result)
-                if self._economizer_active:
+                if self.economizer_session_active:
                     await self._deactivate_economizer(outdoor_temp=0)
             return
 
@@ -13040,7 +13072,7 @@ class AutomationEngine:
                 # shared sole writer so a rate-limited/deferred command doesn't
                 # strand the fan running with the retry mechanism disarmed.
                 self._end_nat_vent_session(_not_active_result)
-            if self._economizer_active:
+            if self.economizer_session_active:
                 await self._deactivate_economizer(outdoor_temp=0)
 
         if (
@@ -20364,7 +20396,7 @@ class AutomationEngine:
         if self._fan_active:
             if self._fan_override_active:
                 return "override"
-            if self._economizer_active:
+            if self.economizer_session_active:
                 return "economizer"
         return None
 
@@ -20977,8 +21009,14 @@ class AutomationEngine:
         emit_event: bool = True,
         safety: bool = False,
         abandons_deferral: bool = True,
+        ends_economizer: bool = True,
     ) -> FanCommandResult:
         """Deactivate fan based on configured fan_mode.
+
+        ``ends_economizer`` (Issue #1705): a stop that went out, or found the fan already off, ends a running
+        economizer session (``_end_economizer_session_for_stopped_fan()``), whoever asked: the economizer acts
+        only on a phase change, so a session left with no fan never restarts it. ``_deactivate_economizer()``
+        passes False (it ends its own session). DISABLED / OVERRIDDEN / RATE_LIMITED / DRY_RUN leave it.
 
         Args:
             reason: Human-readable reason for deactivation (logged + surfaced in the report).
@@ -21232,6 +21270,8 @@ class AutomationEngine:
                 # physically on (a stop already in flight, or an off whose power reading lags). The restore deferred
                 # above would be stranded the same way once that reading flips: hand it to the gated release.
                 self._arm_whf_restore_pending(fan_already_off=False, verify_timer=True)
+            if ends_economizer:
+                self._end_economizer_session_for_stopped_fan("deactivate_fan", "fan_already_off")  # Issue #1705
             return FanCommandResult.ALREADY_IN_STATE
 
         # Issue #1247: a record long past its applies_at is neither pending nor applied (before the FSM reads it).
@@ -21417,6 +21457,8 @@ class AutomationEngine:
             # circular).
             self._fan_active = False
             self._fan_on_since = None
+            if ends_economizer:
+                self._end_economizer_session_for_stopped_fan("deactivate_fan", "fan_stopped")  # Issue #1705
             if _arm_release_after_stop:
                 # Issue #1271: the restore deferred above now belongs to the gated release. Its verify timer (the
                 # sealed-house stop's own) re-asks it if the power reading never changes after this stop.
@@ -21461,6 +21503,15 @@ class AutomationEngine:
                 economizer_phase=self._economizer_phase,
             )
         )
+
+    @property
+    def economizer_session_active(self) -> bool:
+        """Whether an economizer session (cool-down or maintain) is running (Issue #1705, read-only view).
+
+        The one accessor for this fact: every reader outside the economizer's own writers (the coordinator, the
+        fan owner, bedtime, the HVAC-off fan assert, the #89 clear) uses it instead of ``_economizer_active``.
+        """
+        return self.economizer_lifecycle_state is not EconomizerLifecycleState.INACTIVE
 
     def _build_economizer_fsm_inputs(
         self,
@@ -21733,7 +21784,7 @@ class AutomationEngine:
         """
         unit = self._temp_unit
         c = self._current_classification
-        result = await self._deactivate_fan(reason=_R("reason_economizer_off_fan"))
+        result = await self._deactivate_fan(reason=_R("reason_economizer_off_fan"), ends_economizer=False)
         if result is FanCommandResult.DRY_RUN:
             # Issue #1304: observe-only sent no stop -- the fan runs on, so its economizer session stays recorded.
             _LOGGER.debug("Economizer session kept — fan-off not sent (observe-only)")

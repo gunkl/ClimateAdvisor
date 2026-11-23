@@ -1,0 +1,73 @@
+{
+  "name": "issue_1705_occupant_off_still_clears_blower_flag",
+  "description": "Blower install: the occupant switching the thermostat Off during CA's own blower circulation run still clears CA's stale blower flag (#89), after the #1705 narrowing",
+  "source": "synthetic",
+  "issue": 1705,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant: switching the thermostat Off at the wall while Climate Advisor's blower circulation run is marked active must not leave the dashboard claiming CA's fan is still running (Issue #89). #1705 narrowed that clear to a real change to Off (CA's own or the occupant's) with no economizer or nat-vent session owning the blower; this scenario pins that the occupant's own Off still qualifies.",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: deleting the #89 clause in coordinator.py leaves _fan_active True and fails the 14:15 assertion; the scenario passes on the pre-fix code too (the occupant's cool -> off is a real change to Off). (b) docs-production: docs/fan-lifecycle-spec.md 'Thermostat Off Clears CA's Blower Flag Only on a Real Change to Off (Issue #1705)' says the occupant's real Off still clears the flag; production's _async_thermostat_changed does. (c) occupant: if this regressed, the Fan (HVAC) card would keep showing CA's blower 'active' after the occupant turned the system off, and status/suppression logic would trust a fan that is not CA's."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Occupant Off clears CA's stale blower flag",
+    "observed_behavior": "fan flag cleared",
+    "expected_behavior": "fan flag cleared"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 15
+  },
+  "events": [
+    {
+      "time": "2026-07-12T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "note": "Hot afternoon, windows closed."
+    },
+    {
+      "time": "2026-07-12T14:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day: the cool band is armed (thermostat in cool)."
+    },
+    {
+      "time": "2026-07-12T14:10:00",
+      "type": "activate_fan_min_runtime",
+      "note": "CA's own circulation run starts the blower (not natural ventilation, not the economizer)."
+    },
+    {
+      "time": "2026-07-12T14:15:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "off",
+      "note": "The occupant switches the thermostat Off at the wall while CA's blower session is marked active."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T14:15:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": false,
+      "reason": "The occupant's real cool -> off change, not commanded by CA and with no nat-vent or economizer session, clears CA's stale blower flag (#89)."
+    },
+    {
+      "at": "2026-07-12T14:15:00",
+      "expect": "field_equals",
+      "field": "engine_state._economizer_active",
+      "value": false,
+      "reason": "Control: no economizer session is involved, so the economizer exemption does not apply."
+    }
+  ]
+}

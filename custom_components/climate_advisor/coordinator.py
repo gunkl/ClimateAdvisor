@@ -13360,13 +13360,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     thermostat_blower_phase=_recent_hvac_session_ended_618,
                 )
 
-        # If thermostat is now fully off, clear any stale HVAC-based fan active flag.
+        # If thermostat is now fully off, clear any stale HVAC-based fan active flag (#89).
         # Only applies to HVAC/Both fan modes — whole-house fans run independently.
-        # Natural ventilation is intentionally hvac_mode=off + fan active — do not clear.
+        # Natural ventilation and the economizer intentionally run the blower with hvac_mode=off — do not clear.
+        # Issue #1705: only a real change to Off. An off -> off event (the echo of CA's own fan_mode write while
+        # paused, or any later poll) is not one; clearing on it dropped the economizer's blower flag, so the
+        # untracked-fan backstop stopped the blower 5 min later. CA's own Off still counts: outside nat-vent and the
+        # economizer (exempt below) _set_hvac_mode("off") itself sets fan_mode auto, so the blower is stopped.
         ae = self.automation_engine
-        if not recheck and new_state.state == "off" and ae._fan_active and not ae._fan_override_active:
+        if (
+            not recheck
+            and new_state.state == "off"
+            and old_state.state != "off"
+            and ae._fan_active
+            and not ae._fan_override_active
+        ):
             _fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-            if _fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH) and not ae._natural_vent_active:
+            if (
+                _fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH)
+                and not ae._natural_vent_active
+                and not ae.economizer_session_active
+            ):
                 _LOGGER.warning("Thermostat set to off while HVAC fan was marked active — clearing stale fan state")
                 ae.clear_stale_hvac_fan_flag()
 
@@ -17996,7 +18010,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             f"{outdoor_temp:.1f}" if outdoor_temp is not None else "?",
             windows_physically_open,
             ae._natural_vent_active if ae else "?",
-            ae._economizer_active if ae else "?",
+            ae.economizer_session_active if ae else "?",
             ae._manual_override_active if ae else "?",
             ae._grace_active if ae else "?",
             ae.is_paused_by_door if ae else "?",
@@ -18259,7 +18273,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "hot_open_from",
                     i18n.Msg("status.next_action.hot_open_from", t=_clock_time(_evening_open_time)),
                 )
-            if ae is not None and (ae._natural_vent_active or ae._economizer_active):
+            if ae is not None and (ae._natural_vent_active or ae.economizer_session_active):
                 return _decide("nothing_to_do", "-")
             return _decide("keep_windows_blinds_closed", i18n.Msg("status.next_action.keep_windows_blinds_closed"))
         elif c.day_type == DAY_TYPE_COLD:
@@ -18276,7 +18290,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         heating_needed = indoor_temp is not None and indoor_temp < _armed_heat
 
         if cooling_needed:
-            if ae is not None and (ae._natural_vent_active or ae._economizer_active):
+            if ae is not None and (ae._natural_vent_active or ae.economizer_session_active):
                 return _decide("nothing_to_do", "-")
             if windows_physically_open:
                 if outdoor_temp is not None and not direction_ok:
@@ -21323,7 +21337,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "comfort_family_last_switch": (
                 dict(ae._last_comfort_switch) if getattr(ae, "_last_comfort_switch", None) else None
             ),
-            "economizer_active": ae._economizer_active,
+            "economizer_active": ae.economizer_session_active,
             "economizer_phase": ae._economizer_phase,
             "resumed_from_pause": ae._resumed_from_pause,
             "occupancy_away_timer_pending": self._occupancy_away_timer_cancel is not None,

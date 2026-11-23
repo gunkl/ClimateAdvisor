@@ -1,0 +1,318 @@
+{
+  "name": "issue_1705_economizer_blower_not_stopped_by_its_own_echo",
+  "description": "Blower install, hot evening, window open: the economizer's cool-down blower keeps running through the window session instead of being turned off 5 minutes later as an unwarranted fan",
+  "source": "synthetic",
+  "issue": 1705,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant: opening a window on a warm evening starts free cooling with the HVAC blower. Before #1705 the thermostat's report of CA's own fan_mode write (state off -> off) cleared the blower flag (#89 clause), the 20:05 untracked-fan backstop turned the blower off as 'fan running without CA warrant' (nat_vent_reconcile_exit, which arms the nat-vent outdoor exit time), and the economizer, stuck in cool-down, never restarted it: the house sat above its 76F ceiling with cooler air outside for the rest of the evening.",
+    "Humidity is dry throughout (outdoor 70F at 49.1% = 50F dew point, indoor about 50F), so the #1691 humid-air guard never blocks the start; humidity is supplied because the outdoor reading comes from the configured outdoor sensor.",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: on the pre-fix code the final _fan_active is False and _nat_vent_outdoor_exit_time is set (the reconcile stop), so the 21:30 assertions fail. Here the report is off -> off AND an economizer session is running, so the real-change-to-Off check and the economizer exemption in coordinator.py's #89 clear back each other up: this scenario fails only when both are removed (then the blower stops and restarts every few minutes). Each guard alone is pinned by issue_1705_off_to_off_echo_keeps_circulation_blower_flag (real change to Off) and issue_1705_economizer_running_when_pause_turns_thermostat_off (economizer exemption and the _set_hvac_mode('off') guard). (b) docs-production: docs/fan-lifecycle-spec.md 'Thermostat Off Clears CA's Blower Flag Only on a Real Change to Off (Issue #1705)' states that the #89 clear needs a real change to Off (CA's own or the occupant's) and skips an economizer session; production does exactly this in _async_thermostat_changed. (c) occupant: if this regressed, every blower install that uses window cooling loses its free cooling about 5 minutes after the window opens, with two needless relay toggles when nat-vent later restarts it, or none at all while the house stays above its ceiling."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Economizer blower keeps running through the window session",
+    "observed_behavior": "economizer cool-down, blower on",
+    "expected_behavior": "economizer cool-down, blower on"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "hvac_fan",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T19:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 70.0,
+      "note": "Hot evening, windows closed, the house is above its 76F ceiling.",
+      "humidity": 37.5,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day, cool band: the AC cools toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "The occupant opens a window: HVAC pauses (cool -> off) and the economizer starts the blower for free cooling (cool-down: indoor above 76F, outdoor 70F)."
+    },
+    {
+      "time": "2026-07-12T20:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "note": "90 minutes in: the house is still above its ceiling with cooler air outside; the blower must still be running.",
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T20:00:00",
+      "expect": "economizer_phase",
+      "phase": "cool-down",
+      "reason": "The window opens with outdoor air 7F cooler than a house above its ceiling: the economizer starts the blower (cool-down)."
+    },
+    {
+      "at": "2026-07-12T21:30:00",
+      "expect": "economizer_final_phase",
+      "phase": "cool-down",
+      "reason": "The house is still above 76F with cooler air outside: the economizer session is still running."
+    },
+    {
+      "at": "2026-07-12T21:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": true,
+      "reason": "CA still owns the running blower: its own command echo (off -> off) did not clear the flag, so the untracked-fan backstop never treated it as unwarranted."
+    },
+    {
+      "at": "2026-07-12T21:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._nat_vent_outdoor_exit_time",
+      "value": null,
+      "reason": "No reconcile turn-off ran: that stop (nat_vent_reconcile_exit) arms the nat-vent outdoor exit time, so it stays unset only if the blower was never stopped as unwarranted."
+    }
+  ]
+}

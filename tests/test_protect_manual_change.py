@@ -393,6 +393,7 @@ def test_economizer_off_does_not_rearm_cooling_over_the_occupants_change(timers,
         "off", indoor=74.0, setpoint=79.0, day="hot", manual_grace_seconds=1800, override_confirm_seconds=0
     )
     engine._economizer_active = True
+    engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
     if protected:
         _occupant_overrides(engine, new_mode="off")
         assert engine._manual_change_protected()
@@ -1074,6 +1075,7 @@ class TestDeferralFlagLifecycle:
             "off", indoor=74.0, setpoint=79.0, day="hot", manual_grace_seconds=1800, override_confirm_seconds=600
         )
         engine._economizer_active = True
+        engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
         _occupant_overrides(engine, new_mode="off")
         assert engine._override_confirm_pending
         _run(engine._deactivate_economizer(outdoor_temp=60.0))

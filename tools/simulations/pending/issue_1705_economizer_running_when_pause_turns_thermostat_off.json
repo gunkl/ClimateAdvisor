@@ -1,0 +1,334 @@
+{
+  "name": "issue_1705_economizer_running_when_pause_turns_thermostat_off",
+  "description": "Blower install: window cooling starts its blower during the open-window delay; when the pause then switches the thermostat from cool to Off, the blower keeps running",
+  "source": "synthetic",
+  "issue": 1705,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant: window cooling is running the blower while the thermostat is still in cool, and Climate Advisor's door/window pause then switches the thermostat from cool to Off. Before #1705 that pause asserted fan_mode auto (stopping window cooling's blower) and its real cool -> Off change cleared CA's blower flag, so the blower stopped and window cooling, still recorded in cool-down, never restarted it.",
+    "Modelling: the coordinator's own 30-minute window-cooling check passes 'windows open' only once a window has passed its open-window delay, i.e. after the pause has landed, so in production this state arises when the pause is re-applied with window cooling already running (for example when the occupant's cool override during a pause ends). The scenario reaches it the short way: a direct economizer_check (the engine's public entry point) inside a 5-minute delay, with the pause landing at 19:55, before the coordinator's next check.",
+    "Humidity is dry throughout (outdoor 70F at 49.1% = 50F dew point), so the #1691 humid-air guard never blocks the start.",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: this is the scenario that needs the economizer exemption in the #89 clear (the pause's cool -> Off is a real change to Off, so the off -> off check does not help) and the economizer guard on _set_hvac_mode('off')'s fan_mode auto assert; removing either one alone fails it (verified by mutation). (b) docs-production: docs/fan-lifecycle-spec.md 'Thermostat Off Clears CA's Blower Flag Only on a Real Change to Off (Issue #1705)' states both rules and production applies them. (c) occupant: if this regressed, a window opened while the AC is on would lose its free blower cooling as soon as the pause lands."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Pause after window cooling started keeps the blower",
+    "observed_behavior": "economizer cool-down, blower on",
+    "expected_behavior": "economizer cool-down, blower on"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "hvac_fan",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp",
+    "sensor_debounce_seconds": 300
+  },
+  "events": [
+    {
+      "time": "2026-07-12T19:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 70.0,
+      "humidity": 37.5,
+      "outdoor_humidity": 49.1,
+      "note": "Hot evening, windows closed, the house is above its 76F ceiling."
+    },
+    {
+      "time": "2026-07-12T19:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day, cool band: the thermostat is in cool."
+    },
+    {
+      "time": "2026-07-12T19:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T19:50:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "The occupant opens a window. The 5-minute open-window delay starts; the thermostat stays in cool for now."
+    },
+    {
+      "time": "2026-07-12T19:52:00",
+      "type": "economizer_check",
+      "outdoor_temp": 70.0,
+      "indoor_temp": 78.0,
+      "windows_open": true,
+      "hour": 19,
+      "note": "Window cooling starts the blower while the thermostat is still in cool (direct check; see notes)."
+    },
+    {
+      "time": "2026-07-12T19:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T20:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1
+    },
+    {
+      "time": "2026-07-12T21:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.5,
+      "outdoor_f": 70.0,
+      "humidity": 38.0,
+      "outdoor_humidity": 49.1,
+      "note": "Still above the ceiling with cooler air outside: the blower must still be running."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T19:52:00",
+      "expect": "economizer_phase",
+      "phase": "cool-down",
+      "reason": "Window cooling starts the blower inside the open-window delay."
+    },
+    {
+      "at": "2026-07-12T19:55:00",
+      "expect": "paused_by_door",
+      "reason": "The delay expired with the window still open: the AC is paused (thermostat Off)."
+    },
+    {
+      "at": "2026-07-12T21:30:00",
+      "expect": "economizer_final_phase",
+      "phase": "cool-down",
+      "reason": "Still above 76F with cooler air outside: window cooling is still running."
+    },
+    {
+      "at": "2026-07-12T21:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": true,
+      "reason": "CA still owns the running blower: the pause's real cool -> Off did not clear the flag under an economizer session."
+    },
+    {
+      "at": "2026-07-12T21:30:00",
+      "expect": "field_equals",
+      "field": "engine_state._nat_vent_outdoor_exit_time",
+      "value": null,
+      "reason": "No reconcile turn-off ran (that stop arms the nat-vent outdoor exit time)."
+    }
+  ]
+}

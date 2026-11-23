@@ -5,6 +5,7 @@
   "learning.suggestion.frequent_overrides": "过去两周里，您手动调整了 {count, plural, other {#次}}恒温器（{detail}）。如果舒适设定温度不合适，请在设置中修改，Climate Advisor 会保持新的温度。",
   "learning.suggestion.frequent_overrides_no_detail": "过去两周里，您手动调整了 {count, plural, other {#次}}恒温器。这可能说明舒适设定温度不符合您的偏好。您可以在设置中修改。",
   "learning.suggestion.high_runtime_mild_days": "在温和和温暖的日子里，暖通空调平均运行了 {minutes, plural, other {#分钟}}，比预期更长。可能有未装传感器的门窗开着，或舒适范围比房屋所需的更窄。增加门窗传感器，或在设置中放宽舒适范围，可能会有帮助。",
+  "learning.suggestion.humid_overcool": "过去两周，在室内空气潮湿（露点 {dew_point} 或更高）时，空调运行了约 {hours, plural, other {# 小时}}。除湿额外制冷（默认关闭）开启后，会在这样闷热的日子让空调多运行一会儿：把恒温器设到比您的制冷温度最多低 {lowering}，仍在舒适范围内，从而除去空气中更多的水分。如果觉得家里闷湿，可以在设置中开启。除非您开启，否则不会有任何改变。",
   "learning.suggestion.low_window_compliance": "在最近建议开窗的 {days, plural, other {#天}}里，窗户只开了 {compliance, number, ::percent} 的时间。开窗是可选的：窗户关闭时，Climate Advisor 会用暖通空调保持舒适，只是会多耗一点能源。",
   "learning.suggestion.short_departures": "您经常外出 30–45 分钟，这几乎不够节能温度在您回来之前生效。如果回家时觉得室内太冷或太热，请在设置中把离家温度设得温和一些。",
   "learning.suggestion.thermal_model_ready": "我现在已收集到足够的热力观测数据，可以估算您住宅的保温性能和暖通空调的表现。预热时间和就寝时的节能温度会根据住宅的实际表现自动调整，无需任何操作。"

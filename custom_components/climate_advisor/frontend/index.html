@@ -1242,7 +1242,9 @@
     const indoorDisplay = data.indoor_temp != null ? data.indoor_temp.toFixed(1) + unitSym : '—';
     const fmtTime = iso => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     const hvacNote = `<div class="note">${_hvacSentence(data, unitSym)}</div>` +
-      (data.remote_offset && data.remote_offset.text ? `<div class="note remote-offset-line">${escapeHtml(data.remote_offset.text)}</div>` : '');
+      (data.remote_offset && data.remote_offset.text ? `<div class="note remote-offset-line">${escapeHtml(data.remote_offset.text)}</div>` : '') +
+      (data.remote_offset && data.remote_offset.overcool && data.remote_offset.overcool.text && data.remote_offset.overcool.text !== data.remote_offset.text
+        ? `<div class="note overcool-line">${escapeHtml(data.remote_offset.overcool.text)}</div>` : '');
     const cards = [];
 
     // Indoor: a card per sensor; the thermostat's card carries the HVAC lines. Without per-sensor data, one card.

@@ -5,6 +5,7 @@
   "learning.suggestion.frequent_overrides": "過去2週間に、サーモスタットを{count, plural, other {#回}}手動で変更しました（{detail}）。快適温度が合わない場合は、設定で変更してください。Climate Advisorは新しい温度を保ちます。",
   "learning.suggestion.frequent_overrides_no_detail": "過去2週間に、サーモスタットを{count, plural, other {#回}}手動で変更しました。快適温度の設定がお好みに合っていない可能性があります。設定で変更できます。",
   "learning.suggestion.high_runtime_mild_days": "穏やかな日や暖かい日に、空調の平均運転時間が{minutes, plural, other {#分}}で、想定より長くなっています。センサーのないドアや窓が開いているか、快適温度範囲が家に必要な幅より狭い可能性があります。ドア/窓センサーを追加するか、設定で快適温度範囲を広げると改善する場合があります。",
+  "learning.suggestion.humid_overcool": "過去2週間、室内の空気が湿っている間（露点{dew_point}以上）にエアコンが約{hours, plural, other {#時間}}運転しました。除湿のための追加冷房（初期設定はオフ）をオンにすると、こうした蒸し暑い日にエアコンを少し長く運転し、サーモスタットを冷房温度より最大{lowering}低く設定して（快適温度範囲内のまま）、空気中の湿気をより多く取り除きます。家がじめじめすると感じる場合は、設定でオンにできます。オンにしない限り何も変わりません。",
   "learning.suggestion.low_window_compliance": "窓を開けることが推奨された過去{days, plural, other {#日}}のうち、実際に開けたのは全体の{compliance, number, ::percent}にとどまりました。窓を開けるかどうかは任意です。窓を閉めたままでも、Climate Advisorが空調で快適さを保ちます（消費エネルギーはやや増えます）。",
   "learning.suggestion.short_departures": "30～45分ほどの短い外出が頻繁にあり、省エネ設定が効く前に帰宅している状況です。帰宅時に家が涼しすぎる・暖かすぎると感じる場合は、設定で外出時の温度を穏やかにしてください。",
   "learning.suggestion.thermal_model_ready": "住宅の断熱性能と空調の性能を推定できるだけの熱的な観測データが集まりました。予熱のタイミングと就寝時の省エネ設定は、お住まいの実際の挙動に基づいて自動的に調整されます。操作は不要です。"

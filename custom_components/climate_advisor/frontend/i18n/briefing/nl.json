@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 Luchtvochtigheid\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "Sinds middernacht heb ik je {count, plural, one {één keer} other {# keer}} gevraagd de ramen te sluiten omdat er vochtige lucht binnenkwam.",
   "briefing.humidity.fan_held": "Sinds middernacht bleef de ventilator uit tijdens {count, plural, one {één vochtige periode} other {# vochtige periodes}}: de buitenlucht was te vochtig om binnen te laten.",
+  "briefing.humidity.overcooled": "Sinds middernacht liet ik de airco {count, plural, one {één keer} other {# keer}} langer draaien om de lucht te drogen (vochtige overkoeling).",
   "briefing.humidity.reading": "{where, select, indoor {Binnen} other {Buiten}}: dauwpunt {dew_point}{has_rh, select, yes { ({rh}% relatieve luchtvochtigheid)} other {}}.",
   "briefing.humidity.withheld": "De buitenlucht is nu te vochtig om binnen te laten (dauwpunt {dew_point}, {why, select, ceiling {op of boven je grens van {limit}} other {vochtiger dan de lucht in huis}}), dus ik stel niet voor de ramen te openen.",
   "briefing.leaving.away_band": "Je bent momenteel weg. Ik houd het bredere energiebesparende bereik ({band}) aan zolang je weg bent, dus er draait weinig. Het comfort wordt hersteld wanneer je terugkomt.",

@@ -392,6 +392,8 @@ from .humidity_facts import (
     decision_dew_point,
     fmt_dp_log,
     humid_air_ceiling_from_config,
+    humid_overcool_enabled,
+    overcool_humid_from_facts,
     paired_glitch,
     read_dew_point,
     step_humid_latches,
@@ -1193,6 +1195,44 @@ def _whf_safety_after_event(after: Callable[[Any, Any], None]) -> Callable[[Any]
     return decorate
 
 
+async def switch_automation(coordinator: Any, enabled: bool) -> None:
+    """The automation switch's one entry (switch entity, dashboard toggle, sim harness):
+    ``async_set_automation_enabled``, which first puts the plain target back when a setpoint adjustment is on the
+    thermostat (Issue #1694)."""
+    await coordinator.async_set_automation_enabled(enabled)
+
+
+def _overcool_after_thermostat_event(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run the humid-overcool check once the thermostat listener has finished, when ``hvac_action`` changed (#1694).
+
+    After the listener (it has many early returns), so an occupant change in the same event is already recorded and
+    closes the overcool gate first. Only with the option on (no extra await otherwise); never on the #1603 re-check.
+    """
+
+    @functools.wraps(fn)
+    async def wrapped(self: Any, event: Any, **kwargs: Any) -> Any:
+        try:
+            return await fn(self, event, **kwargs)
+        finally:
+            if not kwargs.get("recheck"):
+                try:
+                    data = getattr(event, "data", None) or {}
+                    old, new = data.get("old_state"), data.get("new_state")
+                    if (
+                        old is not None
+                        and new is not None
+                        and old.attributes.get("hvac_action") != new.attributes.get("hvac_action")
+                        and humid_overcool_enabled(getattr(self, "config", None))
+                    ):
+                        tick = getattr(self, "_async_overcool_tick", None)
+                        if callable(tick):
+                            await tick()
+                except Exception:  # a humid-overcool check must never break the listener it follows
+                    _LOGGER.debug("humid overcool post-listener check failed", exc_info=True)
+
+    return wrapped
+
+
 def _whf_safety_after_call(trigger: str) -> Callable[[Any], Any]:
     """Like ``_whf_safety_after_event`` for a method with no event argument (the RF burst flush)."""
 
@@ -1477,7 +1517,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_night_replay_failed_logged = False
         self._v4_night_replay_running = False
         self.learning = LearningEngine(
-            Path(hass.config.config_dir), entry_id=self._entry_id, temp_unit=config.get("temp_unit", "fahrenheit")
+            Path(hass.config.config_dir),
+            entry_id=self._entry_id,
+            temp_unit=config.get("temp_unit", "fahrenheit"),
+            # Issue #1695: the live option, so "Turn on Humid Overcool" is never suggested while it is on.
+            humid_overcool_enabled=lambda: humid_overcool_enabled(getattr(self, "config", None)),
         )
         # Issue #757 Phase 6 Step 8: this used to construct two live AutomationEngine
         # instances (_engine_a/_engine_b) behind a runtime-switchable primary/shadow
@@ -1923,6 +1967,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def automation_enabled(self) -> bool:
         """Whether automation actions are enabled (False = observe-only)."""
         return self._automation_enabled
+
+    async def async_set_automation_enabled(self, enabled: bool) -> None:
+        """The automation switch (switch entity and dashboard): ``set_automation_enabled`` after, when switching off,
+        putting the plain comfort target back if a command adjustment (humid overcool, the remote-sensor offset) is on
+        the thermostat (Issue #1694, review W3A-A A1). That one write is made while automation is still on, so
+        observe-only sends nothing; without it the thermostat stayed 1-2 F off the occupant's setting for as long as
+        automation was off. Never raises."""
+        if not enabled:
+            await self._release_command_adjustments("observe-only")
+        self.set_automation_enabled(enabled)
+
+    async def _release_command_adjustments(self, why: str) -> None:
+        """Put the plain comfort target back when CA's command adjustment (humid overcool, the bedroom-sensor offset)
+        is on the thermostat and automation is on (Issue #1694 and review FINAL-B F1). Callers: switching automation
+        off, and unloading this zone (removal, disable, reload) before the shutdown latch stops writes. Not on a Home
+        Assistant stop/restart: commands are refused then, and the start-up plan writes the plain target. Never
+        raises."""
+        engine = getattr(self, "automation_engine", None)
+        if engine is None or not getattr(self, "_automation_enabled", False):
+            return
+        try:
+            if engine.command_adjustments_applied():
+                await decide(self, engine.release_command_adjustments)
+        except Exception:  # noqa: BLE001 - switching off / unloading must always work
+            _LOGGER.warning("Releasing the setpoint adjustments before %s failed", why, exc_info=True)
 
     def set_automation_enabled(self, enabled: bool) -> None:
         """Enable or disable automation actions (observe-only mode)."""
@@ -2631,6 +2700,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001 - a humidity sample must never break thermal sampling
             _LOGGER.debug("dew point sample failed", exc_info=True)
         self._tick_humid_windows_notice(dt_util.now())  # Issue #1692: after the sample (never raises)
+        if humid_overcool_enabled(getattr(self, "config", None)):
+            # Issue #1694: the humid-overcool decision on the same tick as its latch (option on only).
+            self._spawn(self._async_overcool_tick())
         try:  # owner decision 2026-11-13: watch for a thermostat that never reports heating/cooling
             self._tick_hvac_action_watch()
         except Exception:  # noqa: BLE001 - a notice must never break thermal sampling
@@ -3491,7 +3563,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             split_field = self._RUNTIME_MODE_FIELD.get(mode)
             if split_field:
                 setattr(self._today_record, split_field, getattr(self._today_record, split_field) + elapsed)
+            if mode == "cool" and self._overcool_humid_now(now):
+                # Issue #1695: reported cooling while the house was humid by the verdict humid overcool engages on (the
+                # 5-minute dew-point tick flushes a running cool session before taking its sample, so each slice gets
+                # the verdict it ran under).
+                self._today_record.hvac_cool_humid_runtime_minutes += elapsed
             setattr(self, on_since_attr, now)  # Reset to now for continued tracking
+
+    def _overcool_humid_now(self, now: datetime) -> bool:
+        """Whether humid overcool would call the house humid at ``now`` (Issue #1695): the one reader the decision
+        uses (``humidity_facts.overcool_humid_from_facts`` on this coordinator's ``engine_facts``: the overcool humid
+        latch, on at a 60 °F indoor dew point, off at or below 58 °F). Unknown or unreadable = not humid."""
+        try:
+            return overcool_humid_from_facts(self.engine_facts(now))[0]
+        except Exception:  # noqa: BLE001 - runtime accounting must never break on a humidity read
+            _LOGGER.debug("humid overcool verdict for runtime split failed", exc_info=True)
+            return False
 
     def _runtime_today_for_mode(self, mode: str) -> float:
         """Return today's accumulated runtime (minutes) for a tracked session mode.
@@ -4646,10 +4733,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def humid_decisions_today(self, now: datetime | None = None) -> dict[str, int]:
         """Today's decisions the humid-air guard changed, counted from the event log (Issue #1696): fan / nat-vent
-        starts it held (``nat_vent_humid_skip``, emitted by the #1691 fan-start guard) and close-the-windows notices."""
+        starts it held (``nat_vent_humid_skip``, emitted by the #1691 fan-start guard), close-the-windows notices, and
+        (Issue #1694) the AC runs humid overcool lengthened (``overcool_started``)."""
         at = now or dt_util.now()
         midnight = at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        counts = {"fan_starts_held": 0, "close_notices": 0}
+        counts = {"fan_starts_held": 0, "close_notices": 0, "overcool_runs": 0}
         for e in getattr(self, "_event_log", None) or ():
             if not isinstance(e, dict) or str(e.get("time", "")) < midnight:
                 continue
@@ -4658,6 +4746,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 counts["fan_starts_held"] += 1
             elif kind == "humid_windows_close_notice":
                 counts["close_notices"] += 1
+            elif kind == "overcool_started":  # Issue #1694: AC runs humid overcool lengthened
+                counts["overcool_runs"] += 1
         return counts
 
     def _briefing_humidity(self) -> BriefingHumidity | None:
@@ -4675,6 +4765,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ceiling_f=guard["ceiling_f"],
                 fan_starts_held_today=counts["fan_starts_held"],
                 close_notices_today=counts["close_notices"],
+                overcool_runs_today=counts.get("overcool_runs", 0),
             )
         except Exception:  # noqa: BLE001 - the briefing goes out without its humidity section rather than fail
             _LOGGER.debug("briefing humidity facts unavailable", exc_info=True)
@@ -7241,6 +7332,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 watched.extend(self._companion_sensors(chosen, "temperature", exclude))
             for eid in dict.fromkeys(watched):
                 watch.observe(eid, self.hass.states.get(eid))
+        if getattr(self, "_hvac_session_mode", None) == "cool":
+            # Issue #1695: credit the cooling minutes since the last flush under the humid-overcool verdict they ran
+            # with, before this sample enters the window and the latch moves (the humid-cooling minutes the "Turn on
+            # Humid Overcool" suggestion reads).
+            self._flush_runtime_for_mode("cool")
         dew_points: dict[str, float | None] = {}
         for signal in (SIGNAL_INDOOR, SIGNAL_OUTDOOR):
             reading = self._read_dew_point(signal, now)
@@ -7249,6 +7345,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif reading.reason != "glitch":
                 history.clear(signal)
             dew_points[signal] = decision_dew_point(reading, history, signal, now).dp_f
+            if signal == SIGNAL_OUTDOOR:
+                self._note_outdoor_dew_point_source(reading)
             _LOGGER.debug(
                 "Dew point sample: signal=%s dp_f=%s reason=%s humidity=%s temperature=%s",
                 signal,
@@ -7269,6 +7367,50 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             note = getattr(engine, "note_humid_spell_over", None)
             if callable(note):
                 note()
+
+    def _note_outdoor_dew_point_source(self, reading: DewPoint) -> None:
+        """Announce, once per change, that the outdoor dew point comes from the weather service because the outdoor
+        humidity sensor has no usable temperature, and when it is back on the sensor (Issue #1709).
+
+        Occupant view: with a humidity-only outdoor sensor the humid-night guard (fan starts, window advice) reads the
+        weather service's dew point; the log says so instead of the guard quietly using another source. Same
+        mechanism as the humidity sources (``_source_changed`` / ``_announce_source``): one INFO line per real
+        change, nothing for a repeat or during the startup coalesce. Installs that never fall back log nothing. Values
+        at native resolution. Event loop only (the 5-minute sample). Never raises.
+        """
+        try:
+            if not reading.known:
+                return
+            key = "dew_point:outdoor"
+            fell_back = reading.fallback_from is not None
+            using = reading.temp_source if fell_back else reading.humidity_source
+            if not fell_back and key not in self._sources_announced_map():
+                return
+            if not self._source_changed(key, using):
+                return
+            if fell_back:
+                to_text = f"weather service {reading.temp_source} (dew_point_f={fmt_dp_log(reading.dp_f)})"
+                why = (
+                    f"outdoor humidity sensor {reading.fallback_from} has no usable temperature "
+                    f"({reading.fallback_reason})"
+                )
+            else:
+                to_text = (
+                    f"{reading.humidity_source} with {reading.temp_source} (dew_point_f={fmt_dp_log(reading.dp_f)})"
+                )
+                why = "the outdoor humidity sensor's temperature is usable again"
+            previous = self._sources_announced_map().get(key)
+            self._announce_source(
+                key,
+                using,
+                subject="outdoor dew point",
+                to_text=to_text,
+                from_text=str(previous),
+                reason=why,
+                using_note=why,
+            )
+        except Exception:  # noqa: BLE001 - log text must never fail the sample
+            _LOGGER.debug("dew point: could not announce the outdoor dew-point source", exc_info=True)
 
     def _humidity_source_kind(self, role: str, source: str | None, chosen: str | None) -> str | None:
         """Code of the kind of a humidity source (Issue #1455): ``chosen``, ``weather_service``, ``thermostat`` or
@@ -10396,7 +10538,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if classification.windows_recommended and not self._today_record.windows_recommended:
                 self._today_record.windows_recommended = True
             return
-        _prev = self._today_record if (self._today_record and self._today_record.date == _today_str) else None
+        # A new day's record starts from zero (the early return above keeps an existing record for today, so nothing
+        # is carried over; review FINAL-A A-8 removed the dead "carry the previous record" fields).
         self._today_record = DailyRecord(
             date=_today_str,
             day_type=classification.day_type,
@@ -10411,17 +10554,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ClimateAdvisorCoordinator.day_zone_service(self).shown_mode(classification.hvac_mode)
                 or classification.hvac_mode
             ),
-            hvac_runtime_minutes=_prev.hvac_runtime_minutes if _prev else 0.0,
-            hvac_heat_runtime_minutes=_prev.hvac_heat_runtime_minutes if _prev else 0.0,
-            hvac_cool_runtime_minutes=_prev.hvac_cool_runtime_minutes if _prev else 0.0,
-            thermostat_fan_only_runtime_minutes=(_prev.thermostat_fan_only_runtime_minutes if _prev else 0.0),
-            comfort_violations_minutes=_prev.comfort_violations_minutes if _prev else 0.0,
-            manual_overrides=_prev.manual_overrides if _prev else 0,
-            thermal_session_count=_prev.thermal_session_count if _prev else 0,
-            occupancy_away_minutes=_prev.occupancy_away_minutes if _prev else 0.0,
-            windows_opened=_prev.windows_opened if _prev else False,
-            window_open_actual_time=_prev.window_open_actual_time if _prev else None,
-            override_details=list(_prev.override_details) if _prev else [],
         )
         # Capture raw forecast high/low for weather bias learning
         if self.config.get("learning_enabled", True):
@@ -12883,6 +13015,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         await decide(self, self.automation_engine.remote_offset_check)
 
+    async def _async_overcool_tick(self) -> None:
+        """The one entry to the humid-overcool decision (Issue #1694): the 5-minute tick and every hvac_action change.
+
+        Silent during the startup-coalescing window (a restart writes the normal setpoint; overcool is in memory only).
+        """
+        if getattr(self, "_shut_down", False) is True or self._startup_coalesce_active:
+            return
+        engine = getattr(self, "automation_engine", None)
+        if engine is None or not callable(getattr(engine, "overcool_check", None)):
+            return
+        await decide(self, engine.overcool_check)
+
     async def _track_hvac_runtime_edges(self, old_state: Any, new_state: Any) -> None:
         """HVAC runtime tracking via hvac_action (preferred) or mode: on/off/glide edges of the session.
 
@@ -12990,6 +13134,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._glide_hvac_session_mode(new_state.state)
 
     @_whf_safety_after_event(_whf_after_thermostat_event)
+    @_overcool_after_thermostat_event
     async def _async_thermostat_changed(self, event: Event, *, recheck: bool = False) -> None:
         """Track thermostat changes for learning (detect manual overrides).
 
@@ -13390,45 +13535,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _was_chart_active = is_hvac_compressor_active(old_action)
         _is_chart_active = is_hvac_compressor_active(new_action)
         if _was_chart_active != _is_chart_active:
-            with contextlib.suppress(Exception):
-                _LOGGER.debug(
-                    "chart_log append: event=hvac_action_change hvac=%r fan=%s",
-                    new_action,
-                    self._fan_is_running(),
-                )
-                _band_lower_hac, _band_upper_hac = self._target_band_lower_upper_now()
-                # Issue #1234: the always-primary reading (never the sleep-window swap) that live swing
-                # sampling uses, so thermal_replay's swing backfill reads the same sensor.
-                _primary_hac = self._get_indoor_temp_with_provenance().primary_value
-                _indoor_hac = self._get_indoor_temp()
-                self._chart_log.append(
-                    hvac=new_action,
-                    fan=self._fan_is_running(),
-                    indoor=_indoor_hac,
-                    indoor_primary=_primary_hac if isinstance(_primary_hac, int | float) else None,
-                    outdoor=None,
-                    windows_open=self._any_sensor_open(),
-                    windows_recommended=(
-                        bool(self._current_classification.windows_recommended)
-                        if self._current_classification
-                        else False
-                    ),
-                    setpoint=self._read_chart_setpoint(),
-                    comfort_target=self._read_chart_comfort_target(),
-                    event="hvac_action_change",
-                    fan_running=self._fan_physically_running(),
-                    nat_vent_active=bool(
-                        self.automation_engine._natural_vent_active if self.automation_engine else False
-                    ),
-                    lower=_band_lower_hac,
-                    upper=_band_upper_hac,
-                    nat_vent_target=self._nat_vent_target_now(),
-                    indoor_sensors=self._read_chart_indoor_sensors(),
-                    recal_false=self._chart_recal_false(),
-                    # outdoor=None on this row, so no outdoor feels-like (same value the row stores)
-                    **self._read_chart_context(indoor=_indoor_hac, outdoor=None),
-                )
-                await self._executor_job(self._chart_log.save)
+            await _append_thermostat_chart_row(
+                self,
+                new_action,
+                event="hvac_action_change",
+            )
+        elif (
+            not recheck
+            and old_state.attributes.get("temperature") != new_state.attributes.get("temperature")
+            and new_state.attributes.get("temperature") is not None
+            and _is_own_setpoint_echo(self, new_state)
+        ):
+            # Issue #1694 (plan #1507 H3): the thermostat now reports a setpoint CA commanded with ONLY the humid-
+            # overcool term changed (engage, step, restore). v4 learns the commanded setpoint from chart_log
+            # ``setpoint``, which otherwise refreshes only on 30-minute and edge rows; this row records it AFTER the
+            # echo. Never with the option off, so every other install's chart log is unchanged (review W3A-B B1).
+            await _append_thermostat_chart_row(
+                self,
+                new_action,
+                event="setpoint_change",
+            )
 
         # Bug 3 fix: Event-driven sampling for active HVAC observations.
         # The 5-min polling tick (_sample_all_observations) can miss short HVAC cycles
@@ -17336,9 +17462,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # ``target_temp_low``; cool: ``temperature`` else ``target_temp_high``): on a heat_cool thermostat a
             # change of the cooling target does not cut a heating run, and the mirror.
             sp_modes = set(rec.open_modes) | ({sp_dir} if sp_dir else set())
-            if not unavail_old and any(
-                self._read_thermostat_setpoint_f(old_state, m) != self._read_thermostat_setpoint_f(new_state, m)
-                for m in sorted(sp_modes)
+            if (
+                not unavail_old
+                and any(
+                    self._read_thermostat_setpoint_f(old_state, m) != self._read_thermostat_setpoint_f(new_state, m)
+                    for m in sorted(sp_modes)
+                )
+                and not self._cycle_overcool_echo(new_state)
             ):
                 self._cycle_collect(
                     rec.setpoint_change(ts, self._read_thermostat_setpoint_f(new_state, sp_dir) if sp_dir else None)
@@ -17364,6 +17494,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._cycle_reading(self.config.get("climate_entity"))
         except Exception:  # noqa: BLE001 - recording must never break override detection
             _LOGGER.debug("cycle recorder thermostat event failed", exc_info=True)
+
+    def _cycle_overcool_echo(self, new_state: Any) -> bool:
+        """The setpoint change is CA's own write that moved ONLY the humid-overcool term (Issue #1694): the comfort
+        target did not change, so the run is the same run and is not cut (#1512 cycle samples stay whole)."""
+        engine = getattr(self, "automation_engine", None)
+        check = getattr(engine, "overcool_adjustment_echo", None)
+        if not callable(check):
+            return False
+        try:
+            return check(self._read_thermostat_setpoint_f(new_state, "cool")) is True
+        except Exception:  # noqa: BLE001 - recording must never break the listener
+            return False
 
     def _cycle_lock(self) -> asyncio.Lock:
         lock = getattr(self, "_cycle_fit_lock", None)
@@ -19538,8 +19680,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except Exception:  # noqa: BLE001 - a chart row must never fail on the loop description
             return None
         if not isinstance(st, RemoteOffsetState) or st.offset_f is None or abs(st.offset_f) < 1e-6:
-            return None
+            return _chart_overcool_target(engine)
         return st.comfort_target_f
+
+    def _overcool_commanded_window(self) -> tuple[datetime, float] | None:
+        """``AutomationEngine.overcool_commanded_window()`` (Issue #1694), tolerant of stub engines."""
+        getter = getattr(getattr(self, "automation_engine", None), "overcool_commanded_window", None)
+        if not callable(getter):
+            return None
+        try:
+            window = getter()
+        except Exception:  # noqa: BLE001 - the chart never fails on the overcool description
+            return None
+        return window if isinstance(window, tuple) and len(window) == 2 else None
 
     def _read_chart_setpoint(self) -> float | None:
         """Return the live thermostat's ``temperature`` (single-setpoint target) in °F,
@@ -20702,6 +20855,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # already-converted _conv_band as its `target_band` input, then its output was
             # converted a second time via _conv(e["target"]) below — a real double-conversion
             # for Celsius-display users, invisible on an all-Fahrenheit install.
+            # Issue #1694 (Chart Coverage): while humid overcool lowers the commanded cool setpoint, the ODE (and its
+            # fallback) gets the commanded value for the hours it can still be in force; the Target Band stays the band.
+            _ode_band = _band_with_commanded_window(_raw_band, self._overcool_commanded_window(), now)
             _raw_predicted_indoor = _build_predicted_indoor_future(
                 _extended_forecast,
                 self.config,
@@ -20710,12 +20866,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 thermal_model=thermal_model,
                 occupancy_mode=self._occupancy_mode,
                 classification=self._current_classification,
-                band_schedule=_raw_band,
+                band_schedule=_ode_band,
                 tomorrow_window=self._tomorrow_window_plan(),
                 zone_service=_zone_service_of(self),
             )
             predicted_indoor = [{"ts": p["ts"], "temp": _conv(p["temp"])} for p in _raw_predicted_indoor]
-            _fallback_inputs = (_extended_forecast, now, _raw_band)
+            _fallback_inputs = (_extended_forecast, now, _ode_band)  # the fallback sees the same command (#1694)
             _raw_forecast_outdoor = _build_future_forecast_outdoor(
                 _extended_forecast,
                 classification=self._current_classification,
@@ -21514,10 +21670,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         no-op: by then cleanup() has wiped the engine's grace state, and saving again
         would overwrite the fan-off grace the first save kept (N4).
 
-        Order: latch this coordinator, latch the engine (so nothing commands during the
-        awaited saves), HA's base shutdown (no further refreshes), saves, release every
-        timer/listener, engine cleanup. The release and cleanup run in a ``finally``, so a
-        save that raises cannot leave timers or listeners behind.
+        Order: put the plain setpoint back if CA's command adjustment is on the thermostat
+        (``_release_command_adjustments``; not on a Home Assistant stop, review FINAL-B F1), latch
+        this coordinator, latch the engine (so nothing commands during the awaited saves), HA's
+        base shutdown (no further refreshes), saves, release every timer/listener, engine cleanup.
+        The release and cleanup run in a ``finally``, so a save that raises cannot leave timers or
+        listeners behind.
 
         Partial-initialisation safety holds once ``__init__`` has completed (e.g. HA shuts
         the coordinator down after async_restore_state/async_setup failed). A failure
@@ -21527,6 +21685,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if getattr(self, "_shut_down", False) is True:
             _LOGGER.debug("async_shutdown: instance %s already shut down — no-op", _instance_tag(self))
             return
+        # Review FINAL-B F1: unloading this zone (removal, disable, reload) during an overcool or bedroom-offset night
+        # puts the plain setpoint back, as switching automation off does, before the latch below stops every write.
+        # A Home Assistant stop has already refused commands (``_ha_stopping``): nothing is written then; the start-up
+        # plan writes the plain target after the restart.
+        if getattr(self, "_ha_stopping", False) is not True:
+            await self._release_command_adjustments("unload")
         self._shut_down = True
         engine = getattr(self, "automation_engine", None)
         if engine is not None:
@@ -22438,6 +22602,102 @@ def _compute_day_hvac_modes(
         {str(d): m for d, m in sorted(day_modes.items())},
     )
     return day_modes
+
+
+async def _append_thermostat_chart_row(self: Any, new_action: Any, *, event: str) -> None:
+    """An event-driven chart_log row from a thermostat change (``hvac_action_change``, and since Issue #1694
+    ``setpoint_change``). Never raises."""
+    with contextlib.suppress(Exception):
+        _LOGGER.debug(
+            "chart_log append: event=%s hvac=%r fan=%s",
+            event,
+            new_action,
+            self._fan_is_running(),
+        )
+        _band_lower_hac, _band_upper_hac = self._target_band_lower_upper_now()
+        # Issue #1234: the always-primary reading (never the sleep-window swap) that live swing
+        # sampling uses, so thermal_replay's swing backfill reads the same sensor.
+        _primary_hac = self._get_indoor_temp_with_provenance().primary_value
+        _indoor_hac = self._get_indoor_temp()
+        self._chart_log.append(
+            hvac=new_action,
+            fan=self._fan_is_running(),
+            indoor=_indoor_hac,
+            indoor_primary=_primary_hac if isinstance(_primary_hac, int | float) else None,
+            outdoor=None,
+            windows_open=self._any_sensor_open(),
+            windows_recommended=(
+                bool(self._current_classification.windows_recommended) if self._current_classification else False
+            ),
+            setpoint=self._read_chart_setpoint(),
+            comfort_target=self._read_chart_comfort_target(),
+            event=event,
+            fan_running=self._fan_physically_running(),
+            nat_vent_active=bool(self.automation_engine._natural_vent_active if self.automation_engine else False),
+            lower=_band_lower_hac,
+            upper=_band_upper_hac,
+            nat_vent_target=self._nat_vent_target_now(),
+            indoor_sensors=self._read_chart_indoor_sensors(),
+            recal_false=self._chart_recal_false(),
+            # outdoor=None on this row, so no outdoor feels-like (same value the row stores)
+            **self._read_chart_context(indoor=_indoor_hac, outdoor=None),
+        )
+        await self._executor_job(self._chart_log.save)
+
+
+def _is_own_setpoint_echo(self: Any, new_state: Any) -> bool:
+    """The thermostat reports CA's own write that changed only the humid-overcool term (Issue #1694; stub-safe)."""
+    engine = getattr(self, "automation_engine", None)
+    check = getattr(engine, "overcool_adjustment_echo", None)
+    if not callable(check):
+        return False
+    try:
+        return check(self._read_thermostat_setpoint_f(new_state, str(getattr(new_state, "state", "")))) is True
+    except Exception:  # noqa: BLE001 - a chart row must never break the listener
+        return False
+
+
+def _chart_overcool_target(engine: Any) -> float | None:
+    """The comfort target while humid overcool lowers the setpoint (Issue #1694), else None: the same split as the
+    remote-sensor offset, so the chart's Target line stays at the room's target and the commanded value is drawn as
+    its own series (never a band change). Tolerant of stub engines."""
+    getter = getattr(engine, "overcool_view", None)
+    if not callable(getter):
+        return None
+    try:
+        view = getter()
+    except Exception:  # noqa: BLE001 - a chart row must never fail on the overcool description
+        return None
+    if not isinstance(view, dict) or not view.get("active"):
+        return None
+    target = view.get("comfort_target_f")
+    return float(target) if isinstance(target, int | float) and not isinstance(target, bool) else None
+
+
+def _band_with_commanded_window(
+    band: list[dict] | None, window: tuple[datetime, float] | None, now: Any
+) -> list[dict] | None:
+    """``band`` with each entry's ``upper`` lowered to the commanded cool setpoint while ``window`` holds (#1694).
+
+    ``window`` = ``(until, commanded_f)`` from ``AutomationEngine.overcool_commanded_window``: humid overcool tells
+    the thermostat a cool setpoint below the band's ceiling until at most ``until``. Only the ODE's copy changes (the
+    chart draws ``band`` itself); entries after ``until`` or before ``now`` are left as they are. None/empty in, out.
+    """
+    if not band or window is None:
+        return band
+    until, commanded = window
+    out: list[dict] = []
+    for entry in band:
+        try:
+            ts = dt_util.parse_datetime(str(entry.get("ts")))
+            inside = ts is not None and now <= ts <= until
+        except TypeError, ValueError:
+            inside = False
+        upper = entry.get("upper")
+        if inside and isinstance(upper, int | float) and commanded < upper:
+            entry = {**entry, "upper": float(commanded)}
+        out.append(entry)
+    return out
 
 
 def _build_predicted_indoor_future(

@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 Nem\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "Nemli hava içeri girdiği için gece yarısından beri pencereleri kapatmanızı {count, plural, one {# kez} other {# kez}} istedim.",
   "briefing.humidity.fan_held": "Gece yarısından beri {count, plural, one {# nemli dönemde} other {# nemli dönemde}} fan kapalı kaldı: dış hava içeri almak için fazla nemliydi.",
+  "briefing.humidity.overcooled": "Gece yarısından beri havayı kurutmak için klimayı {count, plural, one {bir kez} other {# kez}} daha uzun çalıştırdım (nem için ek soğutma).",
   "briefing.humidity.reading": "{where, select, indoor {İçeride} other {Dışarıda}}: çiğ noktası {dew_point}{has_rh, select, yes { (bağıl nem %{rh})} other {}}.",
   "briefing.humidity.withheld": "Dış hava şu anda içeri almak için fazla nemli (çiğ noktası {dew_point}, {why, select, ceiling {{limit} sınırınızda veya üstünde} other {evin içindeki havadan daha nemli}}), bu yüzden pencere açmayı önermiyorum.",
   "briefing.leaving.away_band": "Şu anda evde değilsiniz. Siz yokken daha geniş enerji tasarrufu aralığını ({band}) koruyorum, bu yüzden çok az şey çalışacak. Döndüğünüzde konfor geri gelecek.",

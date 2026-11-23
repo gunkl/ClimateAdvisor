@@ -18,7 +18,7 @@ their own existing per-view tests, unaffected by this change). Sampled here:
 - ClimateAdvisorForceReclassifyView (POST) — a POST view with a coordinator
   side effect (async_request_refresh).
 - ClimateAdvisorToggleAutomationView (POST) — a second POST view with a
-  different coordinator side effect (set_automation_enabled).
+  different coordinator side effect (async_set_automation_enabled).
 
 Backward-compat guarantee (explicitly tested): entry_id absent → falls back
 to get_default_coordinator(), which is a no-op change for single-zone
@@ -29,7 +29,7 @@ deployment upgrading through this change.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from custom_components.climate_advisor.api import (
     ClimateAdvisorAutomationStateView,
@@ -38,6 +38,13 @@ from custom_components.climate_advisor.api import (
     ClimateAdvisorToggleAutomationView,
 )
 from tools.sim_harness.ha_stubs import set_loaded_zones
+
+
+def _zone() -> MagicMock:
+    """A zone coordinator double: the automation toggle awaits ``async_set_automation_enabled`` (Issue #1694)."""
+    zone = MagicMock()
+    zone.async_set_automation_enabled = AsyncMock()
+    return zone
 
 
 def _make_request(coordinators: dict[str, MagicMock], entry_id: str | None = None) -> MagicMock:
@@ -70,7 +77,7 @@ class TestEntryIdResolutionAcrossZones:
     """A request naming entry_id must resolve THAT zone, not the other one."""
 
     def test_engines_view_resolves_named_zone(self):
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.learning.get_engine_status.return_value = {"engine": "a"}
         zone_a.config = {"temp_unit": "fahrenheit"}
         zone_b.learning.get_engine_status.return_value = {"engine": "b"}
@@ -85,7 +92,7 @@ class TestEntryIdResolutionAcrossZones:
 
     def test_engines_view_resolves_the_other_named_zone(self):
         """Same setup, opposite entry_id — proves it's not incidentally always picking one."""
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.learning.get_engine_status.return_value = {"engine": "a"}
         zone_a.config = {"temp_unit": "fahrenheit"}
         zone_b.learning.get_engine_status.return_value = {"engine": "b"}
@@ -99,7 +106,7 @@ class TestEntryIdResolutionAcrossZones:
         assert resp.json_data["engine"] == "a"
 
     def test_automation_state_view_resolves_named_zone(self):
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.get_debug_state.return_value = {"zone": "a"}
         zone_b.get_debug_state.return_value = {"zone": "b"}
 
@@ -115,7 +122,7 @@ class TestEntryIdResolutionAcrossZones:
     def test_force_reclassify_view_acts_only_on_named_zone(self):
         from unittest.mock import AsyncMock
 
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.async_request_refresh = AsyncMock()
         zone_b.async_request_refresh = AsyncMock()
 
@@ -129,7 +136,7 @@ class TestEntryIdResolutionAcrossZones:
         zone_b.async_request_refresh.assert_not_called()
 
     def test_toggle_automation_view_acts_only_on_named_zone(self):
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.automation_enabled = False
         zone_b.automation_enabled = False
 
@@ -139,12 +146,12 @@ class TestEntryIdResolutionAcrossZones:
             entry_id="entry_b",
         )
 
-        zone_b.set_automation_enabled.assert_called_once_with(True)
-        zone_a.set_automation_enabled.assert_not_called()
+        zone_b.async_set_automation_enabled.assert_called_once_with(True)
+        zone_a.async_set_automation_enabled.assert_not_called()
 
     def test_unknown_entry_id_returns_not_loaded_error(self):
         """An entry_id that resolves to nothing must fail closed, not silently pick another zone."""
-        zone_a = MagicMock()
+        zone_a = _zone()
 
         resp = _get(
             ClimateAdvisorAutomationStateView,
@@ -160,7 +167,7 @@ class TestEntryIdAbsentBackwardCompat:
     """No entry_id sent (every pre-existing caller) — single-zone behavior unchanged."""
 
     def test_single_zone_no_entry_id_resolves_the_one_zone(self):
-        zone_a = MagicMock()
+        zone_a = _zone()
         zone_a.get_debug_state.return_value = {"only": "zone"}
 
         resp = _get(ClimateAdvisorAutomationStateView, {"entry_a": zone_a}, entry_id=None)
@@ -169,12 +176,12 @@ class TestEntryIdAbsentBackwardCompat:
         zone_a.get_debug_state.assert_called_once()
 
     def test_single_zone_no_entry_id_post_view_acts_on_the_one_zone(self):
-        zone_a = MagicMock()
+        zone_a = _zone()
         zone_a.automation_enabled = False
 
         _post(ClimateAdvisorToggleAutomationView, {"entry_a": zone_a}, entry_id=None)
 
-        zone_a.set_automation_enabled.assert_called_once_with(True)
+        zone_a.async_set_automation_enabled.assert_called_once_with(True)
 
     def test_zero_zones_no_entry_id_returns_not_loaded_error(self):
         resp = _get(ClimateAdvisorAutomationStateView, {}, entry_id=None)
@@ -216,7 +223,7 @@ class TestAmbiguousZonePostRefusal:
         return req
 
     def test_toggle_automation_view_refuses_when_ambiguous(self):
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.automation_enabled = False
         zone_b.automation_enabled = False
 
@@ -229,13 +236,13 @@ class TestAmbiguousZonePostRefusal:
         assert resp.json_data["zone_count"] == 2
         # The core safety property: no zone was actuated, not "the wrong one
         # was picked but at least it was logged."
-        zone_a.set_automation_enabled.assert_not_called()
-        zone_b.set_automation_enabled.assert_not_called()
+        zone_a.async_set_automation_enabled.assert_not_called()
+        zone_b.async_set_automation_enabled.assert_not_called()
 
     def test_force_reclassify_view_refuses_when_ambiguous(self):
         from unittest.mock import AsyncMock
 
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.async_request_refresh = AsyncMock()
         zone_b.async_request_refresh = AsyncMock()
 
@@ -250,7 +257,7 @@ class TestAmbiguousZonePostRefusal:
     def test_get_view_still_guesses_when_ambiguous_not_refused(self):
         """A GET (display-only) view keeps the pre-existing degrade-with-warning
         behavior — only POST/action views are made strict by this change."""
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.get_debug_state.return_value = {"zone": "a"}
         zone_b.get_debug_state.return_value = {"zone": "b"}
 
@@ -279,7 +286,7 @@ class TestZoneParam:
     def test_zone_param_resolves_named_zone_without_guessing(self):
         from unittest.mock import patch
 
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.get_debug_state.return_value = {"zone": "a"}
         zone_b.get_debug_state.return_value = {"zone": "b"}
         req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_b"})
@@ -291,33 +298,33 @@ class TestZoneParam:
         mock_create.assert_not_called()
 
     def test_zone_param_post_acts_only_on_named_zone(self):
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         zone_a.automation_enabled = zone_b.automation_enabled = True
         req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_b"}, method="POST")
         resp = asyncio.run(ClimateAdvisorToggleAutomationView().post(req))
         assert resp.status == 200
-        zone_b.set_automation_enabled.assert_called_once()
-        zone_a.set_automation_enabled.assert_not_called()
+        zone_b.async_set_automation_enabled.assert_called_once()
+        zone_a.async_set_automation_enabled.assert_not_called()
 
     def test_same_zone_in_both_params_is_fine(self):
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_b", "entry_id": "entry_b"})
         resp = asyncio.run(ClimateAdvisorAutomationStateView().get(req))
         assert resp.status == 200
         zone_b.get_debug_state.assert_called_once()
 
     def test_conflicting_params_refused_and_nothing_actuated(self):
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_a", "entry_id": "entry_b"}, "POST")
         resp = asyncio.run(ClimateAdvisorToggleAutomationView().post(req))
         assert resp.status == 400
         assert resp.json_data["zone_selection_required"] is True
         assert "?zone=" in resp.json_data["message"]
-        zone_a.set_automation_enabled.assert_not_called()
-        zone_b.set_automation_enabled.assert_not_called()
+        zone_a.async_set_automation_enabled.assert_not_called()
+        zone_b.async_set_automation_enabled.assert_not_called()
 
     def test_conflicting_params_refused_on_get_too(self):
-        zone_a, zone_b = MagicMock(), MagicMock()
+        zone_a, zone_b = _zone(), _zone()
         req = self._request({"entry_a": zone_a, "entry_b": zone_b}, {"zone": "entry_a", "entry_id": "entry_b"})
         resp = asyncio.run(ClimateAdvisorAutomationStateView().get(req))
         assert resp.status == 400

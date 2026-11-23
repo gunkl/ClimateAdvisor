@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 습도\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "습한 공기가 들어오고 있어서 자정 이후 창문을 닫아 달라고 {count, plural, other {#번}} 요청했습니다.",
   "briefing.humidity.fan_held": "자정 이후 습한 시간대 {count, plural, other {#번}} 동안 송풍기를 끈 채로 두었습니다. 실외 공기가 너무 습했습니다.",
+  "briefing.humidity.overcooled": "자정 이후 공기를 건조하게 하려고 냉방을 {count, plural, other {#번}} 더 오래 돌렸습니다(습도 과냉방).",
   "briefing.humidity.reading": "{where, select, indoor {실내} other {실외}}: 이슬점 {dew_point}{has_rh, select, yes {(상대 습도 {rh}%)} other {}}.",
   "briefing.humidity.withheld": "지금은 실외 공기가 너무 습해 들이지 않습니다(이슬점 {dew_point}, {why, select, ceiling {상한 {limit} 이상} other {집 안 공기보다 습함}}). 그래서 창문 열기를 제안하지 않습니다.",
   "briefing.leaving.away_band": "현재 외출 중입니다. 외출 동안에는 더 넓은 에너지 절약 범위({band})를 유지하므로 작동이 거의 없습니다. 돌아오시면 쾌적한 온도로 복원합니다.",

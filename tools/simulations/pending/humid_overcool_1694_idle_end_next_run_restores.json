@@ -1,0 +1,183 @@
+{
+  "name": "humid_overcool_1694_idle_end_next_run_restores",
+  "description": "Cooling -> idle ends the run; the next cooling start (inside the coast window) restores 76 at once on a now-dry house",
+  "source": "synthetic",
+  "issue": 1694,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: without the next-run restore the next run would be driven by the stale 75 until 15:05.",
+    "(b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid overcool (Issue #1694)' states this rule; production applies it through humid_overcool.decide_overcool and AutomationEngine._command_adjustments (the one setpoint path).",
+    "(c) occupant: a new run on a dry house cools to the normal setting; a regression would overcool a run that does not need it."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Next run restores early",
+    "observed_behavior": "75, 76 at 14:45",
+    "expected_behavior": "75, 76 at 14:45"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 82,
+    "humid_overcool_enabled": true,
+    "sleep_time": "22:30",
+    "wake_time": "06:30"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64,
+      "note": "Muggy house: 77 F at 64 % RH, dew point 63.9 F (at or above the 60 F trigger)."
+    },
+    {
+      "time": "2026-07-12T14:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day: the cool band 68-76 F is armed (cool 76 F)."
+    },
+    {
+      "time": "2026-07-12T14:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:05:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "cooling"
+    },
+    {
+      "time": "2026-07-12T14:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:20:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "idle",
+      "note": "A thermostat without a blower overrun: cooling -> idle."
+    },
+    {
+      "time": "2026-07-12T14:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50,
+      "note": "The house is drier now (dew point 56.9 F); the lowered setpoint is still held through the coast."
+    },
+    {
+      "time": "2026-07-12T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50
+    },
+    {
+      "time": "2026-07-12T14:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50
+    },
+    {
+      "time": "2026-07-12T14:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50
+    },
+    {
+      "time": "2026-07-12T14:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50
+    },
+    {
+      "time": "2026-07-12T14:45:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "cooling",
+      "note": "The next cooling run starts inside the coast window."
+    },
+    {
+      "time": "2026-07-12T14:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50
+    },
+    {
+      "time": "2026-07-12T14:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50
+    },
+    {
+      "time": "2026-07-12T15:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50
+    },
+    {
+      "time": "2026-07-12T15:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50
+    },
+    {
+      "time": "2026-07-12T15:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 50
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T15:10:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-12T14:02:00",
+      "values": [
+        75.0,
+        76.0
+      ],
+      "reason": "Held after the idle end; restored at the next cooling start (14:45), not at the coast end (15:05)."
+    },
+    {
+      "at": "2026-07-12T14:44:00",
+      "expect": "commanded_setpoint_at",
+      "value": 75.0,
+      "reason": "Still held before the next run."
+    }
+  ]
+}

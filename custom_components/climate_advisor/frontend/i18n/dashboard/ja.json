@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "上昇傾向",
   "dashboard.chart.event.classification_change": "日の再分類",
   "dashboard.chart.event.hvac_action_change": "空調の動作が変化",
+  "dashboard.chart.event.setpoint_change": "設定温度の変更",
   "dashboard.chart.event.occupancy_change": "在宅状況の変化",
   "dashboard.chart.event.occupancy_setback": "外出時の温度に変更",
   "dashboard.chart.event.override": "手動変更",

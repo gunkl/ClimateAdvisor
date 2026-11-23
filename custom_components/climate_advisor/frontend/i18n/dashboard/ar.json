@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "ارتفاع الحرارة",
   "dashboard.chart.event.classification_change": "إعادة تصنيف اليوم",
   "dashboard.chart.event.hvac_action_change": "تغيّر حالة التكييف",
+  "dashboard.chart.event.setpoint_change": "تغيّر نقطة الضبط",
   "dashboard.chart.event.occupancy_change": "تغيّر الوجود",
   "dashboard.chart.event.occupancy_setback": "تطبيق درجة حرارة الغياب",
   "dashboard.chart.event.override": "تغيير يدوي",

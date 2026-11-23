@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "warming",
   "dashboard.chart.event.classification_change": "classification change",
   "dashboard.chart.event.hvac_action_change": "hvac action change",
+  "dashboard.chart.event.setpoint_change": "setpoint change",
   "dashboard.chart.event.occupancy_change": "occupancy change",
   "dashboard.chart.event.occupancy_setback": "occupancy setback",
   "dashboard.chart.event.override": "override",

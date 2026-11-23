@@ -132,8 +132,8 @@ class TestZoneGuardOnEveryView:
 
         assert response.status == 400
         assert response.json_data["zone_selection_required"] is True
-        coord_a.set_automation_enabled.assert_not_called()
-        coord_b.set_automation_enabled.assert_not_called()
+        coord_a.async_set_automation_enabled.assert_not_called()
+        coord_b.async_set_automation_enabled.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

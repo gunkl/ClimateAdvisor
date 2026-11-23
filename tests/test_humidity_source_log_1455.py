@@ -399,7 +399,9 @@ def test_change_tracking_is_only_reached_from_the_event_loop():
 
 def test_temperature_and_humidity_share_one_announcement_helper():
     fns = _class_functions()
-    assert _callers(fns, "_announce_source") == {"_note_indoor_source", "_note_humidity_source"}
-    assert _callers(fns, "_source_changed") == {"_note_indoor_source", "_note_humidity_source"}
+    # Issue #1709: the outdoor dew-point source (weather fallback) is announced through the same helper.
+    announcers = {"_note_indoor_source", "_note_humidity_source", "_note_outdoor_dew_point_source"}
+    assert _callers(fns, "_announce_source") == announcers
+    assert _callers(fns, "_source_changed") == announcers
     src = (PKG / "coordinator.py").read_text(encoding="utf-8")
     assert src.count('_LOGGER.info(\'Zone "%s": %s now from') == 1  # one writer of the switch line

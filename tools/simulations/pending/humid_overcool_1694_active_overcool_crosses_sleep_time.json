@@ -1,0 +1,171 @@
+{
+  "name": "humid_overcool_1694_active_overcool_crosses_sleep_time",
+  "description": "An overcool active at 22:30 (sleep_time): the sleep-window veto zeroes it and the bedtime band is written plain, with no overcool after",
+  "source": "synthetic",
+  "issue": 1694,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: an overcool that ignored the sleep window would write 71 (72 - 1) at bedtime or keep stepping.",
+    "(b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid overcool (Issue #1694)' states this rule; production applies it through humid_overcool.decide_overcool and AutomationEngine._command_adjustments (the one setpoint path).",
+    "(c) occupant: the sleeper gets the bedtime setting, never an extra degree on top of it; a regression would chill the bedroom."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Crosses sleep time",
+    "observed_behavior": "75, 72",
+    "expected_behavior": "75, 72"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 82,
+    "humid_overcool_enabled": true,
+    "sleep_time": "22:30",
+    "wake_time": "06:30"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T21:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64,
+      "note": "Muggy house: 77 F at 64 % RH, dew point 63.9 F (at or above the 60 F trigger)."
+    },
+    {
+      "time": "2026-07-12T21:51:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot evening, cool band 68-76 F."
+    },
+    {
+      "time": "2026-07-12T21:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:00:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "cooling"
+    },
+    {
+      "time": "2026-07-12T22:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T22:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T23:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T23:00:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-12T21:52:00",
+      "values": [
+        75.0,
+        72.0
+      ],
+      "reason": "75 from 22:00; at 22:30 the bedtime band (sleep cool 72) lands with no overcool term, and nothing is lowered in the sleep window."
+    },
+    {
+      "at": "2026-07-12T22:30:00",
+      "expect": "event_emitted",
+      "event": "overcool_ended",
+      "payload_subset": {
+        "reason": "gate:sleep_window"
+      },
+      "reason": "D5: off in the sleep window."
+    }
+  ]
+}

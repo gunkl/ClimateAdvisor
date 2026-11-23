@@ -47,7 +47,14 @@ async def test_accept_changes_no_setting_and_removed_keys_are_rejected(
         config_before = {k: house.coordinator.config.get(k) for k in _ZONE}
 
         # The service: every remaining suggestion is an acknowledgement.
-        for key in ("short_departures", "frequent_overrides", "low_window_compliance", "high_runtime_mild_days"):
+        # Issue #1695: "Turn on Humid Overcool" is an acknowledgement too: the option stays off (checked below).
+        for key in (
+            "short_departures",
+            "frequent_overrides",
+            "low_window_compliance",
+            "high_runtime_mild_days",
+            "humid_overcool",
+        ):
             await hass.services.async_call(
                 CA_DOMAIN,
                 "respond_to_suggestion",
@@ -85,10 +92,12 @@ async def test_accept_changes_no_setting_and_removed_keys_are_rejected(
 
         assert dict(house.ca_entry.data) == entry_before
         assert {k: house.coordinator.config.get(k) for k in _ZONE} == config_before
+        assert not house.coordinator.config.get("humid_overcool_enabled", False)  # #1695: never turned on
 
         await house.restart()
         assert dict(house.ca_entry.data) == entry_before
         assert {k: house.coordinator.config.get(k) for k in _ZONE} == config_before
+        assert not house.coordinator.config.get("humid_overcool_enabled", False)
 
         # The person's own 10-minute delay still decides: a 12-minute opening pauses the heat (owner rule 3).
         ae = house.coordinator.automation_engine

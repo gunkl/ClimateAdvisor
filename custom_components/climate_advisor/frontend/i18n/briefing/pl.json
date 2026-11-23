@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 Wilgotność\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "Od północy {count, plural, one {raz} few {# razy} many {# razy} other {# razy}} prosiłem o zamknięcie okien, bo wpadało wilgotne powietrze.",
   "briefing.humidity.fan_held": "Od północy wentylator pozostał wyłączony podczas {count, plural, one {jednego wilgotnego okresu} few {# wilgotnych okresów} many {# wilgotnych okresów} other {# wilgotnego okresu}}: powietrze na zewnątrz było zbyt wilgotne, by je wpuścić.",
+  "briefing.humidity.overcooled": "Od północy {count, plural, one {raz} other {# razy}} pozwoliłem klimatyzacji pracować dłużej, aby osuszyć powietrze (dochładzanie przy wilgoci).",
   "briefing.humidity.reading": "{where, select, indoor {W domu} other {Na zewnątrz}}: punkt rosy {dew_point}{has_rh, select, yes { (wilgotność względna {rh}%)} other {}}.",
   "briefing.humidity.withheld": "Powietrze na zewnątrz jest teraz zbyt wilgotne, by je wpuszczać (punkt rosy {dew_point}, {why, select, ceiling {na limicie {limit} lub powyżej} other {wilgotniejsze niż powietrze w domu}}), więc nie proponuję otwierania okien.",
   "briefing.leaving.away_band": "Obecnie nikogo nie ma w domu. Na czas nieobecności utrzymuję szerszy zakres oszczędzania energii ({band}), więc urządzenia będą pracować niewiele. Komfort wróci po Twoim powrocie.",

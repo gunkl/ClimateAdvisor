@@ -1,0 +1,248 @@
+{
+  "name": "humid_overcool_1694_automation_off_restores_plain_target",
+  "description": "Automation switched off during a 2 F overcool: one write puts 76 back before observe-only, and nothing is sent afterwards",
+  "source": "synthetic",
+  "issue": 1694,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: without the release the thermostat stayed at 74 for as long as automation was off (observe-only sends nothing).",
+    "(b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid overcool (Issue #1694)' states this rule; production applies it through humid_overcool.decide_overcool and AutomationEngine._command_adjustments (the one setpoint path).",
+    "(c) occupant: turning automation off never leaves the house 1-2 F colder than the occupant's setting; a regression would strand it for hours or days."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Automation off restores",
+    "observed_behavior": "75, 74, 76",
+    "expected_behavior": "75, 74, 76"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 82,
+    "humid_overcool_enabled": true,
+    "sleep_time": "22:30",
+    "wake_time": "06:30"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64,
+      "note": "Muggy house: 77 F at 64 % RH, dew point 63.9 F (at or above the 60 F trigger)."
+    },
+    {
+      "time": "2026-07-12T14:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day: the cool band 68-76 F is armed (cool 76 F)."
+    },
+    {
+      "time": "2026-07-12T14:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:05:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "cooling"
+    },
+    {
+      "time": "2026-07-12T14:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:40:00",
+      "type": "automation_toggle",
+      "enabled": false,
+      "note": "The occupant switches Climate Advisor to observe-only while the thermostat is at 74."
+    },
+    {
+      "time": "2026-07-12T14:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T15:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T16:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T16:00:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-12T14:02:00",
+      "values": [
+        75.0,
+        74.0,
+        76.0
+      ],
+      "reason": "75, 74 (step), then 76 at the switch-off; observe-only sends nothing after it."
+    },
+    {
+      "at": "2026-07-12T14:40:00",
+      "expect": "event_emitted",
+      "event": "overcool_ended",
+      "payload_subset": {
+        "reason": "gate:automation_off"
+      },
+      "reason": "The overcool ends with automation."
+    }
+  ]
+}

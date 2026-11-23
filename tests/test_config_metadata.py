@@ -61,6 +61,7 @@ EXPECTED_KEYS = {
     "nat_vent_soft_start_enabled",
     "humid_air_guard_enabled",  # Issue #1691
     "humid_air_guard_ceiling_f",
+    "humid_overcool_enabled",  # Issue #1694
     "wake_time",
     "sleep_time",
     "sleep_heat",

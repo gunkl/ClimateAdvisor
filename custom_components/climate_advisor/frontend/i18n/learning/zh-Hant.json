@@ -5,6 +5,7 @@
   "learning.suggestion.frequent_overrides": "過去兩週，您手動調整了溫控器 {count, plural, other {# 次}}（{detail}）。如果舒適設定溫度不合適，請在設定中修改，Climate Advisor 會維持新的溫度。",
   "learning.suggestion.frequent_overrides_no_detail": "過去兩週，您手動調整了溫控器 {count, plural, other {# 次}}。這可能表示舒適設定溫度不符合您的喜好。您可以在設定中修改。",
   "learning.suggestion.high_runtime_mild_days": "在溫和與溫暖的日子，空調系統平均運轉了 {minutes, plural, other {# 分鐘}}，比預期還長。可能有未裝感測器的門窗開著，或舒適溫度範圍比房屋所需的更窄。加裝門窗感測器，或在設定中放寬舒適溫度範圍，可能會有幫助。",
+  "learning.suggestion.humid_overcool": "過去兩週，在室內空氣潮濕（露點 {dew_point} 或更高）時，空調運轉了約 {hours, plural, other {# 小時}}。除濕額外冷房（預設關閉）開啟後，會在這樣悶熱的日子讓空調多運轉一會兒：把溫控器設到比您的冷房溫度最多低 {lowering}，仍在舒適溫度範圍內，以除去空氣中更多的水氣。如果覺得家裡悶濕，可以在設定中開啟。除非您開啟，否則不會有任何改變。",
   "learning.suggestion.low_window_compliance": "過去建議開窗的 {days, plural, other {# 天}}中，實際開窗的時間只有 {compliance, number, ::percent}。開窗是可選的：窗戶關著時，Climate Advisor 會用空調系統維持舒適，只是會稍微多耗一點電。",
   "learning.suggestion.short_departures": "您經常外出 30–45 分鐘，節能溫度幾乎還來不及生效，您就回來了。如果回家時覺得室內太冷或太熱，請在設定中把離家溫度設得溫和一些。",
   "learning.suggestion.thermal_model_ready": "我已收集到足夠的升降溫觀測資料，可以估算您住家的隔熱性能與空調系統的效能。預熱時機與就寢節能調溫會依住家的實際表現自動調整，您不需要做任何事。"

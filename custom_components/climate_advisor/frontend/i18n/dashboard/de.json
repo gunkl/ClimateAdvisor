@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "Erwärmung",
   "dashboard.chart.event.classification_change": "Tag neu eingestuft",
   "dashboard.chart.event.hvac_action_change": "Heiz-/Kühlzustand geändert",
+  "dashboard.chart.event.setpoint_change": "Sollwert geändert",
   "dashboard.chart.event.occupancy_change": "Anwesenheit geändert",
   "dashboard.chart.event.occupancy_setback": "Abwesenheitstemperatur gesetzt",
   "dashboard.chart.event.override": "manuelle Änderung",

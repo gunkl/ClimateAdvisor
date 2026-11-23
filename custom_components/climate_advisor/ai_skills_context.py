@@ -697,7 +697,8 @@ def _moisture_lines(coordinator: Any) -> list[str]:
         f"  outdoor_dew_point:   {_reading(shown.get('outdoor') or {})}",
         f"  humid_air_guard:     {guard_text}",
         f"  humid_decisions_today: close-window notices={int(counts.get('close_notices', 0))}"
-        f" fan starts held={int(counts.get('fan_starts_held', 0))}",
+        f" fan starts held={int(counts.get('fan_starts_held', 0))}"
+        f" overcooled runs={int(counts.get('overcool_runs', 0))}",
     ]
 
 
@@ -830,9 +831,18 @@ async def build_hvac_entity_context(hass: Any, coordinator: Any, **kwargs: Any) 
         _ro_view = remote_offset_view_for(
             getattr(coordinator, "automation_engine", None), (coordinator.config or {}).get("temp_unit", "fahrenheit")
         )
-        if _ro_view is not None:
+        if _ro_view is not None and _ro_view.get("state") != "overcool":
             lines.append("  remote_sensor_offset:")
             lines.extend(remote_offset_lines(_ro_view))
+        _oc_view = _ro_view.get("overcool") if isinstance(_ro_view, dict) else None
+        if isinstance(_oc_view, dict):
+            # Issue #1694: humid overcool, its own line (review W3A-B B7), never under the remote-sensor heading.
+            lines.append(
+                f"  humid_overcool: phase={_oc_view.get('phase')!r} lowering={_oc_view.get('lowering')!r}"
+                f" commanded={_oc_view.get('commanded')!r} comfort_target={_oc_view.get('comfort_target')!r}"
+                f" indoor_dew_point={_oc_view.get('indoor_dew_point')!r} warning={_oc_view.get('warning')!r}"
+                f" text={_oc_view.get('text')!r}"
+            )
         lines.append("")
         return "\n".join(lines)
     except Exception:
@@ -3661,6 +3671,51 @@ def _render_nat_vent_humid_skip(p: dict, unit: str) -> tuple[Cell, Cell]:
 
 
 @_msg_renderer
+def _render_overcool_started(p: dict, unit: str) -> tuple[Cell, Cell]:
+    """Issue #1694 (#1507 H3): humid overcool lowered the commanded cool setpoint for this AC run."""
+    label = _m("overcool_started_plain")
+    with contextlib.suppress(TypeError, ValueError):
+        lowering = _tdp(float(p.get("lowering_f") or 1.0), unit, 1)
+        if p.get("target") is not None and p.get("indoor_dew_point") is not None:
+            label = _m(
+                "overcool_started",
+                lowering=lowering,
+                target=_tp(float(p["target"]), unit, 1),
+                dew_point=_tp(float(p["indoor_dew_point"]), unit, 1),
+            )
+        else:
+            label = _m("overcool_started_lowering", lowering=lowering)
+    return label, ""
+
+
+_OVERCOOL_END_REASONS = ("dried", "cap", "run_ended")
+# Review FINAL-B F5: the release that switching automation off makes (``release_command_adjustments``) says so.
+_OVERCOOL_END_REASON_ALIASES = {"gate:automation_off": "automation_off"}
+
+
+@_msg_renderer
+def _render_overcool_ended(p: dict, unit: str) -> tuple[Cell, Cell]:
+    """Issue #1694 (#1507 H3): humid overcool released (air dried, 60-minute cap, run ended, automation switched off,
+    or another owner)."""
+    reason = str(p.get("reason") or "")
+    code = reason if reason in _OVERCOOL_END_REASONS else _OVERCOOL_END_REASON_ALIASES.get(reason, "other")
+    minutes = p.get("minutes")
+    try:
+        minutes_txt = f"{float(minutes):.0f}" if minutes is not None else None
+    except TypeError, ValueError:
+        minutes_txt = None
+    return (
+        _m(
+            "overcool_ended",
+            reason=code,
+            has_minutes=_yn(minutes_txt is not None),
+            minutes=minutes_txt or "",
+        ),
+        "",
+    )
+
+
+@_msg_renderer
 def _render_nat_vent_floor_imminent_skip(p: dict, unit: str) -> tuple[Cell, Cell]:
     ttf = p.get("time_to_floor_hr")
     label = _m("nat_vent_skip_floor_imminent")
@@ -4228,6 +4283,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_forecast_skip": _render_nat_vent_forecast_skip,
     "nat_vent_floor_imminent_skip": _render_nat_vent_floor_imminent_skip,
     "nat_vent_humid_skip": _render_nat_vent_humid_skip,
+    "overcool_started": _render_overcool_started,
+    "overcool_ended": _render_overcool_ended,
     "bedtime_setback_skipped": _render_bedtime_setback_skipped,
     "morning_wakeup_skipped": _render_morning_wakeup_skipped,
     "pre_cool_suppressed_nat_vent": _render_pre_cool_suppressed_nat_vent,

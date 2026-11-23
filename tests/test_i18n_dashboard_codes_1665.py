@@ -156,7 +156,7 @@ def test_non_english_words_are_translated():
             )
         )
     ]
-    assert len(keys) == 36
+    assert len(keys) == 37  # + setpoint_change chart event (Issue #1694)
     for key in keys:
         same = [lang for lang in LANGS[1:] if _cat("dashboard", lang)[key] == en[key]]
         assert len(same) <= 4, (key, same)

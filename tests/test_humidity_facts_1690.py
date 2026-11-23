@@ -676,11 +676,11 @@ _EMIT_PATTERNS = (
 )
 
 
-def _emitted_reserved(sources: dict[str, str]) -> set[str]:
+def _emitted_reserved(sources: dict[str, str], names: tuple[str, ...] = RESERVED_EVENT_TYPES) -> set[str]:
     import re
 
     found: set[str] = set()
-    for name in RESERVED_EVENT_TYPES:
+    for name in names:
         for pattern in _EMIT_PATTERNS:
             regex = re.compile(pattern.format(name=re.escape(name)))
             if any(regex.search(text) for text in sources.values()):
@@ -704,9 +704,10 @@ def test_a_reserved_event_must_be_mapped_when_production_first_emits_it():
         f"{stale} are emitted by production but still registered as reserved/unmapped: move each to a mapping in "
         "tools/sim_harness/outcomes.py or re-justify it under rule 8, and drop it from RESERVED_EVENT_TYPES"
     )
-    # the scanner itself sees every emit shape (so the guard cannot pass vacuously)
-    # #1691 / #1692 took nat_vent_humid_skip / humid_windows_close_notice off the list: each shape is probed on its own
-    # with a name still reserved, so a shape the scanner misses fails here.
-    assert _emitted_reserved({"a.py": 'self._emit_event("overcool_started", {})'}) == {"overcool_started"}
-    assert _emitted_reserved({"b.py": 'self._exit_nat_vent(event_type="overcool_ended")'}) == {"overcool_ended"}
-    assert _emitted_reserved({"c.py": 'events.append({"type": "overcool_ended"})'}) == {"overcool_ended"}
+    # the scanner itself sees every emit shape (so the guard cannot pass vacuously). #1691, #1692 and #1694 took every
+    # reserved name off the list, so each shape is probed with an explicit name.
+    probe = ("overcool_started", "overcool_ended")
+    assert _emitted_reserved({"a.py": 'self._emit_event("overcool_started", {})'}, probe) == {"overcool_started"}
+    assert _emitted_reserved({"b.py": 'self._exit_nat_vent(event_type="overcool_ended")'}, probe) == {"overcool_ended"}
+    assert _emitted_reserved({"c.py": 'events.append({"type": "overcool_ended"})'}, probe) == {"overcool_ended"}
+    assert _emitted_reserved({"a.py": 'self._emit_event("overcool_started", {})'}) == set()  # no longer reserved

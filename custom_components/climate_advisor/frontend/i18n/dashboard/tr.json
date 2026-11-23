@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "ısınma",
   "dashboard.chart.event.classification_change": "gün yeniden sınıflandırıldı",
   "dashboard.chart.event.hvac_action_change": "iklimlendirme durumu değişti",
+  "dashboard.chart.event.setpoint_change": "ayar noktası değişti",
   "dashboard.chart.event.occupancy_change": "evde olma durumu değişti",
   "dashboard.chart.event.occupancy_setback": "evde yokken sıcaklığı uygulandı",
   "dashboard.chart.event.override": "manuel değişiklik",

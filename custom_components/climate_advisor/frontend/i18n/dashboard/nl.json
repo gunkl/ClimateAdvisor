@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "opwarming",
   "dashboard.chart.event.classification_change": "dag opnieuw ingedeeld",
   "dashboard.chart.event.hvac_action_change": "HVAC-status gewijzigd",
+  "dashboard.chart.event.setpoint_change": "setpunt gewijzigd",
   "dashboard.chart.event.occupancy_change": "aanwezigheid gewijzigd",
   "dashboard.chart.event.occupancy_setback": "afwezigheidstemperatuur ingesteld",
   "dashboard.chart.event.override": "handmatige wijziging",

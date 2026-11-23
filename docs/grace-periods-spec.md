@@ -1317,7 +1317,9 @@ extra thermostat write and Activity line for a write that had worked. The fan-on
 `AutomationEngine._arm_post_fan_setpoint_verify(slot)` (slots `_fan_on_verify_cancel` / `_fan_off_verify_cancel`, decision
 `decide_setpoint_verify`), and on REASSERT they ask the same `_setpoint_echo_wait_s` as the 10 s verify. That helper reads
 the last write's sent value and pre-write reading (`_pending_setpoint_sent`, `_pending_setpoint_before_f`, stored next to
-`_pending_setpoint_single` by `_set_temperature_impl`). While the write is unanswered the verify logs "not answered yet"
+`_pending_setpoint_single` by `_set_temperature_impl`; that is the COMMANDED value, the comfort target plus every
+signed command adjustment, the bedroom offset and, since Issue #1694, the humid-overcool lowering, so the echo of an
+overcool step is CA's own write and never an occupant change). While the write is unanswered the verify logs "not answered yet"
 and re-arms in its own slot for the end of the window; that re-check re-runs the whole decision, so a newer write makes it
 stale and an occupant's change (confirmed or pending, `_manual_change_protected()`) is never overwritten. A thermostat that
 never answers is repaired once, at the window end. A comfort-program revert to a DIFFERENT value, or any revert after the

@@ -93,16 +93,88 @@ class TestDeactivateFanIsTheHook:
         engine._end_economizer_session_for_stopped_fan.assert_not_called()
         assert engine._economizer_active is False
 
-    def test_min_runtime_cycle_off_ends_the_session(self):
-        # A representative caller that never knew about the economizer: the min-runtime cycle's off phase.
+    def test_bedtime_runs_the_economizer_teardown(self):
+        """Bedtime with window cooling running: the economizer's own teardown runs (fan stop, comfort restore, log),
+        not just the hook's bookkeeping -- stopping the fan first used to end the session and skip it."""
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
+        engine._fan_active = True
+        engine._deactivate_economizer = AsyncMock(wraps=engine._deactivate_economizer)
+
+        asyncio.run(engine.handle_bedtime())
+
+        engine._deactivate_economizer.assert_awaited_once()
+        assert engine._economizer_active is False
+        assert engine._fan_active is False
+        assert [c[0][2]["fan_mode"] for c in _fan_mode_calls(engine)][:1] == ["auto"]
+
+    def test_wakeup_runs_the_economizer_teardown(self):
+        """Mirror of the bedtime fix: wake-up with window cooling running ends it through its own teardown (fan
+        stop, comfort restore, "Economizer deactivated"), not only through the fan-stop hook's bookkeeping."""
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
+        engine._fan_active = True
+        engine._deactivate_economizer = AsyncMock(wraps=engine._deactivate_economizer)
+
+        asyncio.run(engine.handle_morning_wakeup())
+
+        engine._deactivate_economizer.assert_awaited_once()
+        assert engine._economizer_active is False
+        assert engine._fan_active is False
+        assert [c[0][2]["fan_mode"] for c in _fan_mode_calls(engine)][:1] == ["auto"]
+
+    def test_wakeup_without_window_cooling_only_stops_the_fan(self):
+        """Control: no economizer session, so no economizer teardown; the overnight fan is stopped as before."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._current_classification = _make_hot_classification()
+        _thermostat(engine)
+        engine._fan_active = True
+        engine._deactivate_economizer = AsyncMock()
+
+        asyncio.run(engine.handle_morning_wakeup())
+
+        engine._deactivate_economizer.assert_not_awaited()
+        assert engine._fan_active is False
+
+
+class TestMinRuntimeCycleOffLeavesATakenOverFan:
+    """Mirror: a min-runtime cycle's off phase must not stop a blower window cooling or nat-vent took over."""
+
+    def test_economizer_took_the_fan_cycle_off_leaves_it_running(self):
         engine = _engine_in_cool_down(FAN_MODE_HVAC)
         engine._fan_active = True
         engine._fan_min_runtime_active = True
 
         asyncio.run(engine._fan_cycle_off())
 
+        assert _fan_mode_calls(engine) == []
+        assert engine._fan_active is True
+        assert engine._fan_min_runtime_active is False
+        assert engine.economizer_lifecycle_state is EconomizerLifecycleState.COOL_DOWN
+
+    def test_nat_vent_took_the_fan_cycle_off_leaves_it_running(self):
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        _thermostat(engine)
+        engine._fan_active = True
+        engine._fan_min_runtime_active = True
+        engine._natural_vent_active = True
+
+        asyncio.run(engine._fan_cycle_off())
+
+        assert _fan_mode_calls(engine) == []
+        assert engine._fan_active is True
+        assert engine._natural_vent_active is True
+
+    def test_nothing_took_it_cycle_off_stops_the_fan(self):
+        """Control: the cycle's own run is stopped at its end, as before."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        _thermostat(engine)
+        engine._fan_active = True
+        engine._fan_min_runtime_active = True
+
+        asyncio.run(engine._fan_cycle_off())
+
+        assert [c[0][2]["fan_mode"] for c in _fan_mode_calls(engine)] == ["auto"]
         assert engine._fan_active is False
-        assert engine._economizer_active is False
+        assert engine._fan_min_runtime_active is False
 
 
 class TestReconcileStopEndsTheEconomizerSession:
@@ -203,6 +275,23 @@ class TestOtherFanOffRecordsEndTheSession:
             reason="drift", trigger_label="physical_drift_correction", preserve_nat_vent_session=True
         )
 
+        assert engine._economizer_active is False
+
+    def test_rf_timer_settle_clear_ends_the_session(self):
+        """A fan-off inside the RF-timer boundary settle window with no nat-vent session clears the flags directly
+        (on_fan_turned_off's settle branch); the economizer session must end with them."""
+        from datetime import timedelta  # noqa: PLC0415
+
+        from homeassistant.util import dt as dt_util  # noqa: PLC0415
+
+        engine = _engine_in_cool_down(FAN_MODE_WHOLE_HOUSE)
+        engine._fan_active = True
+        engine._timer_boundary_settle_until = dt_util.now() + timedelta(seconds=60)
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._timer_boundary_settle_until is None  # the settle branch ran (consumed one-shot)
+        assert engine._fan_active is False
         assert engine._economizer_active is False
 
     def test_ownership_self_heal_ends_the_session(self):

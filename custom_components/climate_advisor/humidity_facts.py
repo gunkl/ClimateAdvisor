@@ -31,7 +31,10 @@ Reasons a dew point is unknown (``DewPoint.reason``). Seven from the indoor/outd
 ``implausible`` (temperature outside the plausible range, or no dew point for the pair) and ``stale``; plus four of
 its own: ``wrong_unit`` (a humidity sensor whose unit is not %), ``no_temperature`` (no temperature on the
 humidity's device), ``recalibrating`` (the paired temperature is the thermostat's while it reads falsely high after a
-heating shutdown, Issue #1676) and ``glitch`` (``paired_glitch``, or 0 % RH).
+heating shutdown, Issue #1676) and ``glitch`` (``paired_glitch``, or 0 % RH). Outdoor only (Issue #1709): a humidity
+sensor whose same-device temperature is missing, unreadable or stale does not make the dew point unknown; the weather
+entity answers instead (``DewPoint.fallback_from`` / ``fallback_reason`` say so), exactly as when no outdoor humidity
+sensor is configured.
 """
 
 from __future__ import annotations
@@ -40,19 +43,23 @@ import math
 import statistics
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
 from .const import (
     CONF_HUMID_AIR_GUARD_CEILING_F,
     CONF_HUMID_AIR_GUARD_ENABLED,
+    CONF_HUMID_OVERCOOL_ENABLED,
     DEFAULT_HUMID_AIR_GUARD_CEILING_F,
     DEFAULT_HUMID_AIR_GUARD_ENABLED,
+    DEFAULT_HUMID_OVERCOOL_ENABLED,
     MAX_HUMID_AIR_GUARD_CEILING_F,
     MAX_PLAUSIBLE_OUTDOOR_F,
     MIN_HUMID_AIR_GUARD_CEILING_F,
     MIN_PLAUSIBLE_OUTDOOR_F,
+    OVERCOOL_RELEASE_DP_F,
+    OVERCOOL_TRIGGER_DP_F,
     SENSOR_RECONNECT_SETTLE_S,
     is_availability_recovery,
     is_unavailable_state,
@@ -79,13 +86,11 @@ REASON_GLITCH = "glitch"
 REASON_STALE = "stale"
 
 # Event types reserved for the later #1507 lanes (registered unmapped in tools/sim_harness/outcomes.py now, so the
-# lanes cannot collide on names). Nothing emits them yet. ``nat_vent_humid_skip`` left this list when Issue #1691
-# started emitting it (mapped in outcomes.py); ``humid_windows_close_notice`` when Issue #1692 did (re-justified
-# unmapped in outcomes.py).
-RESERVED_EVENT_TYPES: tuple[str, ...] = (
-    "overcool_started",  # H3: humid overcool lowered the commanded cool setpoint
-    "overcool_ended",  # H3: humid overcool released (dew point dropped, run ended, 60-minute cap, gate closed)
-)
+# lanes cannot collide on names). ``nat_vent_humid_skip`` left this list when Issue #1691 started emitting it
+# (mapped in outcomes.py); ``humid_windows_close_notice`` when Issue #1692 did (re-justified unmapped in outcomes.py);
+# ``overcool_started`` / ``overcool_ended`` when Issue #1694 did (re-justified unmapped in outcomes.py, rule 8). Every
+# reserved name is now emitted; the tuple stays so a later lane can reserve a name the same way.
+RESERVED_EVENT_TYPES: tuple[str, ...] = ()
 
 
 def paired_glitch(temp_f: float | None, rh: float | None, *, first_after_unavailable: bool = False) -> bool:
@@ -165,6 +170,9 @@ class DewPoint:
     humidity_source: str | None = None
     temp_source: str | None = None
     reason: str | None = None
+    # Issue #1709: the outdoor humidity sensor this reading fell back from (its temperature was not usable), and why.
+    fallback_from: str | None = None
+    fallback_reason: str | None = None
 
     @property
     def known(self) -> bool:
@@ -227,6 +235,9 @@ def read_dew_point(
     are the entities reading falsely while the thermostat recalibrates (its own and its device's): pairing with one
     is ``recalibrating``. Staleness uses ``temperature.is_sensor_stale`` on both the humidity and the temperature,
     with the shared exemption (``configured_sources``: entity -> the source the occupant configured for it).
+    Outdoor role only (Issue #1709): a humidity sensor without a usable same-device temperature (none, unreadable or
+    stale) falls back to ``fallback_entity`` (the weather entity) through this same reader, so the weather values get
+    every check they get when no outdoor humidity sensor is configured; unknown only when the weather is unusable too.
     """
     try:
         rh, source, via = resolve_humidity_paired(
@@ -274,18 +285,46 @@ def read_dew_point(
             unit_attr = (getattr(h_state, "attributes", None) or {}).get("unit_of_measurement")
             if unit_attr != "%":
                 return _unknown("wrong_unit", rh=rh, source=source)
+
+            def _no_usable_temperature(missing: DewPoint) -> DewPoint:
+                """Issue #1709: an OUTDOOR humidity sensor without a usable same-device temperature falls back to
+                the weather entity's own dew point (else its own temperature + humidity): the very path used when no
+                outdoor humidity sensor is configured, with its checks. Indoor stays strict (same device only)."""
+                if not outdoor or not fallback_entity:
+                    return missing
+                weather = read_dew_point(
+                    hass,
+                    role,
+                    chosen=None,
+                    source_entities=(),
+                    fallback_entity=fallback_entity,
+                    discover=discover,
+                    discover_temp=discover_temp,
+                    unit=unit,
+                    stale_hours=stale_hours,
+                    now=now,
+                    reconnect=reconnect,
+                    configured_sources=configured_sources,
+                )
+                if not weather.known and weather.reason != REASON_GLITCH:
+                    return missing
+                return replace(weather, fallback_from=source, fallback_reason=missing.reason)
+
             candidates: tuple[str, ...] = (via,) if via else tuple(discover_temp(source))
             if not candidates:
-                return _unknown("no_temperature", rh=rh, source=source)
+                return _no_usable_temperature(_unknown("no_temperature", rh=rh, source=source))
             temp_entity = candidates[0]
             temp_f, t_reason, temp_state = _read_temp(hass, temp_entity, unit)
             temp_source = temp_entity
             if t_reason is not None or temp_f is None:
-                return _unknown(t_reason or "no_temperature", rh=rh, source=source, temp=temp_source)
+                return _no_usable_temperature(
+                    _unknown(t_reason or "no_temperature", rh=rh, source=source, temp=temp_source)
+                )
             if _stale(h_state, stale_hours, now, h_entity, configured_sources):
                 return _unknown(REASON_STALE, rh=rh, source=source, temp=temp_source)
-        if _stale(temp_state, stale_hours, now, temp_entity, configured_sources):
-            return _unknown(REASON_STALE, rh=rh, source=source, temp=temp_source)
+            if _stale(temp_state, stale_hours, now, temp_entity, configured_sources):
+                return _no_usable_temperature(_unknown(REASON_STALE, rh=rh, source=source, temp=temp_source))
+        # (An attribute source's temperature is on the state already checked for staleness above.)
         if temp_entity in set(false_entities):
             return _unknown("recalibrating", rh=rh, source=source, temp=temp_source)
         first_after = reconnect is not None and (
@@ -444,9 +483,15 @@ HVAC_FAN_RESTRICT_LATCH_SPEC = LatchSpec(
     HVAC_FAN_RESTRICT_HUMID_LATCH, SIGNAL_INDOOR, HVAC_FAN_RESTRICT_DP_F, HVAC_FAN_RESTRICT_DP_RELEASE_F
 )
 
+# H3 humid overcool (Issue #1694, plan #1507 H3): the house is humid enough to overcool a cooling run. On at the
+# trigger (60 °F indoor dew point), off at or below the release (58 °F). Stepped on the coordinator's 5-minute tick like
+# every latch, whether or not the option is on (a latch is a fact; only the overcool decision reads the option).
+OVERCOOL_HUMID_LATCH = "overcool_humid"
+
 LATCH_SPECS: tuple[LatchSpec, ...] = (
     LatchSpec(HUMID_AIR_WETTER_LATCH, SIGNAL_OUTDOOR_WETTER_MARGIN, 0.0, -HUMID_AIR_HYSTERESIS_F),
     HVAC_FAN_RESTRICT_LATCH_SPEC,
+    LatchSpec(OVERCOOL_HUMID_LATCH, SIGNAL_INDOOR, OVERCOOL_TRIGGER_DP_F, OVERCOOL_RELEASE_DP_F),
 )
 
 
@@ -629,3 +674,29 @@ def hvac_fan_restrict_humid_from_facts(facts: Any) -> tuple[bool | None, float |
     it judged."""
     indoor, _outdoor, latched = _facts_dew_points(facts)
     return hvac_fan_restrict_humid(indoor, latched=latched), indoor
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# H3 humid overcool (Issue #1694, plan #1507 H3): the option and the one latch reader (shared with the #1695 advice).
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def humid_overcool_enabled(config: Mapping[str, Any] | None) -> bool:
+    """The Humid Overcool option (``humid_overcool_enabled``), the one reader with the one default (Off)."""
+    return bool((config or {}).get(CONF_HUMID_OVERCOOL_ENABLED, DEFAULT_HUMID_OVERCOOL_ENABLED))
+
+
+def overcool_humid_from_facts(facts: Any) -> tuple[bool, bool, float | None]:
+    """``(humid, at_trigger, indoor_dp_f)`` for humid overcool on an ``EngineFacts`` (through ``_facts_dew_points``).
+
+    ``humid`` is the ``OVERCOOL_HUMID_LATCH`` stepped with the decision's dew point from the tick's state (on at 60 °F,
+    off at or below 58 °F; unknown releases), ``at_trigger`` whether that dew point is at or above the trigger now
+    (the second step needs it). The one reader every overcool consumer uses (the decision, the #1695 advice)."""
+    indoor, _outdoor, latched = _facts_dew_points(facts)
+    state = update_latches(
+        (spec for spec in LATCH_SPECS if spec.name == OVERCOOL_HUMID_LATCH),
+        {SIGNAL_INDOOR: indoor},
+        {OVERCOOL_HUMID_LATCH: OVERCOOL_HUMID_LATCH in latched},
+    )
+    humid = bool(state.get(OVERCOOL_HUMID_LATCH, False))
+    return humid, indoor is not None and indoor >= OVERCOOL_TRIGGER_DP_F, indoor

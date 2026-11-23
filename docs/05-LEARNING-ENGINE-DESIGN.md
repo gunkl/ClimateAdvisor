@@ -10,7 +10,7 @@
 | How are k_passive and k_active extracted from observations? | `k_active` (heating or cooling per hour) is learned by the **pooled cycle model** (Issues #1512, #1516): every heating or cooling cycle is recorded with the room readings around it (`climate_advisor_cycles.json`), and all recent cycles of a mode are fitted together, so the rate, the leak and the coast after the equipment stops are separated instead of the room's drift after a run being mistaken for the rate. It starts from a prior (typical house, or the home's stored rate weighted by its evidence), counts a cycle only when the room moved at least three sensor steps, grades how sure it is (`none`/`low`/`medium`/`high`; a whole-degree sensor never reaches `high`), and lets old cycles give way only to newer ones (a cycle's weight halves for every 20 newer informative cycles, never with time alone). `k_passive` (the closed-house leak rate) is learned only from closed-house data (passive windows); the cycle model's own leak (`k_p_cycle`) is a diagnostic and never drives a decision. `k_solar` uses the same per-interval-subtraction pattern (`compute_k_solar`, Issue #587 Defect B). | [§Parameter Extraction](05-LEARNING-ENGINE-DESIGN.md#parameter-extraction) |
 | What does `get_thermal_model()` return and how is confidence graded? | Returns k_passive, k_active_heat, k_active_cool, k_vent_window, k_vent_fan, k_solar, plus confidence grades ("none"/"low"/"medium"/"high") graded independently for HVAC (the cycle fit's grade and the evidence behind the heat/cool rates: the pre-upgrade count, which gives way only as new cycles replace or contradict it, never with time alone, Issue #1512) and passive obs (vent/solar counts explicitly excluded from passive confidence, Issue #587). Physics activates when either > "none". | [§get_thermal_model() → dict](05-LEARNING-ENGINE-DESIGN.md#get_thermal_model---dict) |
 | Is there a gate bridge (`k_vent_window` standing in for `k_passive`)? | No. It was removed in Issue #1512: the open-window rate is a different physical quantity from the closed-house rate, so using it as a stand-in mis-sized every heat-rate calculation and the forecast of homes that had only window data. Physics prediction needs a real closed-house `k_passive` (from passive windows); until then the forecast uses the schedule fallback. | [§Gate Bridge (removed)](05-LEARNING-ENGINE-DESIGN.md#gate-bridge-self-healing-issue-126-phase-a--removed-in-issue-1512) |
-| What patterns trigger learning suggestions and how many days of data are required? | Four patterns (low window compliance, frequent overrides, high runtime on mild/warm days, short departures) after 14+ days, plus the informational `thermal_model_ready` and `forecast_bias_significant`. All are advice. They repeat daily until acted on; an acknowledged ("Got it") one is held back 30 days, a dismissed one stays dismissed (`SUGGESTION_COOLDOWN_DAYS` is not read). Comfort misses and frequent door pauses produce no suggestion (Issue #1652, owner decision). | [§Suggestion Generation](05-LEARNING-ENGINE-DESIGN.md#suggestion-generation) |
+| What patterns trigger learning suggestions and how many days of data are required? | Five patterns (low window compliance, frequent overrides, high runtime on mild/warm days, short departures, humid cooling with Humid Overcool off (Issue #1695)) after 14+ days, plus the informational `thermal_model_ready` and `forecast_bias_significant`. All are advice. They repeat daily until acted on; an acknowledged ("Got it") one is held back 30 days, a dismissed one stays dismissed (`SUGGESTION_COOLDOWN_DAYS` is not read). Comfort misses and frequent door pauses produce no suggestion (Issue #1652, owner decision). | [§Suggestion Generation](05-LEARNING-ENGINE-DESIGN.md#suggestion-generation) |
 | What does accepting a suggestion change? | Nothing (Issue #1652, owner decision): every suggestion is advice. "Got it" (the `accept` action, kept for existing automations) records the acknowledgement and holds the suggestion back 30 days; no setting or config entry changes. Learning never lengthens the door/window pause or changes the away temperatures. | [Suggestions Change No Setting](#suggestions-change-no-setting) |
 | Where is the full Tier 3 spec for the v3 thermal model — pre/post/invariants, OLS contracts, EWMA table? | The Territory spec covers all observation lifecycles, all OLS solvers (including `compute_k_passive_endpoint`/`compute_k_solar`), commit routing, EWMA alpha table, rolling window constraints, the pooled cycle model (Issues #1512/#1516), swing detection, and the Issue #587 vent-split/retirement rationale. | [Thermal Model v3 — Territory Spec](thermal-model-v3-spec.md) |
 
@@ -83,6 +83,53 @@ Suggestions are generated when `generate_suggestions()` is called (typically dur
 **Suggestion (advice):** "If coming home to a cooler or warmer house bothers you, set milder away temperatures in Settings."
 **If accepted ("Got it"):** nothing changes (Issue #1652). The 15-minute delay is the constant `OCCUPANCY_SETBACK_MINUTES`, not a setting; the old text offered to shorten it to 5 minutes and accepting set `occupancy_setback_minutes`, which nothing read.
 **Insight:** The 15-minute delay means the setback barely takes effect before the person returns.
+
+### Pattern: Humid Cooling With Humid Overcool Off (Issue #1695)
+
+**Occupant view:** in a humid-climate house the AC keeps running while the indoor air is muggy, but its short runs cool
+the room without drying it, and Humid Overcool (`humid_overcool_enabled`, Issue #1694) is off by default. The card says
+what turning it on would do; the person decides.
+**Detection:** the option is OFF (read live from the zone's config through the `humid_overcool_enabled` reader the
+coordinator hands `LearningEngine`; with no reader, or one that fails, the suggestion is never made, so it can never
+suggest an option that may already be on), and the last 14 daily records, vacation days excluded, hold at least
+`HUMID_OVERCOOL_SUGGEST_MINUTES` (240 min = 4 h) of `hvac_cool_humid_runtime_minutes`.
+**`hvac_cool_humid_runtime_minutes`** (daily record, additive: a record stored before 0.9.80 reads 0): the part of
+`hvac_cool_runtime_minutes` during which humid overcool would call the house humid: the one overcool reader,
+`humidity_facts.overcool_humid_from_facts` on the coordinator's `engine_facts` (the overcool humid latch
+`OVERCOOL_HUMID_LATCH` stepped with the decision dew point: on at `OVERCOOL_TRIGGER_DP_F` 60 °F, released at <= 58 °F
+or when the dew point is unknown; the verdict overcool itself engages on). Counted only from reported cooling: the
+coordinator's cool session exists only while `hvac_action` is cooling (owner rule), so a fan-only or idle humid day
+counts nothing. `_flush_runtime_for_mode("cool")` adds each flushed slice to it when that verdict
+(`coordinator._overcool_humid_now`) is humid at the flush, and the 5-minute dew-point tick (`_sample_humidity_facts`)
+flushes a running cool session BEFORE its sample enters the 15-minute window and the latch steps, so each slice is
+credited under the verdict it ran with (resolution 5 min). The latch is stepped whether or not the option is on. The
+option itself is read live through `humidity_facts.humid_overcool_enabled`.
+**Suggestion (advice):** "In the past two weeks the AC ran about N hours while the air in your home was humid (dew point
+60°F or higher). Humid Overcool, which is off by default, would let the AC run a little longer on those muggy days: it
+sets the thermostat up to 2°F below your cool temperature, still inside your comfort range, so more moisture comes out
+of the air. If the house feels sticky, you can turn it on in Settings. Nothing changes unless you do."
+(`learning.suggestion.humid_overcool`; the dew point and depth in the user's unit.)
+**If accepted ("Got it"):** nothing changes (Issue #1652); the option stays off until the person turns it on. Held back
+30 days; Dismiss hides it like any other key.
+**Why 240 minutes (what-if, never measured; the plan's data, `CHECK-E-overcool-numbers.md`):** at 60 °F neither a
+360-minute nor a 12-hour version fires on the owner's dry-summer house. With the latch semantics above, applied every
+5 minutes to the owner's May-Oct 2026 chart_log cooling runs (6,125 logged minutes, an undercount) against the
+thermostat's hourly dew point: 598 humid-cooling minutes all season on 18 days, at most 281 in any 14 days (Aug 10). A
+humid-climate house like the #1507 reporter's (indoor dew point ~59-65 °F, 1.5-2.3 h of AC on a humid day) credits
+36-138 humid minutes per humid day (40 % of the AC time when the dew point sits at the low edge, 83 % if spread evenly
+over 59-65 °F, 100 % if always above 60 °F).
+
+| N (min / 14 d) | Owner's house: days it shows (May-Oct) | Humid house, AC every humid day | Humid house, a humid day every other day, slowest case (90 min AC, 40 % humid) |
+|---|---|---|---|
+| 120 | 29 | 1-4 days | 7 days |
+| 180 | 12 | 2-5 days | 9 days |
+| **240** | **10** (one episode, Aug, the fortnight overcool would have acted on) | **2-7 days** | **13 days** |
+| 360 | 0 | 3-10 days | 19 days (misses the 14-day window) |
+
+240 is the largest N that still reaches the slowest humid case inside the 14-day window; smaller N shows the card on the
+owner's house on 12-29 days for marginal humidity. Caveats: the owner's summer dew point is hourly (short peaks smoothed
+out) and chart_log misses run edges, so the owner's real counts are somewhat higher; the humid-house rows are a model of
+the reporter's description, not their data.
 
 ### Removed patterns: comfort violations, frequent door pauses (Issue #1652)
 

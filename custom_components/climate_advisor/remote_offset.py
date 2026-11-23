@@ -108,6 +108,37 @@ def max_magnitude_f(mode: str, target_f: float, *, floor: float, ceiling: float,
     return max(0.0, min(cap_f, _room_f(mode, target_f, floor=floor, ceiling=ceiling)))
 
 
+def combine_adjustments(
+    mode: str,
+    target_f: float,
+    adjustments: tuple[tuple[str, float], ...],
+    *,
+    floor: float,
+    ceiling: float,
+    gap_f: float,
+) -> tuple[tuple[str, float], ...]:
+    """ONE clamp for every signed command adjustment of a write (Issue #1694, generalising #1194 a).
+
+    ``adjustments`` are ``(source, signed F delta)`` in priority order; the first (the remote-sensor offset) is
+    already within its own cap and band-edge rule and is kept as it is. Every later one may only add to the lowering
+    (cool) or raising (heat) until the COMBINED commanded value is ``gap_f`` (``MIN_HEAT_COOL_GAP_F``) from the
+    opposite edge of the band being written: cool never below ``floor + gap_f``, heat never above
+    ``ceiling - gap_f``. One pointing the other way, or with no room left, becomes 0. Pure.
+    """
+    if not adjustments:
+        return ()
+    sign = 1.0 if mode == "heat" else -1.0
+    room = (ceiling - gap_f - target_f) if mode == "heat" else (target_f - floor - gap_f)
+    used = max(0.0, adjustments[0][1] * sign)
+    out = [adjustments[0]]
+    for source, value in adjustments[1:]:
+        wanted = value * sign
+        allowed = max(0.0, min(wanted, room - used)) if wanted > _EPS else 0.0
+        used += allowed
+        out.append((source, sign * allowed if allowed > _EPS else 0.0))
+    return tuple(out)
+
+
 class ClampLimit(StrEnum):
     """Which of the two limits ``max_magnitude_f`` is applying (Issue #1194 d, Status "clamped")."""
 
@@ -531,8 +562,40 @@ def remote_offset_view(st: RemoteOffsetState, unit: str, lang: str | None = None
     }
 
 
-def remote_offset_view_for(engine: Any, unit: str, lang: str | None = None) -> dict[str, Any] | None:
-    """The view for an engine, or None when it has no remote sensor / is not an engine (tolerant of stubs)."""
+def overcool_msg(oc: dict[str, Any], unit: str, *, no_hvac_action: bool = False) -> i18n.Msg | None:
+    """The humid-overcool Status sentence (Issue #1694), or None when it lowers nothing and needs no warning.
+
+    ``oc`` is ``AutomationEngine.overcool_view()``. ``no_hvac_action``: the thermostat has never reported cooling
+    (the coordinator's thermostat notice), so the option is on but can never act: a visible warning.
+    """
+    if not oc.get("enabled") and not oc.get("active"):
+        return None
+    if oc.get("active") and oc.get("comfort_target_f") is not None and oc.get("commanded_f") is not None:
+        dp = oc.get("indoor_dew_point_f")
+        params: dict[str, Any] = {
+            "lowering": i18n.TempDelta(float(oc.get("lowering_f") or 0.0), unit),
+            "target": i18n.Temp(float(oc["comfort_target_f"]), unit),
+            "commanded": i18n.Temp(float(oc["commanded_f"]), unit),
+        }
+        if oc.get("phase") == "coasting":
+            return i18n.Msg("status.overcool.holding", **params)
+        if isinstance(dp, int | float) and not isinstance(dp, bool):
+            return i18n.Msg("status.overcool.active", dew_point=i18n.Temp(float(dp), unit, 1), **params)
+        return i18n.Msg("status.overcool.active_plain", **params)
+    if no_hvac_action and oc.get("enabled"):
+        return i18n.Msg("status.overcool.no_hvac_action")
+    return None
+
+
+def remote_offset_view_for(
+    engine: Any, unit: str, lang: str | None = None, *, no_hvac_action: bool = False
+) -> dict[str, Any] | None:
+    """The view for an engine, or None when it has no remote sensor / is not an engine (tolerant of stubs).
+
+    Issue #1694: humid overcool is the second command adjustment on the same setpoint path, so it is described in
+    the same view (``overcool``; its sentence is ``text`` when the remote loop has none, and the thermostat is
+    expected at the commanded value). Without an overcool in force or a warning the view is exactly as before.
+    """
     getter = getattr(engine, "remote_offset_state", None)
     if not callable(getter):
         return None
@@ -540,7 +603,48 @@ def remote_offset_view_for(engine: Any, unit: str, lang: str | None = None) -> d
         st = getter()
     except Exception:  # noqa: BLE001 - a status read must never break the endpoint
         return None
-    return remote_offset_view(st, unit, lang) if isinstance(st, RemoteOffsetState) else None
+    view = remote_offset_view(st, unit, lang) if isinstance(st, RemoteOffsetState) else None
+    oc_getter = getattr(engine, "overcool_view", None)
+    try:
+        oc = oc_getter() if callable(oc_getter) else None
+    except Exception:  # noqa: BLE001 - a status read must never break the endpoint
+        oc = None
+    msg = overcool_msg(oc, unit, no_hvac_action=no_hvac_action) if isinstance(oc, dict) else None
+    if msg is None or not isinstance(oc, dict):
+        return view
+    text = i18n.render(msg, lang) if lang else i18n.render_en(msg)
+    active = bool(oc.get("active"))
+    if view is None:
+        view = {
+            "state": "overcool",
+            "detail": oc.get("phase"),
+            "context": None,
+            "mode": "cool" if active else None,
+            "comfort_target": display_temp(oc.get("comfort_target_f"), unit),
+            "commanded": display_temp(oc.get("commanded_f"), unit),
+            "expected_setpoint": None,
+            "unit": unit,
+            "text": None,
+            "text_msg": None,
+        }
+    if active:
+        view["expected_setpoint"] = display_temp(oc.get("commanded_f"), unit)
+    if view.get("text") is None:
+        view["text"] = text
+        view["text_msg"] = msg.to_wire()
+    view["overcool"] = {
+        "phase": oc.get("phase"),
+        "active": active,
+        "lowering": display_delta(float(oc.get("lowering_f") or 0.0), unit, 2),
+        "lowering_f": oc.get("lowering_f"),
+        "comfort_target": display_temp(oc.get("comfort_target_f"), unit),
+        "commanded": display_temp(oc.get("commanded_f"), unit),
+        "indoor_dew_point": display_temp(oc.get("indoor_dew_point_f"), unit),
+        "warning": "no_hvac_action" if (no_hvac_action and not active) else None,
+        "text": text,
+        "text_msg": msg.to_wire(),
+    }
+    return view
 
 
 def remote_offset_lines(view: dict[str, Any]) -> list[str]:

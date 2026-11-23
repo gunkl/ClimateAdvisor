@@ -185,10 +185,19 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # the previous semantics were not wrong for any event that exists; this only decides, ahead of time, how the
         # new types are read: unmapped, the same class as their siblings. nat_vent_humid_skip left this list when
         # Issue #1691 started emitting it (mapped in _map_event_to_outcome); humid_windows_close_notice left it when
-        # Issue #1692 did (its own unmapped registration below). overcool_started / overcool_ended announce a
-        # commanded-setpoint adjustment whose effect is asserted through the action_log and live engine state. Could
-        # this let a real failure pass silently? No: no existing scenario can see these types, and a lane that needs one
-        # as a decision outcome must move it to a mapping with its own rule-8 note.
+        # Issue #1692 did (its own unmapped registration below); overcool_started / overcool_ended when Issue #1694 did.
+        # Issue #1694 (plan #1507 H3): overcool_started / overcool_ended are now EMITTED. They stay unmapped,
+        # consciously. Rule-8 justification: overcool changes the COMMANDED cool setpoint, never the HVAC mode decision
+        # or the comfort band; the deciding event of the run (classification_applied / comfort_band_applied / resumed
+        # ...) is still the decision in force. Under last-decision-wins a mapped overcool row would SHADOW that real
+        # decision for every later assertion time (a "cool" or "classification_applied" expectation would read
+        # "overcool_started" mid-run), which is exactly the failure the #1507 plan's "unless that shadows the real
+        # decision" rule excludes. The previous semantics were not wrong (nothing emitted them); this records the
+        # decision to keep them unmapped now that production does. Could this let a real failure pass silently? No:
+        # what overcool DOES is asserted exactly through the action_log (commanded_setpoint_at / setpoint_writes
+        # compare every climate.set_temperature value) and the raw event_log (event_emitted with payload_subset reads
+        # these rows directly, mapped or not); an overcool that wrote the wrong value, too early, too long or not at
+        # all fails those.
         "overcool_started",
         "overcool_ended",
         # Issue #1692 (plan #1507 H1): humid_windows_close_notice is now EMITTED (the coordinator's 5-minute tick, once

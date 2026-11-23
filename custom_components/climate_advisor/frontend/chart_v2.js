@@ -203,6 +203,7 @@
     "event.classification_change": "classification change",
     "event.override": "override",
     "event.hvac_action_change": "hvac action change",
+    "event.setpoint_change": "setpoint change",
     "event.occupancy_change": "occupancy change",
     "event.occupancy_setback": "occupancy setback",
     "readout.now": "Now · {time}",

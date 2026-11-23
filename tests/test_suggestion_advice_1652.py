@@ -29,6 +29,9 @@ def _rec(day: int, **fields) -> dict:
 
 
 def test_the_removed_suggestions_are_not_keys():
+    # Pinned deliberately: a new key must be added here on purpose. Issue #1695 added "humid_overcool" ("Turn on
+    # Humid Overcool"), advice only like every key here: "Got it" changes no setting (tests/test_humid_overcool_
+    # suggestion_1695.py checks the option is never touched).
     assert {
         "low_window_compliance",
         "frequent_overrides",
@@ -36,6 +39,7 @@ def test_the_removed_suggestions_are_not_keys():
         "thermal_model_ready",
         "forecast_bias_significant",
         "high_runtime_mild_days",
+        "humid_overcool",
     } == SUGGESTION_KEYS
     assert not set(REMOVED) & SUGGESTION_KEYS
 

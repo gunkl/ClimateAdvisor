@@ -218,6 +218,7 @@ class BriefingHumidity:
     ceiling_f: float | None = None
     fan_starts_held_today: int = 0
     close_notices_today: int = 0
+    overcool_runs_today: int = 0  # Issue #1694: AC runs humid overcool lengthened to dry the air (``overcool_started``)
 
 
 def _rh_param(value: float | None) -> int | str:
@@ -255,6 +256,8 @@ def _humidity_msg(h: BriefingHumidity | None, temp_unit: str) -> i18n.Msg | None
         lines.append(i18n.Msg("briefing.humidity.fan_held", count=h.fan_starts_held_today))
     if h.close_notices_today > 0:
         lines.append(i18n.Msg("briefing.humidity.close_notices", count=h.close_notices_today))
+    if h.overcool_runs_today > 0:
+        lines.append(i18n.Msg("briefing.humidity.overcooled", count=h.overcool_runs_today))
     if not lines:
         return None
     return i18n.Msg("briefing.humidity", items=_bullet_lines(lines))

@@ -244,7 +244,7 @@
           "vacation_cool": "Temperatura de férias (arrefecimento)",
           "cool_lockout_outdoor_temp": "Sem frio abaixo do exterior",
           "heat_lockout_outdoor_temp": "Sem aquecimento acima do exterior",
-          "hvac_season": "Estação de climatização"
+          "hvac_season": "Aquecimento e arrefecimento permitidos"
         },
         "data_description": {
           "comfort_heat": "Temperatura-alvo ao aquecer quando há alguém em casa.",
@@ -257,7 +257,7 @@
           "vacation_cool": "Temperatura de arrefecimento enquanto o interruptor de férias está ligado. Deixe em branco para usar o arrefecimento em ausência mais 3 °F (cerca de 1,5 °C).",
           "cool_lockout_outdoor_temp": "O Climate Advisor não arrefece enquanto estiver mais frio do que isto lá fora, e volta a permitir 2 °C (3,6 °F) acima. Uma casa mais quente do que a temperatura de arrefecimento em mais do que a tolerância do dia é arrefecida na mesma. Deixe vazio para nenhum bloqueio.",
           "heat_lockout_outdoor_temp": "O Climate Advisor não aquece enquanto estiver mais quente do que isto lá fora, e volta a permitir 2 °C (3,6 °F) abaixo. Uma casa mais fria do que a temperatura de aquecimento em mais do que a tolerância do dia é aquecida na mesma. Tem de ficar pelo menos 2 °C (3,6 °F) acima do bloqueio de arrefecimento. Deixe vazio para nenhum bloqueio.",
-          "hvac_season": "Auto aquece e arrefece. Só aquecimento ou Só arrefecimento remove o outro lado durante a estação, como se o termóstato não o pudesse fazer; uma casa muito além do limite de conforto desse lado recebe-o na mesma."
+          "hvac_season": "O que o termóstato pode usar. A sua escolha mantém-se até a alterar; não segue o calendário. Só aquecimento (por exemplo, no inverno): o Climate Advisor nunca muda para arrefecimento e, nos dias quentes, sugere antes janelas ou estores. Só arrefecimento é o inverso. Se a casa se afastar muito do seu intervalo de conforto, o Climate Advisor usa mesmo assim o modo bloqueado até a casa voltar ao intervalo."
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "Auto (aquecer e arrefecer)",
+        "auto": "Aquecimento e arrefecimento (conforme necessário)",
         "heat_only": "Só aquecimento",
         "cool_only": "Só arrefecimento"
       }

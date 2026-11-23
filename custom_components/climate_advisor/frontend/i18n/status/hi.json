@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "निर्णय {engine} इंजन की अपनी हीटिंग और कूलिंग दरों पर आधारित हैं",
   "status.thermostat_notice.use_learned": "यह पहले से सीखी हुई हीटिंग और कूलिंग दरों का उपयोग करता रहता है",
   "status.zone_lockout.cool_outdoor": "कूलिंग बंद: बाहर {outdoor} ({threshold} से कम)",
-  "status.zone_lockout.cool_season": "कूलिंग बंद: मौसम केवल हीटिंग पर सेट",
+  "status.zone_lockout.cool_season": "कूलिंग बंद: केवल हीटिंग की अनुमति",
   "status.zone_lockout.heat_outdoor": "हीटिंग बंद: बाहर {outdoor} ({threshold} से अधिक)",
-  "status.zone_lockout.heat_season": "हीटिंग बंद: मौसम केवल कूलिंग पर सेट"
+  "status.zone_lockout.heat_season": "हीटिंग बंद: केवल कूलिंग की अनुमति"
 }

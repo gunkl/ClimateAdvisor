@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "{engine}エンジン独自の暖房・冷房の速度で判断します",
   "status.thermostat_notice.use_learned": "すでに学習済みの暖房・冷房の速度を引き続き使用します",
   "status.zone_lockout.cool_outdoor": "冷房オフ：外気 {outdoor}（{threshold} 未満）",
-  "status.zone_lockout.cool_season": "冷房オフ：シーズンが暖房のみに設定",
+  "status.zone_lockout.cool_season": "冷房オフ：暖房のみ許可",
   "status.zone_lockout.heat_outdoor": "暖房オフ：外気 {outdoor}（{threshold} 超）",
-  "status.zone_lockout.heat_season": "暖房オフ：シーズンが冷房のみに設定"
+  "status.zone_lockout.heat_season": "暖房オフ：冷房のみ許可"
 }

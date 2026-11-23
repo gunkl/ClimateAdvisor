@@ -244,7 +244,7 @@
           "vacation_cool": "度假制冷温度",
           "cool_lockout_outdoor_temp": "室外低于此值不制冷",
           "heat_lockout_outdoor_temp": "室外高于此值不制热",
-          "hvac_season": "制热与制冷季节"
+          "hvac_season": "允许的制热和制冷"
         },
         "data_description": {
           "comfort_heat": "有人在家时制热的目标温度。",
@@ -257,7 +257,7 @@
           "vacation_cool": "度假开关开启期间的制冷温度。留空则使用离家制冷温度加 3 °F（约 1.5 °C）。",
           "cool_lockout_outdoor_temp": "室外比此温度冷时，Climate Advisor 不制冷；高出此温度 2 °C (3.6 °F) 后再次允许制冷。比制冷温度高出超过当天容差的房屋仍会制冷。留空表示不锁定。",
           "heat_lockout_outdoor_temp": "室外比此温度暖时，Climate Advisor 不制热；低于此温度 2 °C (3.6 °F) 后再次允许制热。比制热温度低出超过当天容差的房屋仍会制热。必须比制冷锁定温度至少高 2 °C (3.6 °F)。留空表示不锁定。",
-          "hvac_season": "自动会制热和制冷。仅制热或仅制冷会在本季去掉另一侧，就像温控器做不到一样；远超该侧舒适边界的房屋仍会使用它。"
+          "hvac_season": "恒温器可以使用哪些功能。您的选择会一直保持，直到您更改；它不随日历变化。仅制热（例如冬季）：Climate Advisor 从不切换到制冷，温暖的日子改为建议开窗或使用百叶窗。仅制冷则相反。如果室温远远超出舒适范围，Climate Advisor 仍会使用被禁用的一侧，直到室温回到范围内。"
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "自动（制热和制冷）",
+        "auto": "制热和制冷（按需）",
         "heat_only": "仅制热",
         "cool_only": "仅制冷"
       }

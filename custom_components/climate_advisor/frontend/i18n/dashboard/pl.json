@@ -919,5 +919,5 @@
   "dashboard.status.fan_speed_high": "wysoką",
   "dashboard.status.fan_speed_low": "niską",
   "dashboard.status.fan_speed_medium": "średnią",
-  "dashboard.chart.ds.band_advisory": "Zakres docelowy (granica {family, select, cool {chłodzenia} other {grzania}} tylko orientacyjna: {reason, select, equipment {brak urządzenia} outdoor_lockout {blokada zewnętrzna} season {ustawienie sezonu} other {niedostępne}})"
+  "dashboard.chart.ds.band_advisory": "Zakres docelowy (granica {family, select, cool {chłodzenia} other {grzania}} tylko orientacyjna: {reason, select, equipment {brak urządzenia} outdoor_lockout {blokada zewnętrzna} season {ustawienie „Dozwolone ogrzewanie i chłodzenie”} other {niedostępne}})"
 }

@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "las decisiones usan las velocidades de calentamiento y enfriamiento propias del motor {engine}",
   "status.thermostat_notice.use_learned": "sigue usando las velocidades de calentamiento y enfriamiento que ya había aprendido",
   "status.zone_lockout.cool_outdoor": "Refrigeración apagada: exterior {outdoor} (por debajo de {threshold})",
-  "status.zone_lockout.cool_season": "Refrigeración apagada: temporada en solo calefacción",
+  "status.zone_lockout.cool_season": "Refrigeración apagada: solo calefacción permitida",
   "status.zone_lockout.heat_outdoor": "Calefacción apagada: exterior {outdoor} (por encima de {threshold})",
-  "status.zone_lockout.heat_season": "Calefacción apagada: temporada en solo refrigeración"
+  "status.zone_lockout.heat_season": "Calefacción apagada: solo refrigeración permitida"
 }

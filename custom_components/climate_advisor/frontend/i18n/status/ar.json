@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "تعتمد القرارات على معدلات التدفئة والتبريد الخاصة بمحرك {engine}",
   "status.thermostat_notice.use_learned": "يواصل استخدام معدلات التدفئة والتبريد التي تعلّمها بالفعل",
   "status.zone_lockout.cool_outdoor": "التبريد متوقف: الخارج {outdoor} (أقل من {threshold})",
-  "status.zone_lockout.cool_season": "التبريد متوقف: الموسم مضبوط على التدفئة فقط",
+  "status.zone_lockout.cool_season": "التبريد متوقف: التدفئة فقط مسموح بها",
   "status.zone_lockout.heat_outdoor": "التدفئة متوقفة: الخارج {outdoor} (أعلى من {threshold})",
-  "status.zone_lockout.heat_season": "التدفئة متوقفة: الموسم مضبوط على التبريد فقط"
+  "status.zone_lockout.heat_season": "التدفئة متوقفة: التبريد فقط مسموح به"
 }

@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "decyzje opierają się na własnym tempie grzania i chłodzenia silnika {engine}",
   "status.thermostat_notice.use_learned": "nadal korzysta z tempa grzania i chłodzenia, które już poznał",
   "status.zone_lockout.cool_outdoor": "Chłodzenie wyłączone: na zewnątrz {outdoor} (poniżej {threshold})",
-  "status.zone_lockout.cool_season": "Chłodzenie wyłączone: sezon ustawiony na tylko ogrzewanie",
+  "status.zone_lockout.cool_season": "Chłodzenie wyłączone: dozwolone tylko ogrzewanie",
   "status.zone_lockout.heat_outdoor": "Ogrzewanie wyłączone: na zewnątrz {outdoor} (powyżej {threshold})",
-  "status.zone_lockout.heat_season": "Ogrzewanie wyłączone: sezon ustawiony na tylko chłodzenie"
+  "status.zone_lockout.heat_season": "Ogrzewanie wyłączone: dozwolone tylko chłodzenie"
 }

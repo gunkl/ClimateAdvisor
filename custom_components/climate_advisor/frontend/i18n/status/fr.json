@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "les décisions utilisent les vitesses de chauffe et de refroidissement propres au moteur {engine}",
   "status.thermostat_notice.use_learned": "il continue d’utiliser les vitesses de chauffe et de refroidissement déjà apprises",
   "status.zone_lockout.cool_outdoor": "Climatisation coupée : extérieur {outdoor} (sous {threshold})",
-  "status.zone_lockout.cool_season": "Climatisation coupée : saison réglée sur chauffage seul",
+  "status.zone_lockout.cool_season": "Climatisation coupée : chauffage seul autorisé",
   "status.zone_lockout.heat_outdoor": "Chauffage coupé : extérieur {outdoor} (au-dessus de {threshold})",
-  "status.zone_lockout.heat_season": "Chauffage coupé : saison réglée sur climatisation seule"
+  "status.zone_lockout.heat_season": "Chauffage coupé : climatisation seule autorisée"
 }

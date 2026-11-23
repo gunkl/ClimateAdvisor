@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "決策會使用 {engine} 引擎本身的升降溫速率",
   "status.thermostat_notice.use_learned": "會繼續使用先前已學到的升降溫速率",
   "status.zone_lockout.cool_outdoor": "冷氣關閉：室外 {outdoor}（低於 {threshold}）",
-  "status.zone_lockout.cool_season": "冷氣關閉：季節設為僅暖氣",
+  "status.zone_lockout.cool_season": "冷氣關閉：僅允許暖氣",
   "status.zone_lockout.heat_outdoor": "暖氣關閉：室外 {outdoor}（高於 {threshold}）",
-  "status.zone_lockout.heat_season": "暖氣關閉：季節設為僅冷氣"
+  "status.zone_lockout.heat_season": "暖氣關閉：僅允許冷氣"
 }

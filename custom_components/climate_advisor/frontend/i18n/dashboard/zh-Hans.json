@@ -919,5 +919,5 @@
   "dashboard.status.fan_speed_high": "高速",
   "dashboard.status.fan_speed_low": "低速",
   "dashboard.status.fan_speed_medium": "中速",
-  "dashboard.chart.ds.band_advisory": "目标范围（{family, select, cool {制冷} other {制热}}边界仅供参考：{reason, select, equipment {无设备} outdoor_lockout {室外锁定} season {季节设置} other {不可用}}）"
+  "dashboard.chart.ds.band_advisory": "目标范围（{family, select, cool {制冷} other {制热}}边界仅供参考：{reason, select, equipment {无设备} outdoor_lockout {室外锁定} season {“允许的制热和制冷”设置} other {不可用}}）"
 }

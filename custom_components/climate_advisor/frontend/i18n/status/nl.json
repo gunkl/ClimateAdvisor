@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "de beslissingen gebruiken de eigen opwarm- en afkoelsnelheden van de {engine}-engine",
   "status.thermostat_notice.use_learned": "hij blijft de opwarm- en afkoelsnelheden gebruiken die hij al had geleerd",
   "status.zone_lockout.cool_outdoor": "Koelen uit: buiten {outdoor} (onder {threshold})",
-  "status.zone_lockout.cool_season": "Koelen uit: seizoen op alleen verwarmen",
+  "status.zone_lockout.cool_season": "Koelen uit: alleen verwarmen toegestaan",
   "status.zone_lockout.heat_outdoor": "Verwarmen uit: buiten {outdoor} (boven {threshold})",
-  "status.zone_lockout.heat_season": "Verwarmen uit: seizoen op alleen koelen"
+  "status.zone_lockout.heat_season": "Verwarmen uit: alleen koelen toegestaan"
 }

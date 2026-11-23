@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "решения опираются на собственные скорости нагрева и охлаждения движка {engine}",
   "status.thermostat_notice.use_learned": "по-прежнему используются уже изученные скорости нагрева и охлаждения",
   "status.zone_lockout.cool_outdoor": "Охлаждение выключено: снаружи {outdoor} (ниже {threshold})",
-  "status.zone_lockout.cool_season": "Охлаждение выключено: сезон — только отопление",
+  "status.zone_lockout.cool_season": "Охлаждение выключено: разрешено только отопление",
   "status.zone_lockout.heat_outdoor": "Отопление выключено: снаружи {outdoor} (выше {threshold})",
-  "status.zone_lockout.heat_season": "Отопление выключено: сезон — только охлаждение"
+  "status.zone_lockout.heat_season": "Отопление выключено: разрешено только охлаждение"
 }

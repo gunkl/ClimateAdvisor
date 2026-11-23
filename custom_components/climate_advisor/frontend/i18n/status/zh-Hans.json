@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "决策采用 {engine} 引擎自身的制热和制冷速率",
   "status.thermostat_notice.use_learned": "将继续使用已经学到的制热和制冷速率",
   "status.zone_lockout.cool_outdoor": "制冷关闭：室外 {outdoor}（低于 {threshold}）",
-  "status.zone_lockout.cool_season": "制冷关闭：季节设为仅制热",
+  "status.zone_lockout.cool_season": "制冷关闭：仅允许制热",
   "status.zone_lockout.heat_outdoor": "制热关闭：室外 {outdoor}（高于 {threshold}）",
-  "status.zone_lockout.heat_season": "制热关闭：季节设为仅制冷"
+  "status.zone_lockout.heat_season": "制热关闭：仅允许制冷"
 }

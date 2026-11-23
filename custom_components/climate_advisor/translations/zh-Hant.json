@@ -244,7 +244,7 @@
           "vacation_cool": "度假冷氣溫度",
           "cool_lockout_outdoor_temp": "室外低於此值不開冷氣",
           "heat_lockout_outdoor_temp": "室外高於此值不開暖氣",
-          "hvac_season": "冷暖氣季節"
+          "hvac_season": "允許的暖氣和冷氣"
         },
         "data_description": {
           "comfort_heat": "有人在家時的暖氣目標溫度。",
@@ -257,7 +257,7 @@
           "vacation_cool": "度假開關開啟時的冷氣溫度。留空則使用離家冷氣溫度加 3 °F（約 1.5 °C）。",
           "cool_lockout_outdoor_temp": "室外比此溫度冷時，Climate Advisor 不開冷氣；高出此溫度 2 °C (3.6 °F) 後再次允許冷氣。比冷氣溫度高出超過當天容差的房屋仍會開冷氣。留空表示不鎖定。",
           "heat_lockout_outdoor_temp": "室外比此溫度暖時，Climate Advisor 不開暖氣；低於此溫度 2 °C (3.6 °F) 後再次允許暖氣。比暖氣溫度低出超過當天容差的房屋仍會開暖氣。必須比冷氣鎖定溫度至少高 2 °C (3.6 °F)。留空表示不鎖定。",
-          "hvac_season": "自動會開暖氣和冷氣。僅暖氣或僅冷氣會在本季去掉另一側，就像溫控器做不到一樣；遠超該側舒適邊界的房屋仍會使用它。"
+          "hvac_season": "恆溫器可以使用哪些功能。您的選擇會一直維持，直到您變更；它不隨日曆改變。僅暖氣（例如冬季）：Climate Advisor 絕不切換到冷氣，溫暖的日子改為建議開窗或使用百葉窗。僅冷氣則相反。如果室溫遠遠超出舒適範圍，Climate Advisor 仍會使用被停用的一方，直到室溫回到範圍內。"
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "自動（暖氣和冷氣）",
+        "auto": "暖氣和冷氣（視需要）",
         "heat_only": "僅暖氣",
         "cool_only": "僅冷氣"
       }

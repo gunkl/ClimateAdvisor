@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.81"
+VERSION = "0.9.82"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -973,11 +973,12 @@ CONFIG_METADATA = {
         "display_transform": "temp_abs",
     },
     "hvac_season": {
-        "label": "Heating and cooling season",
+        "label": "Heating and cooling allowed",
         "description": (
-            "Auto lets Climate Advisor heat and cool. Heat only or Cool only removes the other side for the season,"
-            " as if the thermostat could not do it (Issue #1699). A house far past the removed side's comfort edge"
-            " still gets it."
+            "Which the thermostat may use. Your choice stays until you change it; it doesn't follow the calendar."
+            " Heating only (for example in winter): Climate Advisor never switches to cooling and suggests windows"
+            " or blinds on warm days instead. Cooling only is the reverse. If the house goes far past its comfort"
+            " range, Climate Advisor still uses the blocked one until the house is back in range."
         ),
         "category": "setpoints",
     },

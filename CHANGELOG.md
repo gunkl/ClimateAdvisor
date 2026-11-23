@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.82] — 2026-11-23
+
+### Changed
+- #1715: the **Heating and cooling season** setting is now called **Heating and cooling allowed**, because "season" made it sound like Climate Advisor follows the calendar. It doesn't: your choice stays until you change it. The choices now read "Heating and cooling (as needed)", "Heating only" and "Cooling only", and the help text says what you'll notice: with Heating only, Climate Advisor never switches to cooling and suggests windows or blinds on warm days instead; Cooling only is the reverse; a house far past its comfort range still gets the blocked side until it's back in range. The briefing, Status line, Activity and chart now use the same words (for example "Cooling is off (you allowed heating only)" instead of "Cooling is off for the season (Heat only)"). All 17 languages updated. Stored values and behaviour are unchanged.
+
 ## [0.9.81] — 2026-11-23
 
 ### Fixed

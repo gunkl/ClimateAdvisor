@@ -14406,7 +14406,11 @@ class AutomationEngine:
             await self._observe_only_whf_notice(trigger)
             return None
         self._whf_safety_observe_logged = False
+        # Automation is on: the enforcer acts, so both observe-only notices re-arm for the next time it is switched
+        # off. Issue #1720 (mirror of #1718): the rule-2 flag was left set here, so after an observe-only overlap
+        # notice, a re-enable and a later observe-only overlap, the occupant was not told again.
         self._whf_observe_notified = False
+        self._whf_observe_rule2_notified = False
 
         snap = self._whf_safety_snapshot()
         if snap.fan_on is False:
@@ -14722,16 +14726,21 @@ class AutomationEngine:
                 **self._whf_rule2_state_inputs(climate_state, snap),
             )
         )
-        if decision.backstop:
-            await self._observe_only_rule2_notice(decision, trigger=trigger)
-            return
-        self._whf_observe_rule2_notified = False
         if not decision.sealed:
+            # Issue #1718: re-arm BEFORE the rule-2 branch. ``decide_whf_safety`` checks rule 1 (sealed) first, so a
+            # backstop decision is never a sealed house: a window opened while the heat/AC also runs beside the fan
+            # ends the sealed episode like any other open window. Returning early for the backstop (#1288) left the
+            # flag set, and the next sealed episode was silently treated as already notified.
             if self._whf_observe_notified:
                 _LOGGER.info(
                     "WHF sealed-house notice re-armed: the fan stopped or a door/window opened role=%s", self.role
                 )
             self._whf_observe_notified = False
+        if decision.backstop:
+            await self._observe_only_rule2_notice(decision, trigger=trigger)
+            return
+        self._whf_observe_rule2_notified = False
+        if not decision.sealed:
             return
         if decision.action is WhfSafetyAction.DEFER:
             self._schedule_whf_safety_timer("_whf_safety_retry_cancel", (decision.retry_in_s or 0.0) + 0.5, "settle")

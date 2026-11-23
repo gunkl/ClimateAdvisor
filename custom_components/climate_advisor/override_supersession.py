@@ -22,6 +22,9 @@ Function 2, ``decide_override_supersession``, captures Issue #282's "Fix D": a m
 to a mode different from the currently-overridden mode, while that override's grace is
 still running, is a NEW override superseding the old one — the caller clears the old one
 and re-detects the new one from scratch, restarting the grace/confirm cycle.
+
+A same-mode SETPOINT change during an override also supersedes it (Issue #1712); that branch is decided
+in the coordinator's setpoint block (``source="setpoint"``), not here.
 """
 
 from __future__ import annotations

@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "as decisões usam as velocidades de aquecimento e arrefecimento próprias do motor {engine}",
   "status.thermostat_notice.use_learned": "continua a usar as velocidades de aquecimento e arrefecimento que já tinha aprendido",
   "status.zone_lockout.cool_outdoor": "Arrefecimento desligado: exterior {outdoor} (abaixo de {threshold})",
-  "status.zone_lockout.cool_season": "Arrefecimento desligado: estação definida como só aquecimento",
+  "status.zone_lockout.cool_season": "Arrefecimento desligado: só aquecimento permitido",
   "status.zone_lockout.heat_outdoor": "Aquecimento desligado: exterior {outdoor} (acima de {threshold})",
-  "status.zone_lockout.heat_season": "Aquecimento desligado: estação definida como só arrefecimento"
+  "status.zone_lockout.heat_season": "Aquecimento desligado: só arrefecimento permitido"
 }

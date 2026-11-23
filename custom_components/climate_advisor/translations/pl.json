@@ -244,7 +244,7 @@
           "vacation_cool": "Temperatura chłodzenia podczas wakacji",
           "cool_lockout_outdoor_temp": "Bez chłodzenia poniżej zewnątrz",
           "heat_lockout_outdoor_temp": "Bez ogrzewania powyżej zewnątrz",
-          "hvac_season": "Sezon ogrzewania i chłodzenia"
+          "hvac_season": "Dozwolone ogrzewanie i chłodzenie"
         },
         "data_description": {
           "comfort_heat": "Temperatura docelowa przy ogrzewaniu, gdy ktoś jest w domu.",
@@ -257,7 +257,7 @@
           "vacation_cool": "Temperatura chłodzenia, gdy włączony jest przełącznik wakacji. Zostaw puste, aby użyć temperatury chłodzenia podczas nieobecności plus 3 °F (ok. 1,5 °C).",
           "cool_lockout_outdoor_temp": "Climate Advisor nie chłodzi, gdy na zewnątrz jest zimniej niż ta wartość, i znów pozwala chłodzić 2 °C (3,6 °F) powyżej niej. Dom cieplejszy od temperatury chłodzenia o więcej niż dzienna tolerancja i tak zostanie schłodzony. Zostaw puste, aby nie blokować.",
           "heat_lockout_outdoor_temp": "Climate Advisor nie grzeje, gdy na zewnątrz jest cieplej niż ta wartość, i znów pozwala grzać 2 °C (3,6 °F) poniżej niej. Dom zimniejszy od temperatury ogrzewania o więcej niż dzienna tolerancja i tak zostanie ogrzany. Musi być co najmniej 2 °C (3,6 °F) powyżej blokady chłodzenia. Zostaw puste, aby nie blokować.",
-          "hvac_season": "Auto grzeje i chłodzi. Tylko ogrzewanie lub Tylko chłodzenie usuwa drugą stronę na sezon, jakby termostat tego nie umiał; dom daleko poza granicą komfortu tej strony i tak ją dostanie."
+          "hvac_season": "Czego termostat może używać. Wybór obowiązuje, dopóki go nie zmienisz; nie zależy od kalendarza. Tylko ogrzewanie (na przykład zimą): Climate Advisor nigdy nie przełącza na chłodzenie, a w ciepłe dni zamiast tego radzi okna lub rolety. Tylko chłodzenie działa odwrotnie. Jeśli dom wyjdzie daleko poza swój zakres komfortu, Climate Advisor i tak użyje zablokowanego trybu, aż dom wróci do zakresu."
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "Auto (ogrzewanie i chłodzenie)",
+        "auto": "Ogrzewanie i chłodzenie (w razie potrzeby)",
         "heat_only": "Tylko ogrzewanie",
         "cool_only": "Tylko chłodzenie"
       }

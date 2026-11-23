@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "kararlar {engine} motorunun kendi ısınma ve soğuma hızlarını kullanır",
   "status.thermostat_notice.use_learned": "daha önce öğrenilmiş ısınma ve soğuma hızları kullanılmaya devam eder",
   "status.zone_lockout.cool_outdoor": "Soğutma kapalı: dışarısı {outdoor} ({threshold} altında)",
-  "status.zone_lockout.cool_season": "Soğutma kapalı: mevsim yalnızca ısıtmaya ayarlı",
+  "status.zone_lockout.cool_season": "Soğutma kapalı: yalnızca ısıtmaya izin var",
   "status.zone_lockout.heat_outdoor": "Isıtma kapalı: dışarısı {outdoor} ({threshold} üstünde)",
-  "status.zone_lockout.heat_season": "Isıtma kapalı: mevsim yalnızca soğutmaya ayarlı"
+  "status.zone_lockout.heat_season": "Isıtma kapalı: yalnızca soğutmaya izin var"
 }

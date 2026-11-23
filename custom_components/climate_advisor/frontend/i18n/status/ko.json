@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "{engine} 엔진 자체의 난방·냉방 속도로 판단합니다",
   "status.thermostat_notice.use_learned": "이미 학습한 난방·냉방 속도를 계속 사용합니다",
   "status.zone_lockout.cool_outdoor": "냉방 꺼짐: 외부 {outdoor} ({threshold} 미만)",
-  "status.zone_lockout.cool_season": "냉방 꺼짐: 계절이 난방 전용으로 설정됨",
+  "status.zone_lockout.cool_season": "냉방 꺼짐: 난방만 허용",
   "status.zone_lockout.heat_outdoor": "난방 꺼짐: 외부 {outdoor} ({threshold} 초과)",
-  "status.zone_lockout.heat_season": "난방 꺼짐: 계절이 냉방 전용으로 설정됨"
+  "status.zone_lockout.heat_season": "난방 꺼짐: 냉방만 허용"
 }

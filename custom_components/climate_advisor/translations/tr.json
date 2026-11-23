@@ -244,7 +244,7 @@
           "vacation_cool": "Tatil soğutma sıcaklığı",
           "cool_lockout_outdoor_temp": "Dışarısı altındaysa soğutma yok",
           "heat_lockout_outdoor_temp": "Dışarısı üstündeyse ısıtma yok",
-          "hvac_season": "Isıtma ve soğutma mevsimi"
+          "hvac_season": "İzin verilen ısıtma ve soğutma"
         },
         "data_description": {
           "comfort_heat": "Evde biri varken ısıtmadaki hedef sıcaklık.",
@@ -257,7 +257,7 @@
           "vacation_cool": "Tatil anahtarı açıkken soğutma sıcaklığı. Evde yokken soğutmadan 3 °F (yaklaşık 1,5 °C) yüksek değeri kullanmak için boş bırakın.",
           "cool_lockout_outdoor_temp": "Dışarısı bundan soğukken Climate Advisor soğutmaz ve bunun 2 °C (3,6 °F) üstünde yeniden soğutmaya izin verir. Soğutma sıcaklığından günün toleransından fazla sıcak bir ev yine de soğutulur. Kilit istemiyorsanız boş bırakın.",
           "heat_lockout_outdoor_temp": "Dışarısı bundan sıcakken Climate Advisor ısıtmaz ve bunun 2 °C (3,6 °F) altında yeniden ısıtmaya izin verir. Isıtma sıcaklığından günün toleransından fazla soğuk bir ev yine de ısıtılır. Soğutma kilidinden en az 2 °C (3,6 °F) yüksek olmalıdır. Kilit istemiyorsanız boş bırakın.",
-          "hvac_season": "Otomatik ısıtır ve soğutur. Yalnızca ısıtma veya Yalnızca soğutma, termostat yapamıyormuş gibi mevsim boyunca diğer tarafı kaldırır; o tarafın konfor sınırını çok aşan bir ev yine de onu alır."
+          "hvac_season": "Termostatın neleri kullanabileceği. Seçiminiz siz değiştirene kadar geçerli kalır; takvime göre değişmez. Yalnızca ısıtma (örneğin kışın): Climate Advisor asla soğutmaya geçmez, sıcak günlerde bunun yerine pencere veya perde önerir. Yalnızca soğutma bunun tersidir. Ev konfor aralığının çok dışına çıkarsa Climate Advisor, ev aralığa dönene kadar engellenen modu yine de kullanır."
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "Otomatik (ısıtma ve soğutma)",
+        "auto": "Isıtma ve soğutma (gerektikçe)",
         "heat_only": "Yalnızca ısıtma",
         "cool_only": "Yalnızca soğutma"
       }

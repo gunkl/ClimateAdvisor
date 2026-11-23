@@ -244,7 +244,7 @@
           "vacation_cool": "Koeltemperatuur tijdens vakantie",
           "cool_lockout_outdoor_temp": "Niet koelen onder buiten",
           "heat_lockout_outdoor_temp": "Niet verwarmen boven buiten",
-          "hvac_season": "Seizoen verwarmen en koelen"
+          "hvac_season": "Verwarmen en koelen toegestaan"
         },
         "data_description": {
           "comfort_heat": "Streeftemperatuur bij verwarmen als er iemand thuis is.",
@@ -257,7 +257,7 @@
           "vacation_cool": "Koeltemperatuur terwijl de vakantieschakelaar aan staat. Laat leeg om de koeling bij afwezigheid plus 3 °F (ongeveer 1,5 °C) te gebruiken.",
           "cool_lockout_outdoor_temp": "Climate Advisor koelt niet zolang het buiten kouder is dan dit, en staat koelen 2 °C (3,6 °F) erboven weer toe. Een huis dat meer dan de tolerantie van de dag warmer is dan de koeltemperatuur, wordt toch gekoeld. Leeg laten voor geen blokkering.",
           "heat_lockout_outdoor_temp": "Climate Advisor verwarmt niet zolang het buiten warmer is dan dit, en staat verwarmen 2 °C (3,6 °F) eronder weer toe. Een huis dat meer dan de tolerantie van de dag kouder is dan de verwarmingstemperatuur, wordt toch verwarmd. Moet minstens 2 °C (3,6 °F) boven de koelblokkering liggen. Leeg laten voor geen blokkering.",
-          "hvac_season": "Auto verwarmt en koelt. Alleen verwarmen of Alleen koelen haalt de andere kant weg voor het seizoen, alsof de thermostaat het niet kan; een huis ver voorbij de comfortgrens van die kant krijgt het toch."
+          "hvac_season": "Wat de thermostaat mag gebruiken. Uw keuze blijft staan tot u die wijzigt; ze volgt de kalender niet. Alleen verwarmen (bijvoorbeeld in de winter): Climate Advisor schakelt nooit naar koelen en raadt op warme dagen in plaats daarvan ramen of zonwering aan. Alleen koelen is het omgekeerde. Komt het huis ver buiten zijn comfortbereik, dan gebruikt Climate Advisor de geblokkeerde stand toch, tot het huis weer binnen het bereik is."
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "Auto (verwarmen en koelen)",
+        "auto": "Verwarmen en koelen (naar behoefte)",
         "heat_only": "Alleen verwarmen",
         "cool_only": "Alleen koelen"
       }

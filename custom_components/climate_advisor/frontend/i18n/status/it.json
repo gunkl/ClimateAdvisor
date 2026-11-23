@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "le decisioni usano le velocità di riscaldamento e raffreddamento proprie del motore {engine}",
   "status.thermostat_notice.use_learned": "continua a usare le velocità di riscaldamento e raffreddamento già apprese",
   "status.zone_lockout.cool_outdoor": "Raffrescamento spento: esterno {outdoor} (sotto {threshold})",
-  "status.zone_lockout.cool_season": "Raffrescamento spento: stagione impostata su solo riscaldamento",
+  "status.zone_lockout.cool_season": "Raffrescamento spento: consentito solo riscaldamento",
   "status.zone_lockout.heat_outdoor": "Riscaldamento spento: esterno {outdoor} (sopra {threshold})",
-  "status.zone_lockout.heat_season": "Riscaldamento spento: stagione impostata su solo raffrescamento"
+  "status.zone_lockout.heat_season": "Riscaldamento spento: consentito solo raffrescamento"
 }

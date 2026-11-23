@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "the decisions use the {engine} engine's own heating and cooling rates",
   "status.thermostat_notice.use_learned": "it keeps using the heating and cooling rates it had already learned",
   "status.zone_lockout.cool_outdoor": "Cooling off: outdoor {outdoor} (below {threshold})",
-  "status.zone_lockout.cool_season": "Cooling off: season set to heat only",
+  "status.zone_lockout.cool_season": "Cooling off: heating only allowed",
   "status.zone_lockout.heat_outdoor": "Heating off: outdoor {outdoor} (above {threshold})",
-  "status.zone_lockout.heat_season": "Heating off: season set to cool only"
+  "status.zone_lockout.heat_season": "Heating off: cooling only allowed"
 }

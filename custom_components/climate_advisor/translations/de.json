@@ -244,7 +244,7 @@
           "vacation_cool": "Urlaubstemperatur beim Kühlen",
           "cool_lockout_outdoor_temp": "Kein Kühlen unter außen",
           "heat_lockout_outdoor_temp": "Kein Heizen über außen",
-          "hvac_season": "Heiz- und Kühlsaison"
+          "hvac_season": "Heizen und Kühlen erlaubt"
         },
         "data_description": {
           "comfort_heat": "Zieltemperatur beim Heizen, wenn jemand zu Hause ist.",
@@ -257,7 +257,7 @@
           "vacation_cool": "Kühltemperatur, solange der Urlaubsschalter an ist. Leer lassen, um die Abwesenheitstemperatur plus 3 °F (ca. 1,5 °C) zu verwenden.",
           "cool_lockout_outdoor_temp": "Climate Advisor kühlt nicht, solange es draußen kälter ist als dieser Wert, und erlaubt das Kühlen 2 °C (3,6 °F) darüber wieder. Ein Haus, das um mehr als die Tagestoleranz über der Kühltemperatur liegt, wird trotzdem gekühlt. Leer lassen für keine Sperre.",
           "heat_lockout_outdoor_temp": "Climate Advisor heizt nicht, solange es draußen wärmer ist als dieser Wert, und erlaubt das Heizen 2 °C (3,6 °F) darunter wieder. Ein Haus, das um mehr als die Tagestoleranz unter der Heiztemperatur liegt, wird trotzdem geheizt. Muss mindestens 2 °C (3,6 °F) über der Kühlsperre liegen. Leer lassen für keine Sperre.",
-          "hvac_season": "Auto heizt und kühlt. Nur Heizen oder Nur Kühlen nimmt die andere Seite für die Saison weg, als könnte der Thermostat sie nicht; ein Haus weit jenseits der Komfortgrenze dieser Seite bekommt sie trotzdem."
+          "hvac_season": "Was der Thermostat nutzen darf. Ihre Wahl gilt, bis Sie sie ändern; sie folgt nicht dem Kalender. Nur Heizen (zum Beispiel im Winter): Climate Advisor schaltet nie auf Kühlen und empfiehlt an warmen Tagen stattdessen Fenster oder Jalousien. Nur Kühlen ist das Gegenteil. Liegt das Haus weit außerhalb seines Komfortbereichs, nutzt Climate Advisor die gesperrte Seite trotzdem, bis das Haus wieder im Bereich ist."
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "Auto (heizen und kühlen)",
+        "auto": "Heizen und Kühlen (nach Bedarf)",
         "heat_only": "Nur Heizen",
         "cool_only": "Nur Kühlen"
       }

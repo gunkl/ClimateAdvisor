@@ -919,5 +919,5 @@
   "dashboard.status.fan_speed_high": "высокую",
   "dashboard.status.fan_speed_low": "низкую",
   "dashboard.status.fan_speed_medium": "среднюю",
-  "dashboard.chart.ds.band_advisory": "Целевой диапазон (граница {family, select, cool {охлаждения} other {обогрева}} только совет: {reason, select, equipment {нет оборудования} outdoor_lockout {уличная блокировка} season {настройка сезона} other {недоступно}})"
+  "dashboard.chart.ds.band_advisory": "Целевой диапазон (граница {family, select, cool {охлаждения} other {обогрева}} только совет: {reason, select, equipment {нет оборудования} outdoor_lockout {уличная блокировка} season {настройка «Разрешены отопление и охлаждение»} other {недоступно}})"
 }

@@ -244,7 +244,7 @@
           "vacation_cool": "Temperatura di vacanza in raffreddamento",
           "cool_lockout_outdoor_temp": "Niente freddo sotto esterno",
           "heat_lockout_outdoor_temp": "Niente caldo sopra esterno",
-          "hvac_season": "Stagione riscaldamento e raffrescamento"
+          "hvac_season": "Riscaldamento e raffrescamento consentiti"
         },
         "data_description": {
           "comfort_heat": "Temperatura desiderata in riscaldamento quando qualcuno è in casa.",
@@ -257,7 +257,7 @@
           "vacation_cool": "Temperatura di raffreddamento mentre l’interruttore vacanza è attivo. Lasciare vuoto per usare il raffreddamento in assenza più 3 °F (circa 1,5 °C).",
           "cool_lockout_outdoor_temp": "Climate Advisor non raffresca finché fuori fa più freddo di questo valore, e lo consente di nuovo 2 °C (3,6 °F) sopra. Una casa più calda della temperatura di raffrescamento di più della tolleranza del giorno viene comunque raffrescata. Lascia vuoto per nessun blocco.",
           "heat_lockout_outdoor_temp": "Climate Advisor non riscalda finché fuori fa più caldo di questo valore, e lo consente di nuovo 2 °C (3,6 °F) sotto. Una casa più fredda della temperatura di riscaldamento di più della tolleranza del giorno viene comunque riscaldata. Deve essere almeno 2 °C (3,6 °F) sopra il blocco del raffrescamento. Lascia vuoto per nessun blocco.",
-          "hvac_season": "Auto riscalda e raffresca. Solo riscaldamento o Solo raffrescamento toglie l'altro lato per la stagione, come se il termostato non potesse farlo; una casa molto oltre il limite di comfort di quel lato lo riceve comunque."
+          "hvac_season": "Cosa può usare il termostato. La scelta resta finché non la cambi; non segue il calendario. Solo riscaldamento (ad esempio in inverno): Climate Advisor non passa mai al raffrescamento e nei giorni caldi suggerisce invece finestre o tende. Solo raffrescamento è l’opposto. Se la casa va molto oltre il suo intervallo di comfort, Climate Advisor usa comunque la modalità bloccata finché la casa non rientra."
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "Auto (riscalda e raffresca)",
+        "auto": "Riscaldamento e raffrescamento (secondo necessità)",
         "heat_only": "Solo riscaldamento",
         "cool_only": "Solo raffrescamento"
       }

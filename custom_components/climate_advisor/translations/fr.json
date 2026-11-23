@@ -244,7 +244,7 @@
           "vacation_cool": "Température de vacances en climatisation",
           "cool_lockout_outdoor_temp": "Pas de froid sous extérieur",
           "heat_lockout_outdoor_temp": "Pas de chauffage au-dessus extérieur",
-          "hvac_season": "Saison chauffage et climatisation"
+          "hvac_season": "Chauffage et climatisation autorisés"
         },
         "data_description": {
           "comfort_heat": "Température cible en chauffage lorsque quelqu’un est à la maison.",
@@ -257,7 +257,7 @@
           "vacation_cool": "Température de climatisation lorsque l’interrupteur de vacances est activé. Laissez vide pour utiliser la température d’absence en climatisation plus 3 °F (environ 1,5 °C).",
           "cool_lockout_outdoor_temp": "Climate Advisor ne climatise pas tant qu'il fait plus froid que cette valeur dehors, et l'autorise de nouveau 2 °C (3,6 °F) au-dessus. Une maison plus chaude que la température de climatisation de plus que la tolérance du jour est quand même climatisée. Laisser vide pour aucun verrouillage.",
           "heat_lockout_outdoor_temp": "Climate Advisor ne chauffe pas tant qu'il fait plus chaud que cette valeur dehors, et l'autorise de nouveau 2 °C (3,6 °F) en dessous. Une maison plus froide que la température de chauffage de plus que la tolérance du jour est quand même chauffée. Doit être au moins 2 °C (3,6 °F) au-dessus du verrouillage de climatisation. Laisser vide pour aucun verrouillage.",
-          "hvac_season": "Auto chauffe et climatise. Chauffage seul ou Climatisation seule retire l'autre côté pour la saison, comme si le thermostat ne pouvait pas le faire ; une maison très au-delà de la limite de confort de ce côté l'obtient quand même."
+          "hvac_season": "Ce que le thermostat peut utiliser. Votre choix reste en place jusqu’à ce que vous le changiez ; il ne suit pas le calendrier. Chauffage seul (par exemple en hiver) : Climate Advisor ne passe jamais en climatisation et propose plutôt fenêtres ou stores les jours chauds. Climatisation seule est l’inverse. Si la maison s’éloigne fortement de sa plage de confort, Climate Advisor utilise quand même le mode bloqué jusqu’à ce qu’elle y revienne."
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "Auto (chauffage et climatisation)",
+        "auto": "Chauffage et climatisation (selon les besoins)",
         "heat_only": "Chauffage seul",
         "cool_only": "Climatisation seule"
       }

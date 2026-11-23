@@ -244,7 +244,7 @@
           "vacation_cool": "Temperatura de vacaciones en refrigeración",
           "cool_lockout_outdoor_temp": "Sin frío bajo exterior",
           "heat_lockout_outdoor_temp": "Sin calefacción sobre exterior",
-          "hvac_season": "Temporada de climatización"
+          "hvac_season": "Calefacción y refrigeración permitidas"
         },
         "data_description": {
           "comfort_heat": "Temperatura objetivo en calefacción cuando hay alguien en casa.",
@@ -257,7 +257,7 @@
           "vacation_cool": "Temperatura de refrigeración mientras el interruptor de vacaciones está activado. Déjalo en blanco para usar la refrigeración de ausencia más 3 °F (unos 1,5 °C).",
           "cool_lockout_outdoor_temp": "Climate Advisor no enfría mientras fuera haga más frío que esto, y vuelve a permitirlo 2 °C (3,6 °F) por encima. Una casa más caliente que la temperatura de refrigeración en más de la tolerancia del día se enfría igualmente. Déjalo vacío para no bloquear.",
           "heat_lockout_outdoor_temp": "Climate Advisor no calienta mientras fuera haga más calor que esto, y vuelve a permitirlo 2 °C (3,6 °F) por debajo. Una casa más fría que la temperatura de calefacción en más de la tolerancia del día se calienta igualmente. Debe estar al menos 2 °C (3,6 °F) por encima del bloqueo de refrigeración. Déjalo vacío para no bloquear.",
-          "hvac_season": "Auto calienta y enfría. Solo calefacción o Solo refrigeración quita el otro lado durante la temporada, como si el termostato no pudiera hacerlo; una casa muy pasada del límite de confort de ese lado lo recibe igualmente."
+          "hvac_season": "Qué puede usar el termostato. Su elección se mantiene hasta que la cambie; no sigue el calendario. Solo calefacción (por ejemplo, en invierno): Climate Advisor nunca cambia a refrigeración y, en días cálidos, sugiere en su lugar ventanas o persianas. Solo refrigeración es lo contrario. Si la casa se aleja mucho de su rango de confort, Climate Advisor usa igualmente el modo bloqueado hasta que la casa vuelva al rango."
         }
       },
       "temperature_sources": {
@@ -857,7 +857,7 @@
     },
     "hvac_season": {
       "options": {
-        "auto": "Auto (calefacción y refrigeración)",
+        "auto": "Calefacción y refrigeración (según sea necesario)",
         "heat_only": "Solo calefacción",
         "cool_only": "Solo refrigeración"
       }

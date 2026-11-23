@@ -155,7 +155,7 @@
     "ov.plan_title": "What Climate Advisor will do (circles) and what you are asked to do (diamonds), from the plan",
     "ov.events": "Events",
     "ds.band": "Target Band",
-    "ds.band_advisory": "Target Band ({family, select, cool {cooling} other {heating}} edge advisory: {reason, select, equipment {no equipment} outdoor_lockout {outdoor lockout} season {season setting} other {unavailable}})",
+    "ds.band_advisory": "Target Band ({family, select, cool {cooling} other {heating}} edge advisory: {reason, select, equipment {no equipment} outdoor_lockout {outdoor lockout} season {Heating and cooling allowed setting} other {unavailable}})",
     "ds.plan_path": "Plan path",
     "strip.heating.label": "Heating",
     "strip.heating.short": "Heating",

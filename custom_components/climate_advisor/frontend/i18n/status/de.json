@@ -271,7 +271,7 @@
   "status.thermostat_notice.use_engine": "die Entscheidungen verwenden die eigenen Aufheiz- und Abkühlraten der {engine}-Engine",
   "status.thermostat_notice.use_learned": "es verwendet weiter die Aufheiz- und Abkühlraten, die es bereits gelernt hatte",
   "status.zone_lockout.cool_outdoor": "Kühlung aus: außen {outdoor} (unter {threshold})",
-  "status.zone_lockout.cool_season": "Kühlung aus: Saison auf nur Heizen gestellt",
+  "status.zone_lockout.cool_season": "Kühlung aus: nur Heizen erlaubt",
   "status.zone_lockout.heat_outdoor": "Heizung aus: außen {outdoor} (über {threshold})",
-  "status.zone_lockout.heat_season": "Heizung aus: Saison auf nur Kühlen gestellt"
+  "status.zone_lockout.heat_season": "Heizung aus: nur Kühlen erlaubt"
 }

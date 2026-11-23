@@ -21,12 +21,24 @@ from custom_components.climate_advisor.economizer_lifecycle import EconomizerLif
 from tests.test_economizer import _make_automation_engine, _make_hot_classification
 
 
+def _thermostat(engine, mode: str = "off") -> None:
+    state = MagicMock()
+    state.state = mode
+    state.attributes = {"fan_modes": ["auto", "on"], "fan_mode": "on", "hvac_modes": ["off", "heat", "cool"]}
+    engine.hass.states.get.return_value = state
+
+
 def _engine_in_cool_down(fan_mode: str):
     engine = _make_automation_engine({CONF_FAN_MODE: fan_mode})
     engine._current_classification = _make_hot_classification()
     engine._economizer_active = True
     engine._economizer_phase = "cool-down"
+    _thermostat(engine)
     return engine
+
+
+def _fan_mode_calls(engine):
+    return [c for c in engine.hass.services.async_call.call_args_list if c[0][1] == "set_fan_mode"]
 
 
 def _reconcile(engine, *, fan_running: bool, outdoor: float = 80.0) -> None:
@@ -37,25 +49,78 @@ def _reconcile(engine, *, fan_running: bool, outdoor: float = 80.0) -> None:
     )
 
 
-class TestReconcileStopEndsTheEconomizerSession:
-    """The reconcile's turn-off branch (``automation.py`` ``nat_vent_reconcile_exit``) stopping the economizer's fan."""
+class TestDeactivateFanIsTheHook:
+    """The one hook: a ``_deactivate_fan()`` stop that went out, or found the fan already off, ends the session."""
 
     def test_executed_stop_ends_the_session(self):
-        # Outdoor warmer than indoor: no nat-vent warrant, so the reconcile turns the running fan off.
-        engine = _engine_in_cool_down(FAN_MODE_WHOLE_HOUSE)
-        engine._exit_nat_vent = AsyncMock(return_value=FanCommandResult.EXECUTED)
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
+        engine._fan_active = True
+
+        result = asyncio.run(engine._deactivate_fan(reason="min_runtime_cycle_complete"))
+
+        assert result is FanCommandResult.EXECUTED
+        assert [c[0][2]["fan_mode"] for c in _fan_mode_calls(engine)] == ["auto"]
+        assert engine.economizer_lifecycle_state is EconomizerLifecycleState.INACTIVE
+
+    def test_already_off_ends_the_session(self):
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
+        engine._fan_active = False
+
+        result = asyncio.run(engine._deactivate_fan(reason="bedtime"))
+
+        assert result is FanCommandResult.ALREADY_IN_STATE
+        assert engine._economizer_active is False
+
+    def test_observe_only_stop_keeps_the_session(self):
+        # DRY_RUN: nothing was sent, the fan keeps running, so its session stays recorded (#1304).
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
+        engine._fan_active = True
+        engine.dry_run = True
+
+        result = asyncio.run(engine._deactivate_fan(reason="bedtime"))
+
+        assert result is FanCommandResult.DRY_RUN
+        assert engine._economizer_active is True
+
+    def test_economizer_own_stop_passes_through_its_own_teardown(self):
+        # _deactivate_economizer() opts out of the hook and clears its own flags (with its comfort restore).
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
+        engine._fan_active = True
+        engine._end_economizer_session_for_stopped_fan = MagicMock()
+
+        asyncio.run(engine._deactivate_economizer(outdoor_temp=80.0))
+
+        engine._end_economizer_session_for_stopped_fan.assert_not_called()
+        assert engine._economizer_active is False
+
+    def test_min_runtime_cycle_off_ends_the_session(self):
+        # A representative caller that never knew about the economizer: the min-runtime cycle's off phase.
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
+        engine._fan_active = True
+        engine._fan_min_runtime_active = True
+
+        asyncio.run(engine._fan_cycle_off())
+
+        assert engine._fan_active is False
+        assert engine._economizer_active is False
+
+
+class TestReconcileStopEndsTheEconomizerSession:
+    """The reconcile's turn-off branch (``nat_vent_reconcile_exit``) and its fan-observed-off branch, real stops."""
+
+    def test_executed_stop_ends_the_session(self):
+        # Outdoor warmer than indoor: no nat-vent warrant, so the reconcile turns the running blower off.
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
 
         _reconcile(engine, fan_running=True)
 
-        engine._exit_nat_vent.assert_awaited_once()
+        assert [c[0][2]["fan_mode"] for c in _fan_mode_calls(engine)] == ["auto"]
         assert engine.economizer_lifecycle_state is EconomizerLifecycleState.INACTIVE
-        assert engine._economizer_active is False
-        assert engine._economizer_phase == "inactive"
 
     def test_rate_limited_stop_keeps_the_session(self):
         # The toggle floor deferred the stop: the fan still runs, so the session stays recorded (the #1390 retry
         # re-runs the reconcile when the floor lets the command land).
-        engine = _engine_in_cool_down(FAN_MODE_WHOLE_HOUSE)
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
         engine._exit_nat_vent = AsyncMock(return_value=FanCommandResult.RATE_LIMITED_NEW)
         engine._arm_deferred_reconcile_retry = MagicMock()
 
@@ -66,8 +131,8 @@ class TestReconcileStopEndsTheEconomizerSession:
         assert engine._economizer_phase == "cool-down"
 
     def test_no_session_is_a_no_op(self):
-        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
-        engine._exit_nat_vent = AsyncMock(return_value=FanCommandResult.EXECUTED)
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        _thermostat(engine)
 
         _reconcile(engine, fan_running=True)
 
@@ -75,13 +140,10 @@ class TestReconcileStopEndsTheEconomizerSession:
         assert engine._economizer_phase == "inactive"
 
     def test_fan_observed_off_ends_the_session(self):
-        # The no-fan branch: the reconcile reads the fan off while the economizer still claims it.
-        engine = _engine_in_cool_down(FAN_MODE_WHOLE_HOUSE)
-        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.ALREADY_IN_STATE)
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
 
         _reconcile(engine, fan_running=False)
 
-        engine._deactivate_fan.assert_awaited_once()
         assert engine._economizer_active is False
 
 
@@ -90,7 +152,6 @@ class TestEndedSessionRestartsTheFan:
 
     def test_next_tick_restarts_the_blower(self):
         engine = _engine_in_cool_down(FAN_MODE_HVAC)
-        engine._exit_nat_vent = AsyncMock(return_value=FanCommandResult.EXECUTED)
         _reconcile(engine, fan_running=True)
         assert engine._economizer_active is False
 
@@ -165,33 +226,22 @@ class TestHvacOffKeepsTheEconomizerBlower:
     """Mirror of #134: CA's own Off (e.g. a door/window pause landing after window cooling started) must not stop
     the economizer's blower by asserting fan_mode=auto -- nothing would tell the economizer its fan stopped."""
 
-    @staticmethod
-    def _fan_mode_calls(engine):
-        return [c for c in engine.hass.services.async_call.call_args_list if c[0][1] == "set_fan_mode"]
-
-    @staticmethod
-    def _thermostat_in_cool(engine):
-        state = MagicMock()
-        state.state = "cool"
-        state.attributes = {"fan_modes": ["auto", "on"], "hvac_modes": ["off", "heat", "cool"]}
-        engine.hass.states.get.return_value = state
-
     def test_economizer_session_skips_the_fan_auto_assert(self):
         engine = _engine_in_cool_down(FAN_MODE_HVAC)
         engine._fan_active = True
-        self._thermostat_in_cool(engine)
+        _thermostat(engine, "cool")
 
         asyncio.run(engine._set_hvac_mode("off", reason="door or window opened"))
 
-        assert self._fan_mode_calls(engine) == []
+        assert _fan_mode_calls(engine) == []
         assert engine._economizer_active is True
 
     def test_no_session_still_asserts_fan_auto(self):
         engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
-        self._thermostat_in_cool(engine)
+        _thermostat(engine, "cool")
 
         asyncio.run(engine._set_hvac_mode("off", reason="door or window opened"))
 
-        calls = self._fan_mode_calls(engine)
+        calls = _fan_mode_calls(engine)
         assert len(calls) == 1
         assert calls[0][0][2]["fan_mode"] == "auto"

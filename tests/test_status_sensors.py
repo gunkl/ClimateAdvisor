@@ -1091,6 +1091,7 @@ class TestHotDayNextActionWindowPairOrdering:
         ae = _make_automation_engine()
         ae._natural_vent_active = False
         ae._economizer_active = False
+        ae.economizer_session_active = False  # Issue #1705: the one read accessor
         coord = _make_real_coordinator(True, ae)
         coord._compute_next_action = types.MethodType(ClimateAdvisorCoordinator._compute_next_action, coord)
         coord.config = {"comfort_cool": 75.0, "temp_unit": "fahrenheit"}
@@ -1137,6 +1138,7 @@ class TestHotDayNextActionWindowPairOrdering:
         ae = _make_automation_engine()
         ae._natural_vent_active = False
         ae._economizer_active = False
+        ae.economizer_session_active = False  # Issue #1705: the one read accessor
         coord = _make_real_coordinator(True, ae)
         coord._compute_next_action = types.MethodType(ClimateAdvisorCoordinator._compute_next_action, coord)
         coord.config = {"comfort_cool": 75.0, "temp_unit": "fahrenheit"}
@@ -1179,6 +1181,7 @@ class TestHotDayNextActionWindowPairOrdering:
         ae = _make_automation_engine()
         ae._natural_vent_active = False
         ae._economizer_active = False
+        ae.economizer_session_active = False  # Issue #1705: the one read accessor
         coord = _make_real_coordinator(True, ae)
         coord._compute_next_action = types.MethodType(ClimateAdvisorCoordinator._compute_next_action, coord)
         coord.config = {"comfort_cool": 75.0, "temp_unit": "fahrenheit"}

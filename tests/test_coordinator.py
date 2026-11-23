@@ -114,6 +114,7 @@ def _make_ae_stub(**overrides):
     ae = MagicMock()
     ae._natural_vent_active = False
     ae._economizer_active = False
+    ae.economizer_session_active = False  # Issue #1705: the one read accessor
     ae._manual_override_active = False
     ae._grace_active = False
     ae.is_paused_by_door = False
@@ -124,6 +125,8 @@ def _make_ae_stub(**overrides):
     ae._fan_override_active = False
     for key, value in overrides.items():
         setattr(ae, key, value)
+    if "_economizer_active" in overrides and "economizer_session_active" not in overrides:
+        ae.economizer_session_active = bool(overrides["_economizer_active"])  # Issue #1705: the one read accessor
     return ae
 
 

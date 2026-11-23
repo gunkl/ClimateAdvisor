@@ -293,6 +293,7 @@ class TestEligibleSessions:
         rig = _Rig()
         rig.engine._fan_active = True
         rig.engine._economizer_active = True
+        rig.engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
         rig.blind()
         rig.blind_for(clock, 3600)
         assert rig.types("fan_blind_started")[0]["session"] == "economizer"
@@ -381,6 +382,7 @@ class TestRecovery:
         _advance(clock, minutes=5)
         rig.engine._fan_active = True
         rig.engine._economizer_active = True
+        rig.engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
         rig.blind()
         started = rig.types("fan_blind_started")
         assert len(started) == 2

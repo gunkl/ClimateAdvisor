@@ -1,0 +1,81 @@
+{
+  "name": "issue_1705_off_to_off_echo_keeps_circulation_blower_flag",
+  "description": "Blower install, thermostat Off: an off -> off thermostat report during CA's own circulation run no longer clears CA's blower flag (no economizer or nat-vent session involved)",
+  "source": "synthetic",
+  "issue": 1705,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant: the thermostat is Off (switched off by the occupant at 14:05) and Climate Advisor's own blower circulation run starts. Before #1705 any thermostat report that still read Off (the echo of CA's own fan command, or the next poll) cleared CA's blower flag, so the Fan (HVAC) card stopped showing CA's run and the untracked-fan backstop had to deal with it.",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: the only guard this scenario needs is the real-change-to-Off check (old_state.state != 'off') in coordinator.py's #89 clear: no economizer or nat-vent session exists, so the exemptions do not apply; removing that check fails the 14:12 assertion (verified by mutation). (b) docs-production: docs/fan-lifecycle-spec.md 'Thermostat Off Clears CA's Blower Flag Only on a Real Change to Off (Issue #1705)' states that an off -> off event never clears the flag; production does exactly that. (c) occupant: if this regressed, the blower window cooling of #1705 would again be cleared by its own echo whenever an exemption failed, and CA's own circulation run would read as an untracked fan."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Off -> off echo keeps CA's blower flag",
+    "observed_behavior": "fan flag kept",
+    "expected_behavior": "fan flag kept"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 15
+  },
+  "events": [
+    {
+      "time": "2026-07-12T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 70.0,
+      "note": "Mild afternoon, windows closed, the house in the comfort band."
+    },
+    {
+      "time": "2026-07-12T14:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day: the comfort band arms cool."
+    },
+    {
+      "time": "2026-07-12T14:05:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "off",
+      "note": "The occupant switches the thermostat Off (no CA blower running yet, so nothing to clear)."
+    },
+    {
+      "time": "2026-07-12T14:10:00",
+      "type": "activate_fan_min_runtime",
+      "note": "CA's own circulation run starts the blower with the thermostat Off (no nat-vent, no economizer)."
+    },
+    {
+      "time": "2026-07-12T14:11:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "off",
+      "hvac_action": "fan",
+      "thermostat_fan_mode": "on",
+      "note": "The thermostat's next report: still Off, blower running (an off -> off event, not a change to Off)."
+    },
+    {
+      "time": "2026-07-12T14:12:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 70.0,
+      "note": "Two minutes into the run."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T14:12:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": true,
+      "reason": "The off -> off report of CA's own fan command is not a change to Off: CA still owns its circulation run."
+    }
+  ]
+}

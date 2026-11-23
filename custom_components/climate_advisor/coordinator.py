@@ -18010,7 +18010,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             f"{outdoor_temp:.1f}" if outdoor_temp is not None else "?",
             windows_physically_open,
             ae._natural_vent_active if ae else "?",
-            ae._economizer_active if ae else "?",
+            ae.economizer_session_active if ae else "?",
             ae._manual_override_active if ae else "?",
             ae._grace_active if ae else "?",
             ae.is_paused_by_door if ae else "?",
@@ -18273,7 +18273,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "hot_open_from",
                     i18n.Msg("status.next_action.hot_open_from", t=_clock_time(_evening_open_time)),
                 )
-            if ae is not None and (ae._natural_vent_active or ae._economizer_active):
+            if ae is not None and (ae._natural_vent_active or ae.economizer_session_active):
                 return _decide("nothing_to_do", "-")
             return _decide("keep_windows_blinds_closed", i18n.Msg("status.next_action.keep_windows_blinds_closed"))
         elif c.day_type == DAY_TYPE_COLD:
@@ -18290,7 +18290,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         heating_needed = indoor_temp is not None and indoor_temp < _armed_heat
 
         if cooling_needed:
-            if ae is not None and (ae._natural_vent_active or ae._economizer_active):
+            if ae is not None and (ae._natural_vent_active or ae.economizer_session_active):
                 return _decide("nothing_to_do", "-")
             if windows_physically_open:
                 if outdoor_temp is not None and not direction_ok:
@@ -21337,7 +21337,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "comfort_family_last_switch": (
                 dict(ae._last_comfort_switch) if getattr(ae, "_last_comfort_switch", None) else None
             ),
-            "economizer_active": ae._economizer_active,
+            "economizer_active": ae.economizer_session_active,
             "economizer_phase": ae._economizer_phase,
             "resumed_from_pause": ae._resumed_from_pause,
             "occupancy_away_timer_pending": self._occupancy_away_timer_cancel is not None,

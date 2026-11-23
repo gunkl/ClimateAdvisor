@@ -261,6 +261,7 @@ class TestRealRestoreCallers:
         engine = _make_engine(indoor=71.0, **_SLEEP_CFG)
         engine._current_classification = _classification("hot")
         engine._economizer_active = True
+        engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
         with patch(f"{_AUTOMATION}.dt_util.now", return_value=_NIGHT):
             _run(engine._deactivate_economizer(60.0))
         assert _setpoints(engine)[-1] == ("cool", 70.0)

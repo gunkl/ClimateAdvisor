@@ -274,6 +274,7 @@ def test_economizer_off_restores_comfort_when_the_day_is_reclassified(day):
     expected_mode, expected_temp, _ = _COMFORT[day]
     engine = _engine_for(day, FAN_MODE_HVAC)
     engine._economizer_active = True
+    engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
     engine._test_state.state = "off"
     mark = len(engine.hass.services.async_call.call_args_list)
     _run_at(engine, lambda: engine._deactivate_economizer(60.0))

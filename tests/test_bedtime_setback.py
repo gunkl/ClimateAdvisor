@@ -764,6 +764,7 @@ class TestEconomizerDeferredAtBedtime:
         engine._fan_active = True
         engine._fan_override_active = False
         engine._economizer_active = True
+        engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
         engine._last_outdoor_temp = 74.0
         engine._last_indoor_temp = 76.0
 
@@ -786,6 +787,7 @@ class TestEconomizerDeferredAtBedtime:
         engine._fan_active = True
         engine._fan_override_active = False
         engine._economizer_active = True
+        engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
         engine._last_outdoor_temp = 74.0
 
         engine._deactivate_fan = AsyncMock()
@@ -807,6 +809,7 @@ class TestEconomizerDeferredAtBedtime:
         engine._fan_active = False
         engine._fan_override_active = False
         engine._economizer_active = True
+        engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
         engine._last_outdoor_temp = 65.0
 
         engine._deactivate_fan = AsyncMock()
@@ -826,6 +829,7 @@ class TestEconomizerDeferredAtBedtime:
         engine._fan_active = False
         engine._fan_override_active = False
         engine._economizer_active = True
+        engine._economizer_phase = "cool-down"  # set together, as in production (#1705)
         engine._last_outdoor_temp = 65.0
 
         engine._deactivate_fan = AsyncMock()

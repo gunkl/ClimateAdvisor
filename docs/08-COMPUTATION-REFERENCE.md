@@ -4365,8 +4365,8 @@ session is never ended by humidity (D4, start-only).
   The spell ends on the coordinator's 5-minute dew-point tick when no H1 latch is on
   (`AutomationEngine.note_humid_spell_over`, the one reset site, so a humid night after a dry windows-shut day still
   writes its row). Status page (new dashboard and classic page): a line on the outdoor card, "Fan not started: humid
-  outside (dew point X, ...)", only while the guard would refuse a start that could happen (a fan exists and the day
-  is not a heating day: `AutomationEngine.humid_air_status_verdict`; `humid_air_guard` in the status API,
+  outside (dew point X, ...)", only while the guard would refuse a start that could happen (a fan exists for
+  ventilation, whatever the day type: `AutomationEngine.humid_air_status_verdict`; `humid_air_guard` in the status API,
   `api.humid_air_view`, catalog `status.humid_air.blocking_ceiling` / `_wetter`).
 - **Hysteresis granularity:** the latches are kept only by the 5-minute tick; each decision re-steps them from the
   tick's state with its own dew points and does not write back (the veto is stateless by design). Two decisions in

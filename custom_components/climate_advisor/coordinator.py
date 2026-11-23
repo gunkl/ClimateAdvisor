@@ -386,6 +386,7 @@ from .humidity_facts import (
     DewPointHistory,
     ReconnectWatch,
     decision_dew_point,
+    fmt_dp_log,
     humid_air_ceiling_from_config,
     paired_glitch,
     read_dew_point,
@@ -6910,7 +6911,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug(
                 "Dew point sample: signal=%s dp_f=%s reason=%s humidity=%s temperature=%s",
                 signal,
-                f"{reading.dp_f:.2f}" if reading.dp_f is not None else "unknown",
+                fmt_dp_log(reading.dp_f),
                 reading.reason,
                 reading.humidity_source,
                 reading.temp_source,

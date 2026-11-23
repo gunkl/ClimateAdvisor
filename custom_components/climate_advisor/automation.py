@@ -15764,14 +15764,12 @@ class AutomationEngine:
         )
 
     def humid_air_status_verdict(self, now: datetime | None = None) -> HumidAirVerdict | None:
-        """The verdict for the Status line (Issue #1691, review A4/B5): only while the guard would actually refuse a
-        fan start that could happen -- a fan exists for ventilation and the day is not a heating day (ventilation is
-        considered for cooling only). None otherwise, so the page never claims a fan was refused on a fan-less
-        install or on a heating day."""
+        """The verdict for the Status line (Issue #1691, review A4/B5, W2A-C N1): only while the guard would refuse a
+        fan start that could happen, i.e. a fan exists for ventilation. The day type does not matter: natural
+        ventilation is also asked on heating days (a house warmer than its floor may vent), so the line shows
+        whenever the verdict blocks on an install with a fan. None otherwise, so the page never claims a fan was
+        refused on a fan-less install."""
         if not fan_available_for_nat_vent(str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))):
-            return None
-        c = getattr(self, "_current_classification", None)
-        if c is not None and getattr(c, "hvac_mode", None) == "heat":
             return None
         verdict = self.humid_air_verdict(now)
         return verdict if verdict.blocks else None

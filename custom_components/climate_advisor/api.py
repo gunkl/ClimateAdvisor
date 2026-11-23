@@ -309,7 +309,7 @@ def humid_air_view(engine: Any, unit: str, lang: str | None = None) -> dict[str,
     """The Status page line while the humid-air guard blocks fan starts (Issue #1691, #1507 H1), else None.
 
     Read live from the engine's ``humid_air_status_verdict()`` (the same predicate every fan start asks, shown only
-    when a fan exists and the day is not a heating day), never re-decided here. The one humid-air Status line (the
+    when a fan exists for ventilation), never re-decided here. The one humid-air Status line (the
     new dashboard and the classic page both read ``humid_air_guard``).
     ``{code, outdoor_dew_point, indoor_dew_point, ceiling, text, text_msg}``; dew points in the display unit.
     """

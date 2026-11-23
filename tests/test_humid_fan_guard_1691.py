@@ -420,7 +420,8 @@ class TestReviewFixes:
             assert engine._humid_skip_reported is False  # no latch on: the spell is over
 
     def test_status_line_only_when_a_fan_could_start(self):
-        """A4/B5: no Status line on a fan-less install or on a heating day; neutral wording otherwise."""
+        """A4/B5, W2A-C N1: no Status line on a fan-less install; with a fan it shows on any day type (heat days
+        included: ventilation is asked then too); neutral wording."""
         from custom_components.climate_advisor.api import humid_air_view
         from custom_components.climate_advisor.const import FAN_MODE_DISABLED
 
@@ -429,7 +430,7 @@ class TestReviewFixes:
         assert view["text"].startswith("Fan not started: humid outside") and "AC" not in view["text"]
         assert "window" not in view["text"].lower()
         engine._current_classification = SimpleNamespace(hvac_mode="heat")
-        assert humid_air_view(engine, "fahrenheit") is None
+        assert humid_air_view(engine, "fahrenheit") is not None
         engine._current_classification = SimpleNamespace(hvac_mode="cool")
         assert humid_air_view(engine, "fahrenheit") is not None
         fanless, _ = _engine(FAN_MODE_DISABLED, indoor_dp=56.0, outdoor_dp=67.0)

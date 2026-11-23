@@ -17,6 +17,9 @@ EXPECTED_KEYS = {
     "setback_heat",
     "setback_cool",
     "vacation_heat",  # Issue #1347
+    "cool_lockout_outdoor_temp",  # Issue #1699
+    "heat_lockout_outdoor_temp",  # Issue #1699
+    "hvac_season",  # Issue #1699
     "vacation_cool",  # Issue #1347
     "notify_service",
     "briefing_notifications_enabled",

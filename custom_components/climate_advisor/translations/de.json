@@ -241,7 +241,10 @@
           "sleep_heat": "Schlaftemperatur beim Heizen",
           "sleep_cool": "Schlaftemperatur beim Kühlen",
           "vacation_heat": "Urlaubstemperatur beim Heizen",
-          "vacation_cool": "Urlaubstemperatur beim Kühlen"
+          "vacation_cool": "Urlaubstemperatur beim Kühlen",
+          "cool_lockout_outdoor_temp": "Kein Kühlen unter außen",
+          "heat_lockout_outdoor_temp": "Kein Heizen über außen",
+          "hvac_season": "Heiz- und Kühlsaison"
         },
         "data_description": {
           "comfort_heat": "Zieltemperatur beim Heizen, wenn jemand zu Hause ist.",
@@ -251,7 +254,10 @@
           "sleep_heat": "Zieltemperatur beim Heizen während der Schlafenszeit (wenn jemand zu Hause ist).",
           "sleep_cool": "Zieltemperatur beim Kühlen während der Schlafenszeit (wenn jemand zu Hause ist).",
           "vacation_heat": "Heiztemperatur, solange der Urlaubsschalter an ist. Leer lassen, um die Abwesenheitstemperatur minus 3 °F (ca. 1,5 °C) zu verwenden.",
-          "vacation_cool": "Kühltemperatur, solange der Urlaubsschalter an ist. Leer lassen, um die Abwesenheitstemperatur plus 3 °F (ca. 1,5 °C) zu verwenden."
+          "vacation_cool": "Kühltemperatur, solange der Urlaubsschalter an ist. Leer lassen, um die Abwesenheitstemperatur plus 3 °F (ca. 1,5 °C) zu verwenden.",
+          "cool_lockout_outdoor_temp": "Climate Advisor kühlt nicht, solange es draußen kälter ist als dieser Wert, und erlaubt das Kühlen 2 °C (3,6 °F) darüber wieder. Ein Haus, das um mehr als die Tagestoleranz über der Kühltemperatur liegt, wird trotzdem gekühlt. Leer lassen für keine Sperre.",
+          "heat_lockout_outdoor_temp": "Climate Advisor heizt nicht, solange es draußen wärmer ist als dieser Wert, und erlaubt das Heizen 2 °C (3,6 °F) darunter wieder. Ein Haus, das um mehr als die Tagestoleranz unter der Heiztemperatur liegt, wird trotzdem geheizt. Muss mindestens 2 °C (3,6 °F) über der Kühlsperre liegen. Leer lassen für keine Sperre.",
+          "hvac_season": "Auto heizt und kühlt. Nur Heizen oder Nur Kühlen nimmt die andere Seite für die Saison weg, als könnte der Thermostat sie nicht; ein Haus weit jenseits der Komfortgrenze dieser Seite bekommt sie trotzdem."
         }
       },
       "temperature_sources": {
@@ -572,7 +578,8 @@
       "vacation_heat_above_away_warning": "Die Urlaubsheizung ist wärmer als die Abwesenheitsheizung. Ein Urlaub verbraucht also mehr Energie als ein normaler Tag außer Haus. Sende erneut ab, um das beizubehalten.",
       "vacation_cool_below_away_warning": "Die Urlaubskühlung ist kühler als die Abwesenheitskühlung. Ein Urlaub verbraucht also mehr Energie als ein normaler Tag außer Haus. Sende erneut ab, um das beizubehalten.",
       "vacation_freeze_warning": "Mit dieser Einstellung liegt die Urlaubsheizung unter 45 °F (7 °C). Bei einer langen Reise können Leitungen einfrieren. Sende erneut ab, um das beizubehalten.",
-      "thermostat_shared_zone": "Eine andere Climate-Advisor-Zone nutzt dieses Thermostat bereits. Wähle ein anderes Thermostat."
+      "thermostat_shared_zone": "Eine andere Climate-Advisor-Zone nutzt dieses Thermostat bereits. Wähle ein anderes Thermostat.",
+      "lockout_overlap": "Die Heizsperre muss mindestens 2 °C (3,6 °F) über der Kühlsperre liegen; sonst gibt es, sobald beide aktiv sind, Außentemperaturen, bei denen weder Heizen noch Kühlen erlaubt ist."
     }
   },
   "issues": {
@@ -840,6 +847,13 @@
         "both": "Kühlen und Heizen",
         "cool": "Nur Kühlen",
         "heat": "Nur Heizen"
+      }
+    },
+    "hvac_season": {
+      "options": {
+        "auto": "Auto (heizen und kühlen)",
+        "heat_only": "Nur Heizen",
+        "cool_only": "Nur Kühlen"
       }
     }
   },

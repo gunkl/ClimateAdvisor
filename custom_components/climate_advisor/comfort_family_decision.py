@@ -265,17 +265,19 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
             target_family=inputs.current_family,
             reason=_reason("reason_cf_tou_owns"),
         )
-    if inputs.indoor is None or inputs.floor is None or inputs.ceiling is None:
-        return ComfortFamilyDecision(
-            outcome=ComfortFamilyOutcome.NOT_APPLICABLE,
-            target_family=inputs.current_family,
-            reason=_reason("reason_cf_missing_input"),
-        )
-
-    indoor, floor, ceiling = inputs.indoor, inputs.floor, inputs.ceiling
-    breach = indoor < floor or indoor > ceiling
-
-    if not inputs.supports_heat and not inputs.supports_cool:
+    missing = inputs.indoor is None or inputs.floor is None or inputs.ceiling is None
+    # Issue #1699: a single-family zone (heat-only / cool-only equipment, or a side masked by an outdoor lockout or
+    # the season setting) has only one answer, so it needs no indoor reading or band: decided BEFORE the missing-input
+    # check. Before, an unknown indoor reading kept the thermostat's current family, which on a zone whose cooling had
+    # just been locked out kept cool armed (and a restore with no reading could arm the side the zone lacks, #1489).
+    breach = (
+        not missing
+        and inputs.indoor is not None
+        and inputs.floor is not None
+        and inputs.ceiling is not None
+        and (inputs.indoor < inputs.floor or inputs.indoor > inputs.ceiling)
+    )
+    if not inputs.supports_heat and not inputs.supports_cool and not missing:
         return ComfortFamilyDecision(
             outcome=ComfortFamilyOutcome.NOT_APPLICABLE,
             target_family=inputs.current_family,
@@ -286,6 +288,14 @@ def decide_comfort_family(inputs: ComfortFamilyInputs) -> ComfortFamilyDecision:
         return _decision(inputs, _FAMILY_HEATING, _reason("reason_cf_heat_only"), breach=breach)
     if inputs.supports_cool and not inputs.supports_heat:
         return _decision(inputs, _FAMILY_COOLING, _reason("reason_cf_cool_only"), breach=breach)
+    if inputs.indoor is None or inputs.floor is None or inputs.ceiling is None:
+        return ComfortFamilyDecision(
+            outcome=ComfortFamilyOutcome.NOT_APPLICABLE,
+            target_family=inputs.current_family,
+            reason=_reason("reason_cf_missing_input"),
+        )
+
+    indoor, floor, ceiling = inputs.indoor, inputs.floor, inputs.ceiling
 
     m = effective_margin(inputs.margin_f, floor, ceiling)
     heat_limit = floor + m if m is not None else None

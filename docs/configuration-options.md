@@ -48,6 +48,9 @@ All setpoints accept 40–95°F (4–35°C), in steps of 1°F (0.5°C). If a com
 | **Sleep Cooling Temperature** `sleep_cool` | The cooling target from bedtime to wake-up, when someone is home. | 72°F (22°C) | 40–95°F |
 | **Vacation Heating Temperature** `vacation_heat` | The heating target while the vacation toggle is on. Set it for a deeper setback on long trips. Configure only. | Blank: away heating minus 3°F (about 1.5°C) | 40–95°F, or blank |
 | **Vacation Cooling Temperature** `vacation_cool` | The cooling target while the vacation toggle is on. Configure only. | Blank: away cooling plus 3°F (about 1.5°C) | 40–95°F, or blank |
+| **No cooling below outdoor** `cool_lockout_outdoor_temp` | Issue #1699: no cooling while the outdoor temperature is below this; cooling is allowed again 2°C (3.6°F) above it. A house hotter than the ceiling by more than the day's overshoot tolerance still gets cooling. A missing outdoor reading keeps the last state; none since startup means no lockout. Configure only. | Blank (no lockout) | −20–110°F (−30–45°C), or blank |
+| **No heating above outdoor** `heat_lockout_outdoor_temp` | Issue #1699: no heating while the outdoor temperature is above this; heating is allowed again 2°C (3.6°F) below it. A house colder than the floor by more than the day's overshoot tolerance still gets heating. Must be at least 2°C (3.6°F) above the cooling lockout, so both can never be engaged at once (the form rejects a closer pair). Configure only. | Blank (no lockout) | −20–110°F (−30–45°C), or blank |
+| **Heating and cooling season** `hvac_season` | Issue #1699: Heat only or Cool only removes the other side for the season, as if the thermostat could not do it (a house far past that side's comfort edge still gets it). Configure only. | Auto | Auto (heat and cool), Heat only, Cool only |
 
 ## Temperature Sources
 

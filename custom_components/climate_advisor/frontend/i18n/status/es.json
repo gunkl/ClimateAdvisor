@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "no enviado",
   "status.pre_cool.outcome.superseded": "reemplazado",
   "status.pre_cool.skipped_awake": "omitido: horas de vigilia",
+  "status.pre_cool.skipped_cool_unavailable": "omitido: refrigeración no disponible",
   "status.pre_cool.skipped_manual_override": "omitido: cambio manual",
   "status.pre_cool.skipped_not_eligible": "omitido: no apto",
   "status.pre_cool.skipped_occupancy": "omitido: {mode, select, away {ausente} vacation {vacaciones} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "usa las velocidades de calentamiento y enfriamiento de una casa típica (valores predeterminados)",
   "status.thermostat_notice.use_defaults_learning": "las decisiones usan las velocidades de calentamiento y enfriamiento de una casa típica (valores predeterminados) mientras {engine} aprende",
   "status.thermostat_notice.use_engine": "las decisiones usan las velocidades de calentamiento y enfriamiento propias del motor {engine}",
-  "status.thermostat_notice.use_learned": "sigue usando las velocidades de calentamiento y enfriamiento que ya había aprendido"
+  "status.thermostat_notice.use_learned": "sigue usando las velocidades de calentamiento y enfriamiento que ya había aprendido",
+  "status.zone_lockout.cool_outdoor": "Refrigeración apagada: exterior {outdoor} (por debajo de {threshold})",
+  "status.zone_lockout.cool_season": "Refrigeración apagada: temporada en solo calefacción",
+  "status.zone_lockout.heat_outdoor": "Calefacción apagada: exterior {outdoor} (por encima de {threshold})",
+  "status.zone_lockout.heat_season": "Calefacción apagada: temporada en solo refrigeración"
 }

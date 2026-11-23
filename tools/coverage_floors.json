@@ -117,6 +117,7 @@
     "v4_shadow.py": 100.0,
     "whf_safety_decision.py": 100.0,
     "window_span.py": 100.0,
+    "zone_capability.py": 100.0,
     "zone_registry.py": 100.0
   }
 }

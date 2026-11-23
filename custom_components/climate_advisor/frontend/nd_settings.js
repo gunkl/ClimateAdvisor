@@ -15,7 +15,7 @@
   function numText(v) { return CAI18N.fmt.number(Number(v), { maximumFractionDigits: 6, useGrouping: false }); }
 
   var G = [
-    ['comfort', ['comfort_heat', 'comfort_cool', 'sleep_heat', 'sleep_cool', 'setback_heat', 'setback_cool', 'wake_time', 'sleep_time']],
+    ['comfort', ['comfort_heat', 'comfort_cool', 'sleep_heat', 'sleep_cool', 'setback_heat', 'setback_cool', 'wake_time', 'sleep_time', 'cool_lockout_outdoor_temp', 'heat_lockout_outdoor_temp', 'hvac_season']],
     ['equipment', ['climate_entity', 'weather_entity', 'temp_unit', 'fan_mode', 'fan_entity', 'fan_remote_entity', 'fan_state_entity', 'fan_state_feedback', 'hvac_fan_restrict_mode', 'nat_vent_soft_start_enabled', 'fan_min_runtime_per_hour']],
     ['sensors', ['indoor_temp_source', 'outdoor_temp_source', 'thermostat_companion_sensor', 'thermostat_recalibration_guard', 'sleep_indoor_temp_entity', 'indoor_humidity_entity', 'sleep_indoor_humidity_entity', 'outdoor_humidity_entity', 'door_window_sensors', 'sensor_polarity_inverted']],
     ['occupancy', ['home_toggle_entity', 'home_toggle_invert', 'vacation_toggle_entity', 'vacation_toggle_invert', 'vacation_heat', 'vacation_cool', 'guest_toggle_entity', 'guest_toggle_invert']],

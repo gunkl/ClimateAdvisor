@@ -102,11 +102,20 @@ class TestEngineModeSwitchBeforeWrite:
         assert _services(engine) == ["set_hvac_mode", "set_temperature"]
         assert engine._last_mode_switch_result is HvacCommandResult.EXECUTED
 
-    def test_no_mode_call_when_already_in_mode_or_unreadable_or_unadvertised(self):
-        for state, modes in (("heat", ("off", "heat")), ("unavailable", ("off", "heat")), ("off", ("off", "cool"))):
+    def test_no_mode_call_when_already_in_mode_or_unreadable(self):
+        for state, modes in (("heat", ("off", "heat")), ("unavailable", ("off", "heat"))):
             engine = _mock_engine(state, modes)
             asyncio.run(engine._set_temperature(70.0, reason="t", mode="heat"))
             assert _services(engine) == ["set_temperature"], (state, modes)
+
+    def test_unadvertised_family_is_refused_not_sent(self):
+        """Issue #1699 (the #1544 backstop): a heat write on a thermostat that advertises no heat is refused before
+        anything is sent (``CAPABILITY_BLOCKED``). Before, the setpoint went out without a mode switch and HA either
+        rejected it or the cool-only thermostat took a heating setpoint as its cooling target."""
+        engine = _mock_engine("off", ("off", "cool"))
+        result = asyncio.run(engine._set_temperature(70.0, reason="t", mode="heat"))
+        assert result is HvacCommandResult.CAPABILITY_BLOCKED
+        assert _services(engine) == []
 
     def test_post_fan_verify_style_off_or_auto_write_never_switches(self):
         for mode in ("off", "auto"):

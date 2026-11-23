@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "não enviado",
   "status.pre_cool.outcome.superseded": "substituído",
   "status.pre_cool.skipped_awake": "ignorado: horas de vigília",
+  "status.pre_cool.skipped_cool_unavailable": "ignorado: arrefecimento indisponível",
   "status.pre_cool.skipped_manual_override": "ignorado: alteração manual",
   "status.pre_cool.skipped_not_eligible": "ignorado: não elegível",
   "status.pre_cool.skipped_occupancy": "ignorado: {mode, select, away {ausente} vacation {férias} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "usa as velocidades de aquecimento e arrefecimento de uma casa típica (valores predefinidos)",
   "status.thermostat_notice.use_defaults_learning": "as decisões usam as velocidades de aquecimento e arrefecimento de uma casa típica (valores predefinidos) enquanto {engine} aprende",
   "status.thermostat_notice.use_engine": "as decisões usam as velocidades de aquecimento e arrefecimento próprias do motor {engine}",
-  "status.thermostat_notice.use_learned": "continua a usar as velocidades de aquecimento e arrefecimento que já tinha aprendido"
+  "status.thermostat_notice.use_learned": "continua a usar as velocidades de aquecimento e arrefecimento que já tinha aprendido",
+  "status.zone_lockout.cool_outdoor": "Arrefecimento desligado: exterior {outdoor} (abaixo de {threshold})",
+  "status.zone_lockout.cool_season": "Arrefecimento desligado: estação definida como só aquecimento",
+  "status.zone_lockout.heat_outdoor": "Aquecimento desligado: exterior {outdoor} (acima de {threshold})",
+  "status.zone_lockout.heat_season": "Aquecimento desligado: estação definida como só arrefecimento"
 }

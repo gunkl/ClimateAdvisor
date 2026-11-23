@@ -194,7 +194,13 @@ def transition(
                 dwell_since = _mark
         except TypeError:  # naive vs aware mix: ignore the unusable mark
             continue
-    if not decision.breach and dwell_since is not None:
+    # Issue #1699: leaving a family the zone can no longer run (a lockout or the season setting just took it away,
+    # or the equipment lacks it) is not a routine switch -- the dwell lock does not apply, so a cool armed when the
+    # cool lockout engages switches to heat at once.
+    _leaving_unavailable = (current_state is ComfortFamilyState.HEATING and not inputs.supports_heat) or (
+        current_state is ComfortFamilyState.COOLING and not inputs.supports_cool
+    )
+    if not decision.breach and not _leaving_unavailable and dwell_since is not None:
         try:
             elapsed = seconds_since(dwell_since, now=inputs.now)
         except TypeError:

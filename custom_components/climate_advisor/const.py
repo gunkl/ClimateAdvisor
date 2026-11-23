@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.73"
+VERSION = "0.9.74"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -264,6 +264,18 @@ VACATION_SETBACK_EXTRA = 3
 # means "away setpoint -/+ VACATION_SETBACK_EXTRA", exactly the pre-#1347 behaviour.
 CONF_VACATION_HEAT = "vacation_heat"
 CONF_VACATION_COOL = "vacation_cool"
+
+# Issue #1699: zone capability policies (options flow only, all off by default). The two lockouts are optional
+# OUTDOOR temperatures stored in °F like the other temperature options (absent or None = no lockout); the release
+# hysteresis is zone_capability.LOCKOUT_RELEASE_HYSTERESIS_F (2 °C). ``hvac_season`` narrows the zone to one side.
+CONF_COOL_LOCKOUT_OUTDOOR_TEMP = "cool_lockout_outdoor_temp"
+CONF_HEAT_LOCKOUT_OUTDOOR_TEMP = "heat_lockout_outdoor_temp"
+CONF_HVAC_SEASON = "hvac_season"
+HVAC_SEASON_AUTO = "auto"
+HVAC_SEASON_HEAT_ONLY = "heat_only"
+HVAC_SEASON_COOL_ONLY = "cool_only"
+HVAC_SEASON_OPTIONS = (HVAC_SEASON_AUTO, HVAC_SEASON_HEAT_ONLY, HVAC_SEASON_COOL_ONLY)
+DEFAULT_HVAC_SEASON = HVAC_SEASON_AUTO
 
 # Fan control configuration
 CONF_FAN_ENTITY = "fan_entity"
@@ -908,6 +920,36 @@ CONFIG_METADATA = {
         ),
         "category": "setpoints",
         "display_transform": "temp_abs",
+    },
+    "cool_lockout_outdoor_temp": {
+        "label": "No cooling below outdoor",
+        "description": (
+            "Climate Advisor does not cool while the outdoor temperature is below this (Issue #1699). It allows"
+            " cooling again once it is two Celsius degrees warmer. If the house gets hotter than the ceiling by more"
+            " than the day's overshoot tolerance, cooling runs anyway. Leave empty for no lockout."
+        ),
+        "category": "setpoints",
+        "display_transform": "temp_abs",
+    },
+    "heat_lockout_outdoor_temp": {
+        "label": "No heating above outdoor",
+        "description": (
+            "Climate Advisor does not heat while the outdoor temperature is above this (Issue #1699). It allows"
+            " heating again once it is two Celsius degrees colder. If the house gets colder than the floor by more"
+            " than the day's overshoot tolerance, heating runs anyway. Must be at least two Celsius degrees above the"
+            " cooling lockout. Leave empty for no lockout."
+        ),
+        "category": "setpoints",
+        "display_transform": "temp_abs",
+    },
+    "hvac_season": {
+        "label": "Heating and cooling season",
+        "description": (
+            "Auto lets Climate Advisor heat and cool. Heat only or Cool only removes the other side for the season,"
+            " as if the thermostat could not do it (Issue #1699). A house far past the removed side's comfort edge"
+            " still gets it."
+        ),
+        "category": "setpoints",
     },
     "notify_service": {
         "label": "Notification Service",
@@ -2471,6 +2513,7 @@ _METADATA_DEFAULTS: dict[str, Any] = {
     "ai_manual_requests_per_day": DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
     "ai_investigator_enabled": DEFAULT_AI_INVESTIGATOR_ENABLED,
     "ai_investigator_requests_per_day": DEFAULT_AI_INVESTIGATOR_RPD,
+    "hvac_season": DEFAULT_HVAC_SEASON,
 }
 _METADATA_NO_DEFAULT: frozenset[str] = frozenset(
     {
@@ -2478,6 +2521,8 @@ _METADATA_NO_DEFAULT: frozenset[str] = frozenset(
         "climate_entity",
         "vacation_heat",
         "vacation_cool",
+        "cool_lockout_outdoor_temp",
+        "heat_lockout_outdoor_temp",
         "notify_service",
         "sleep_indoor_temp_entity",
         CONF_INDOOR_HUMIDITY_ENTITY,

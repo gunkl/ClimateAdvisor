@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "未送信",
   "status.pre_cool.outcome.superseded": "置き換え済み",
   "status.pre_cool.skipped_awake": "スキップ：起きている時間帯",
+  "status.pre_cool.skipped_cool_unavailable": "スキップ：冷房を利用できません",
   "status.pre_cool.skipped_manual_override": "スキップ：手動変更あり",
   "status.pre_cool.skipped_not_eligible": "スキップ：対象外",
   "status.pre_cool.skipped_occupancy": "スキップ：{mode, select, away {不在} vacation {バケーション} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "一般的な住宅の暖房・冷房の速度（デフォルト）を使用します",
   "status.thermostat_notice.use_defaults_learning": "{engine}が学習する間は、一般的な住宅の暖房・冷房の速度（デフォルト）で判断します",
   "status.thermostat_notice.use_engine": "{engine}エンジン独自の暖房・冷房の速度で判断します",
-  "status.thermostat_notice.use_learned": "すでに学習済みの暖房・冷房の速度を引き続き使用します"
+  "status.thermostat_notice.use_learned": "すでに学習済みの暖房・冷房の速度を引き続き使用します",
+  "status.zone_lockout.cool_outdoor": "冷房オフ：外気 {outdoor}（{threshold} 未満）",
+  "status.zone_lockout.cool_season": "冷房オフ：シーズンが暖房のみに設定",
+  "status.zone_lockout.heat_outdoor": "暖房オフ：外気 {outdoor}（{threshold} 超）",
+  "status.zone_lockout.heat_season": "暖房オフ：シーズンが冷房のみに設定"
 }

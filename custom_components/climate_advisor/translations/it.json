@@ -241,7 +241,10 @@
           "sleep_heat": "Temperatura notturna in riscaldamento",
           "sleep_cool": "Temperatura notturna in raffreddamento",
           "vacation_heat": "Temperatura di vacanza in riscaldamento",
-          "vacation_cool": "Temperatura di vacanza in raffreddamento"
+          "vacation_cool": "Temperatura di vacanza in raffreddamento",
+          "cool_lockout_outdoor_temp": "Niente freddo sotto esterno",
+          "heat_lockout_outdoor_temp": "Niente caldo sopra esterno",
+          "hvac_season": "Stagione riscaldamento e raffrescamento"
         },
         "data_description": {
           "comfort_heat": "Temperatura desiderata in riscaldamento quando qualcuno è in casa.",
@@ -251,7 +254,10 @@
           "sleep_heat": "Temperatura desiderata in riscaldamento durante le ore notturne (quando sei in casa).",
           "sleep_cool": "Temperatura desiderata in raffreddamento durante le ore notturne (quando sei in casa).",
           "vacation_heat": "Temperatura di riscaldamento mentre l’interruttore vacanza è attivo. Lasciare vuoto per usare il riscaldamento in assenza meno 3 °F (circa 1,5 °C).",
-          "vacation_cool": "Temperatura di raffreddamento mentre l’interruttore vacanza è attivo. Lasciare vuoto per usare il raffreddamento in assenza più 3 °F (circa 1,5 °C)."
+          "vacation_cool": "Temperatura di raffreddamento mentre l’interruttore vacanza è attivo. Lasciare vuoto per usare il raffreddamento in assenza più 3 °F (circa 1,5 °C).",
+          "cool_lockout_outdoor_temp": "Climate Advisor non raffresca finché fuori fa più freddo di questo valore, e lo consente di nuovo 2 °C (3,6 °F) sopra. Una casa più calda della temperatura di raffrescamento di più della tolleranza del giorno viene comunque raffrescata. Lascia vuoto per nessun blocco.",
+          "heat_lockout_outdoor_temp": "Climate Advisor non riscalda finché fuori fa più caldo di questo valore, e lo consente di nuovo 2 °C (3,6 °F) sotto. Una casa più fredda della temperatura di riscaldamento di più della tolleranza del giorno viene comunque riscaldata. Deve essere almeno 2 °C (3,6 °F) sopra il blocco del raffrescamento. Lascia vuoto per nessun blocco.",
+          "hvac_season": "Auto riscalda e raffresca. Solo riscaldamento o Solo raffrescamento toglie l'altro lato per la stagione, come se il termostato non potesse farlo; una casa molto oltre il limite di comfort di quel lato lo riceve comunque."
         }
       },
       "temperature_sources": {
@@ -572,7 +578,8 @@
       "vacation_heat_above_away_warning": "Il riscaldamento in vacanza è più alto del riscaldamento in assenza, quindi una vacanza consuma più energia di una normale giornata fuori casa. Invia di nuovo per mantenerla.",
       "vacation_cool_below_away_warning": "Il raffreddamento in vacanza è più fresco del raffreddamento in assenza, quindi una vacanza consuma più energia di una normale giornata fuori casa. Invia di nuovo per mantenerla.",
       "vacation_freeze_warning": "Con questa impostazione, il riscaldamento in vacanza scende sotto i 45 °F (7 °C). Le tubature possono congelare durante un viaggio lungo. Invia di nuovo per mantenerla.",
-      "thermostat_shared_zone": "Un’altra zona Climate Advisor usa già questo termostato. Scegli un altro termostato."
+      "thermostat_shared_zone": "Un’altra zona Climate Advisor usa già questo termostato. Scegli un altro termostato.",
+      "lockout_overlap": "Il blocco del riscaldamento deve essere almeno 2 °C (3,6 °F) sopra quello del raffrescamento; altrimenti, con entrambi attivi, ci sono temperature esterne a cui non è consentito né riscaldare né raffrescare."
     }
   },
   "issues": {
@@ -840,6 +847,13 @@
         "both": "Raffrescamento e riscaldamento",
         "cool": "Solo raffrescamento",
         "heat": "Solo riscaldamento"
+      }
+    },
+    "hvac_season": {
+      "options": {
+        "auto": "Auto (riscalda e raffresca)",
+        "heat_only": "Solo riscaldamento",
+        "cool_only": "Solo raffrescamento"
       }
     }
   },

@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "नहीं भेजा गया",
   "status.pre_cool.outcome.superseded": "बदला गया",
   "status.pre_cool.skipped_awake": "छोड़ा गया: जागने के घंटे",
+  "status.pre_cool.skipped_cool_unavailable": "छोड़ा गया: कूलिंग उपलब्ध नहीं",
   "status.pre_cool.skipped_manual_override": "छोड़ा गया: मैन्युअल बदलाव",
   "status.pre_cool.skipped_not_eligible": "छोड़ा गया: पात्र नहीं",
   "status.pre_cool.skipped_occupancy": "छोड़ा गया: {mode, select, away {बाहर} vacation {छुट्टी} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "यह एक सामान्य घर की हीटिंग और कूलिंग दरों (डिफ़ॉल्ट) का उपयोग करता है",
   "status.thermostat_notice.use_defaults_learning": "जब तक {engine} सीख रहा है, निर्णय एक सामान्य घर की हीटिंग और कूलिंग दरों (डिफ़ॉल्ट) पर आधारित हैं",
   "status.thermostat_notice.use_engine": "निर्णय {engine} इंजन की अपनी हीटिंग और कूलिंग दरों पर आधारित हैं",
-  "status.thermostat_notice.use_learned": "यह पहले से सीखी हुई हीटिंग और कूलिंग दरों का उपयोग करता रहता है"
+  "status.thermostat_notice.use_learned": "यह पहले से सीखी हुई हीटिंग और कूलिंग दरों का उपयोग करता रहता है",
+  "status.zone_lockout.cool_outdoor": "कूलिंग बंद: बाहर {outdoor} ({threshold} से कम)",
+  "status.zone_lockout.cool_season": "कूलिंग बंद: मौसम केवल हीटिंग पर सेट",
+  "status.zone_lockout.heat_outdoor": "हीटिंग बंद: बाहर {outdoor} ({threshold} से अधिक)",
+  "status.zone_lockout.heat_season": "हीटिंग बंद: मौसम केवल कूलिंग पर सेट"
 }

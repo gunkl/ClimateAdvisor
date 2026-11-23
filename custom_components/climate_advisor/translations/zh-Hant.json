@@ -241,7 +241,10 @@
           "sleep_heat": "睡眠暖氣溫度",
           "sleep_cool": "睡眠冷氣溫度",
           "vacation_heat": "度假暖氣溫度",
-          "vacation_cool": "度假冷氣溫度"
+          "vacation_cool": "度假冷氣溫度",
+          "cool_lockout_outdoor_temp": "室外低於此值不開冷氣",
+          "heat_lockout_outdoor_temp": "室外高於此值不開暖氣",
+          "hvac_season": "冷暖氣季節"
         },
         "data_description": {
           "comfort_heat": "有人在家時的暖氣目標溫度。",
@@ -251,7 +254,10 @@
           "sleep_heat": "睡眠時段（有人在家時）的暖氣目標溫度。",
           "sleep_cool": "睡眠時段（有人在家時）的冷氣目標溫度。",
           "vacation_heat": "度假開關開啟時的暖氣溫度。留空則使用離家暖氣溫度減 3 °F（約 1.5 °C）。",
-          "vacation_cool": "度假開關開啟時的冷氣溫度。留空則使用離家冷氣溫度加 3 °F（約 1.5 °C）。"
+          "vacation_cool": "度假開關開啟時的冷氣溫度。留空則使用離家冷氣溫度加 3 °F（約 1.5 °C）。",
+          "cool_lockout_outdoor_temp": "室外比此溫度冷時，Climate Advisor 不開冷氣；高出此溫度 2 °C (3.6 °F) 後再次允許冷氣。比冷氣溫度高出超過當天容差的房屋仍會開冷氣。留空表示不鎖定。",
+          "heat_lockout_outdoor_temp": "室外比此溫度暖時，Climate Advisor 不開暖氣；低於此溫度 2 °C (3.6 °F) 後再次允許暖氣。比暖氣溫度低出超過當天容差的房屋仍會開暖氣。必須比冷氣鎖定溫度至少高 2 °C (3.6 °F)。留空表示不鎖定。",
+          "hvac_season": "自動會開暖氣和冷氣。僅暖氣或僅冷氣會在本季去掉另一側，就像溫控器做不到一樣；遠超該側舒適邊界的房屋仍會使用它。"
         }
       },
       "temperature_sources": {
@@ -572,7 +578,8 @@
       "vacation_heat_above_away_warning": "度假暖氣溫度比離家暖氣溫度還高，因此度假期間會比平常外出一天更耗能。若要保留此設定，請再次傳送。",
       "vacation_cool_below_away_warning": "度假冷氣溫度比離家冷氣溫度還低，因此度假期間會比平常外出一天更耗能。若要保留此設定，請再次傳送。",
       "vacation_freeze_warning": "依此設定，度假暖氣溫度最終會低於 45 °F（7 °C）。長時間外出旅行時，水管可能會結凍。若要保留此設定，請再次傳送。",
-      "thermostat_shared_zone": "另一個 Climate Advisor 區域已在使用此溫控器。請選擇其他溫控器。"
+      "thermostat_shared_zone": "另一個 Climate Advisor 區域已在使用此溫控器。請選擇其他溫控器。",
+      "lockout_overlap": "暖氣鎖定溫度必須比冷氣鎖定溫度至少高 2 °C (3.6 °F)；否則兩者同時生效時，會有既不允許暖氣也不允許冷氣的室外溫度。"
     }
   },
   "issues": {
@@ -840,6 +847,13 @@
         "both": "冷氣與暖氣",
         "cool": "僅冷氣",
         "heat": "僅暖氣"
+      }
+    },
+    "hvac_season": {
+      "options": {
+        "auto": "自動（暖氣和冷氣）",
+        "heat_only": "僅暖氣",
+        "cool_only": "僅冷氣"
       }
     }
   },

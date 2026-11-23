@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "niet verzonden",
   "status.pre_cool.outcome.superseded": "vervangen",
   "status.pre_cool.skipped_awake": "overgeslagen: wakkere uren",
+  "status.pre_cool.skipped_cool_unavailable": "overgeslagen: koelen niet beschikbaar",
   "status.pre_cool.skipped_manual_override": "overgeslagen: handmatige wijziging",
   "status.pre_cool.skipped_not_eligible": "overgeslagen: komt niet in aanmerking",
   "status.pre_cool.skipped_occupancy": "overgeslagen: {mode, select, away {afwezig} vacation {vakantie} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "hij gebruikt de opwarm- en afkoelsnelheden van een typisch huis (standaardwaarden)",
   "status.thermostat_notice.use_defaults_learning": "de beslissingen gebruiken de opwarm- en afkoelsnelheden van een typisch huis (standaardwaarden) terwijl {engine} leert",
   "status.thermostat_notice.use_engine": "de beslissingen gebruiken de eigen opwarm- en afkoelsnelheden van de {engine}-engine",
-  "status.thermostat_notice.use_learned": "hij blijft de opwarm- en afkoelsnelheden gebruiken die hij al had geleerd"
+  "status.thermostat_notice.use_learned": "hij blijft de opwarm- en afkoelsnelheden gebruiken die hij al had geleerd",
+  "status.zone_lockout.cool_outdoor": "Koelen uit: buiten {outdoor} (onder {threshold})",
+  "status.zone_lockout.cool_season": "Koelen uit: seizoen op alleen verwarmen",
+  "status.zone_lockout.heat_outdoor": "Verwarmen uit: buiten {outdoor} (boven {threshold})",
+  "status.zone_lockout.heat_season": "Verwarmen uit: seizoen op alleen koelen"
 }

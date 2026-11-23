@@ -197,6 +197,8 @@ class TestConfigViewTemperatureUnits:
         "sleep_cool",
         "vacation_heat",  # Issue #1347
         "vacation_cool",  # Issue #1347
+        "cool_lockout_outdoor_temp",  # Issue #1699
+        "heat_lockout_outdoor_temp",  # Issue #1699
         "threshold_hot",
         "threshold_warm",
         "threshold_mild",

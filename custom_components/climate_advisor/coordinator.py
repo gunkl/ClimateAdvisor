@@ -4486,8 +4486,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         previous = getattr(self, "_last_outdoor_temp", None)
         self._last_outdoor_temp = value
-        self.automation_engine.update_outdoor_temp(value)
+        _zone_changed = self.automation_engine.update_outdoor_temp(value)
         self._apply_outdoor_windows_gate()
+        if _zone_changed is True and getattr(self, "hass", None) is not None:
+            # Issue #1699: an outdoor lockout engaged or released -- re-run the classification now, the way
+            # climate_advisor.force_reclassify does, so a cool armed as the cool lockout engages switches to heat at
+            # once (or Off through the "no capable mode" path when the zone can serve neither side).
+            _LOGGER.info("Zone capability changed with outdoor %.1f°F — re-running the classification", value)
+            self._spawn(self._async_zone_capability_changed())
         if record_history:
             self._outdoor_temp_history.append((dt_util.now().isoformat(), value))
             # Issue #540: nat-vent soft-start needs "today's observed peak so far" to
@@ -4503,6 +4509,50 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 f"{previous:.1f}°F" if previous is not None else "unknown",
                 value,
             )
+
+    async def _async_zone_capability_changed(self) -> None:
+        """Issue #1699: a lockout engaged or released -- act on it now, not at the next 30-minute cycle.
+
+        First the reactive comfort-edge check on the current reading (the selector now sees the masked capabilities,
+        so a cool armed as the cool lockout engages wants heat and re-applies the classification at once, with the
+        guards that path already has); then a full refresh, the same call ``climate_advisor.force_reclassify`` makes.
+        """
+        engine = getattr(self, "automation_engine", None)
+        indoor = self._get_indoor_temp()
+        if engine is not None and indoor is not None:
+            await decide(
+                self,
+                engine.comfort_family_temperature_check,
+                indoor,
+                predicted_indoor=self.control_predicted_indoor(),
+            )
+        await self.async_request_refresh()
+
+    def _zone_lockout_status(self) -> CodedText | None:
+        """Issue #1699: the engine's zone lockout Status line (None when no policy lock is active, or no engine)."""
+        engine = getattr(self, "automation_engine", None)
+        fn = getattr(engine, "zone_lockout_status", None)
+        if fn is None:
+            return None
+        try:
+            value = fn()
+        except Exception:  # noqa: BLE001 - a status line must never break the update cycle
+            _LOGGER.debug("Zone lockout status unavailable", exc_info=True)
+            return None
+        return value if isinstance(value, CodedText) else None
+
+    def zone_capability_snapshot(self) -> dict[str, Any] | None:
+        """Issue #1699: the effective heat / cool availability and reasons (diagnostics), or None without an engine."""
+        engine = getattr(self, "automation_engine", None)
+        fn = getattr(engine, "zone_capability_snapshot", None)
+        if fn is None:
+            return None
+        try:
+            value = fn()
+        except Exception:  # noqa: BLE001 - diagnostics must never raise
+            _LOGGER.debug("Zone capability snapshot unavailable", exc_info=True)
+            return None
+        return value if isinstance(value, dict) else None
 
     def _track_indoor_comfort(self, indoor: float | None) -> None:
         """Record the indoor sample and the Comfort Score minutes for this cycle (indoor only, no weather; #1337)."""
@@ -5710,6 +5760,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FORECAST_HIGH_TOMORROW: c.tomorrow_high if c else None,
             ATTR_FORECAST_LOW_TOMORROW: c.tomorrow_low if c else None,
             "pre_cool_status": self._pre_cool_status,
+            # Issue #1699: the Status line while an outdoor lockout or the season setting takes a side away.
+            "zone_lockout_status": self._zone_lockout_status(),
             # Issue #361: WHF command-only mode status fields
             "whf_mode": (
                 "disabled"
@@ -10495,7 +10547,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Away/Vacation split-delta bank), so ``_apply_tou_schedule()`` writes the bank target right after
         ``apply_classification()`` and that pass must not write a band edge first."""
         resolution = getattr(self, "_tou_phase_resolution", None)
-        return bool(resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING)
+        if not (resolution is not None and resolution.phase == TOUPhase.PRECONDITIONING):
+            return False
+        # Issue #1699: a bank in a family the zone cannot use now is suppressed, so it owns nothing and the band pass
+        # must write the band edge (otherwise nothing is written for the whole pre-conditioning window).
+        return self._tou_bank_family_allowed(getattr(resolution, "mode", None))
+
+    def _tou_bank_family_allowed(self, mode: Any) -> bool:
+        """Issue #1699: the engine allows a bank in ``mode``'s family now (no lockout / season / missing equipment)."""
+        engine = getattr(self, "automation_engine", None)
+        fn = getattr(engine, "_zone_bank_allowed", None) if engine is not None else None
+        if fn is None:
+            return True
+        try:
+            return fn(mode) is not False
+        except Exception:  # noqa: BLE001 - never lose the bank to a capability fault
+            return True
 
     def _tou_bank_in_force(self, now: datetime) -> Any | None:
         """CONTROL (Issues #1404/#1409): this cycle's time-of-use resolution when its bank owns the thermostat at
@@ -10522,6 +10589,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ae = self.automation_engine
         if ae is None or not ae.tou_bank_gates_pass():
             return None
+        if not self._tou_bank_family_allowed(res.mode):
+            return None  # Issue #1699: suppressed (lockout / season / equipment): the schedule band holds
         return res
 
     def _active_tou_bank(self, now: datetime) -> TouBankHold | None:

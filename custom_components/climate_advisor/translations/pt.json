@@ -241,7 +241,10 @@
           "sleep_heat": "Temperatura de sono (aquecimento)",
           "sleep_cool": "Temperatura de sono (arrefecimento)",
           "vacation_heat": "Temperatura de férias (aquecimento)",
-          "vacation_cool": "Temperatura de férias (arrefecimento)"
+          "vacation_cool": "Temperatura de férias (arrefecimento)",
+          "cool_lockout_outdoor_temp": "Sem frio abaixo do exterior",
+          "heat_lockout_outdoor_temp": "Sem aquecimento acima do exterior",
+          "hvac_season": "Estação de climatização"
         },
         "data_description": {
           "comfort_heat": "Temperatura-alvo ao aquecer quando há alguém em casa.",
@@ -251,7 +254,10 @@
           "sleep_heat": "Temperatura-alvo ao aquecer durante as horas de sono (quando está em casa).",
           "sleep_cool": "Temperatura-alvo ao arrefecer durante as horas de sono (quando está em casa).",
           "vacation_heat": "Temperatura de aquecimento enquanto o interruptor de férias está ligado. Deixe em branco para usar o aquecimento em ausência menos 3 °F (cerca de 1,5 °C).",
-          "vacation_cool": "Temperatura de arrefecimento enquanto o interruptor de férias está ligado. Deixe em branco para usar o arrefecimento em ausência mais 3 °F (cerca de 1,5 °C)."
+          "vacation_cool": "Temperatura de arrefecimento enquanto o interruptor de férias está ligado. Deixe em branco para usar o arrefecimento em ausência mais 3 °F (cerca de 1,5 °C).",
+          "cool_lockout_outdoor_temp": "O Climate Advisor não arrefece enquanto estiver mais frio do que isto lá fora, e volta a permitir 2 °C (3,6 °F) acima. Uma casa mais quente do que a temperatura de arrefecimento em mais do que a tolerância do dia é arrefecida na mesma. Deixe vazio para nenhum bloqueio.",
+          "heat_lockout_outdoor_temp": "O Climate Advisor não aquece enquanto estiver mais quente do que isto lá fora, e volta a permitir 2 °C (3,6 °F) abaixo. Uma casa mais fria do que a temperatura de aquecimento em mais do que a tolerância do dia é aquecida na mesma. Tem de ficar pelo menos 2 °C (3,6 °F) acima do bloqueio de arrefecimento. Deixe vazio para nenhum bloqueio.",
+          "hvac_season": "Auto aquece e arrefece. Só aquecimento ou Só arrefecimento remove o outro lado durante a estação, como se o termóstato não o pudesse fazer; uma casa muito além do limite de conforto desse lado recebe-o na mesma."
         }
       },
       "temperature_sources": {
@@ -572,7 +578,8 @@
       "vacation_heat_above_away_warning": "O aquecimento de férias é mais quente do que o aquecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
       "vacation_cool_below_away_warning": "O arrefecimento de férias é mais frio do que o arrefecimento em ausência, pelo que umas férias gastam mais energia do que um dia normal fora. Envie novamente para manter.",
       "vacation_freeze_warning": "Com esta definição, o aquecimento de férias fica abaixo de 45 °F (7 °C). Os canos podem congelar durante uma viagem longa. Envie novamente para manter.",
-      "thermostat_shared_zone": "Outra zona do Climate Advisor já usa este termóstato. Escolha outro termóstato."
+      "thermostat_shared_zone": "Outra zona do Climate Advisor já usa este termóstato. Escolha outro termóstato.",
+      "lockout_overlap": "O bloqueio de aquecimento tem de ficar pelo menos 2 °C (3,6 °F) acima do de arrefecimento; caso contrário, com ambos ativos, há temperaturas exteriores em que nem aquecer nem arrefecer é permitido."
     }
   },
   "issues": {
@@ -840,6 +847,13 @@
         "both": "Arrefecimento e aquecimento",
         "cool": "Só arrefecimento",
         "heat": "Só aquecimento"
+      }
+    },
+    "hvac_season": {
+      "options": {
+        "auto": "Auto (aquecer e arrefecer)",
+        "heat_only": "Só aquecimento",
+        "cool_only": "Só arrefecimento"
       }
     }
   },

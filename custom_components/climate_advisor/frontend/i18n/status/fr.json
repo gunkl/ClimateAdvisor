@@ -186,6 +186,7 @@
   "status.pre_cool.outcome.not_sent": "non envoyé",
   "status.pre_cool.outcome.superseded": "remplacé",
   "status.pre_cool.skipped_awake": "ignoré : heures d’éveil",
+  "status.pre_cool.skipped_cool_unavailable": "ignoré : climatisation indisponible",
   "status.pre_cool.skipped_manual_override": "ignoré : modification manuelle",
   "status.pre_cool.skipped_not_eligible": "ignoré : non éligible",
   "status.pre_cool.skipped_occupancy": "ignoré : {mode, select, away {absence} vacation {vacances} other {{mode}}}",
@@ -259,5 +260,9 @@
   "status.thermostat_notice.use_defaults": "il utilise les vitesses de chauffe et de refroidissement d’une maison type (valeurs par défaut)",
   "status.thermostat_notice.use_defaults_learning": "les décisions utilisent les vitesses de chauffe et de refroidissement d’une maison type (valeurs par défaut) pendant que {engine} apprend",
   "status.thermostat_notice.use_engine": "les décisions utilisent les vitesses de chauffe et de refroidissement propres au moteur {engine}",
-  "status.thermostat_notice.use_learned": "il continue d’utiliser les vitesses de chauffe et de refroidissement déjà apprises"
+  "status.thermostat_notice.use_learned": "il continue d’utiliser les vitesses de chauffe et de refroidissement déjà apprises",
+  "status.zone_lockout.cool_outdoor": "Climatisation coupée : extérieur {outdoor} (sous {threshold})",
+  "status.zone_lockout.cool_season": "Climatisation coupée : saison réglée sur chauffage seul",
+  "status.zone_lockout.heat_outdoor": "Chauffage coupé : extérieur {outdoor} (au-dessus de {threshold})",
+  "status.zone_lockout.heat_season": "Chauffage coupé : saison réglée sur climatisation seule"
 }

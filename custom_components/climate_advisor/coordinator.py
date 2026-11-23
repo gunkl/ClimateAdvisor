@@ -378,6 +378,8 @@ from .fan_status import (
 from .feels_like import feels_like_f, wind_speed_to_mph
 from .forecast_archive import ForecastArchive
 from .humidity_facts import (
+    HUMID_AIR_CEILING_LATCH,
+    HUMID_AIR_WETTER_LATCH,
     SIGNAL_INDOOR,
     SIGNAL_OUTDOOR,
     DewPoint,
@@ -6918,6 +6920,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.__dict__.get("_humid_latch_state") or {},
             ceiling_f=humid_air_ceiling_from_config(getattr(self, "config", None)),
         )
+        # Issue #1691 (review B1): the humid spell ends on this tick when no H1 latch is on, so the next refused fan
+        # start writes its Activity row again (the one reset site; it runs whether or not any start decision ran).
+        if not any(self._humid_latch_state.get(n) for n in (HUMID_AIR_CEILING_LATCH, HUMID_AIR_WETTER_LATCH)):
+            engine = getattr(self, "automation_engine", None)
+            note = getattr(engine, "note_humid_spell_over", None)
+            if callable(note):
+                note()
 
     def _humidity_source_kind(self, role: str, source: str | None, chosen: str | None) -> str | None:
         """Code of the kind of a humidity source (Issue #1455): ``chosen``, ``weather_service``, ``thermostat`` or
@@ -19880,13 +19889,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # the delay's end, before any forecast-grid time this scan can return.
             and self._any_sensor_open()
             and _predicted_indoor
+            # Issue #1691 (review B4): future hours have no humidity, so the prediction asks no humid-air guard; while
+            # the live guard blocks (the best forecast for the next hours), the card promises no fan start at all.
+            and not getattr(decide_sync(self, ae.humid_air_verdict), "blocks", False)
         ):
 
             def _nat_vent_gate_comparator(ts: datetime, outdoor: float, indoor: float) -> bool:
                 # Issue #1142 (step 7): the engine's own "may a fan session start?" question, asked as of ``ts`` on
                 # the forecast temperatures -- the same nat-vent FSM answer the engine acts on (full gate, soft start,
                 # a fan exists, forecast-peak / thermal-floor guards, lockout, override), so this card never promises
-                # a start the engine will veto and does not miss a soft start.
+                # a start the engine will veto and does not miss a soft start. The humid-air guard is the exception:
+                # it is not asked per future hour (no forecast humidity) but as the live verdict above (Issue #1691).
                 return decide_sync(
                     self,
                     ae._nat_vent_start_decision,

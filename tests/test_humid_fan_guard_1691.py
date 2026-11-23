@@ -191,9 +191,10 @@ class TestReporting:
         assert payload["outdoor_dew_point"] == pytest.approx(67.0, abs=0.05)
         assert payload["indoor_dew_point"] == pytest.approx(56.0, abs=0.05)
         assert payload["ceiling"] == 65.0
-        # the air dries: the spell ends; humid again: a new row
+        # the air dries and the coordinator's tick ends the spell (review B1); humid again: a new row
         engine._inputs.outdoor_humidity = _rh(70.0, 50.0)
         assert engine._humid_air_blocks_fan_start(starter="economizer") is False
+        engine.note_humid_spell_over()
         engine._inputs.outdoor_humidity = _rh(70.0, 67.0)
         assert engine._humid_air_blocks_fan_start(starter="nat_vent_cycling") is True
         assert [k for k, _ in events] == ["nat_vent_humid_skip", "nat_vent_humid_skip"]
@@ -355,4 +356,108 @@ def test_pending_humid_air_scenario_passes_production_engine(scenario_path: Path
 
 
 def test_humid_air_scenarios_discovered() -> None:
-    assert len(_PENDING) == 10, [p.stem for p in _PENDING]
+    assert len(_PENDING) == 14, [p.stem for p in _PENDING]
+
+
+# ── review W2A fixes ──────────────────────────────────────────────────────────────────────────────────────────────
+class TestReviewFixes:
+    def test_min_runtime_retry_runs_the_fan_once_dry(self):
+        """A6: the 300 s retry of a humid deferral starts the fan when the air has dried."""
+        engine, _ = _engine(
+            FAN_MODE_WHOLE_HOUSE, indoor_dp=56.0, outdoor_dp=67.0, **{CONF_FAN_MIN_RUNTIME_PER_HOUR: 10}
+        )
+        engine._whf_start_blocked_by_sealed_house = lambda: False
+        spawned: list = []
+        engine._spawn_whf_task = spawned.append
+        with patch(_PATCH_CALL_LATER, return_value=MagicMock()) as later:
+            asyncio.run(engine._fan_cycle_on())
+            (delay, retry) = later.call_args_list[-1].args[1:3]
+            assert delay == 300 and engine._fan_min_runtime_active is False
+            engine._inputs.outdoor_humidity = _rh(70.0, 50.0)
+            retry(None)
+            assert len(spawned) == 1
+            asyncio.run(spawned[0])
+        assert engine._fan_min_runtime_active is True
+        engine.hass.services.async_call.assert_called()
+
+    def test_spell_reset_comes_from_the_tick_not_from_decisions(self):
+        """B1 / A7: a dry start decision no longer ends the spell; note_humid_spell_over() (the tick) does."""
+        engine, events = _engine(indoor_dp=56.0, outdoor_dp=67.0)
+        assert engine._humid_air_blocks_fan_start(starter="economizer") is True
+        engine._inputs.outdoor_humidity = _rh(70.0, 50.0)
+        assert engine._humid_air_blocks_fan_start(starter="economizer") is False
+        engine._nat_vent_start_decision(NAT_VENT_START_WINDOW_OPEN, indoor=76.0, outdoor=70.0)
+        assert engine._humid_skip_reported is True  # decisions never clear it
+        engine.note_humid_spell_over()
+        engine._inputs.outdoor_humidity = _rh(70.0, 67.0)
+        assert engine._humid_air_blocks_fan_start(starter="economizer") is True
+        assert [k for k, _ in events] == ["nat_vent_humid_skip", "nat_vent_humid_skip"]
+
+    def test_tick_ends_the_spell_only_when_no_latch_is_on(self):
+        """B1: a humid night after a dry, windows-shut day (no start decision ran) still writes its Activity row."""
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+        from tools.sim_harness.fake_hass import FakeState
+        from tools.sim_harness.humidity_devices import OUTDOOR_HUMIDITY_ENTITY, seed_same_device
+
+        outdoor = "sensor.outdoor_temp"
+        zones, fake_hass, scheduler = build_headless_multi_zone(
+            configs=[
+                {"climate_entity": "climate.zone_a", "outdoor_temp_source": "sensor", "outdoor_temp_entity": outdoor}
+            ]
+        )
+        coord = zones["zone_0"]["coordinator"]
+        engine = coord.automation_engine
+        fake_hass.states.set(outdoor, FakeState(state="70.0", attributes={"unit_of_measurement": "°F"}))
+        seed_same_device(coord, outdoor, OUTDOOR_HUMIDITY_ENTITY, outdoor=True)
+        with scheduler.installed():
+            fake_hass.states.async_report_humidity(OUTDOOR_HUMIDITY_ENTITY, _rh(70.0, 67.0))
+            engine._humid_skip_reported = True  # a refusal was reported earlier in this spell
+            coord._sample_humidity_facts(scheduler.now())
+            assert engine._humid_skip_reported is True  # ceiling latch on: still the same spell
+            fake_hass.states.async_report_humidity(OUTDOOR_HUMIDITY_ENTITY, _rh(70.0, 50.0))
+            coord._dew_point_history = None  # a fresh window: the dry reading alone
+            coord._sample_humidity_facts(scheduler.now())
+            assert engine._humid_skip_reported is False  # no latch on: the spell is over
+
+    def test_status_line_only_when_a_fan_could_start(self):
+        """A4/B5: no Status line on a fan-less install or on a heating day; neutral wording otherwise."""
+        from custom_components.climate_advisor.api import humid_air_view
+        from custom_components.climate_advisor.const import FAN_MODE_DISABLED
+
+        engine, _ = _engine(indoor_dp=56.0, outdoor_dp=67.0)
+        view = humid_air_view(engine, "fahrenheit")
+        assert view["text"].startswith("Fan not started: humid outside") and "AC" not in view["text"]
+        assert "window" not in view["text"].lower()
+        engine._current_classification = SimpleNamespace(hvac_mode="heat")
+        assert humid_air_view(engine, "fahrenheit") is None
+        engine._current_classification = SimpleNamespace(hvac_mode="cool")
+        assert humid_air_view(engine, "fahrenheit") is not None
+        fanless, _ = _engine(FAN_MODE_DISABLED, indoor_dp=56.0, outdoor_dp=67.0)
+        assert humid_air_view(fanless, "fahrenheit") is None
+
+    def test_next_automation_promises_no_fan_start_while_humid(self):
+        """B4: the natural-ventilation prediction scan is skipped while the live verdict blocks."""
+        from custom_components.climate_advisor import coordinator as coord_mod
+
+        for outdoor_dp, scanned in ((67.0, False), (50.0, True)):
+            engine, _ = _engine(indoor_dp=56.0, outdoor_dp=outdoor_dp)
+            engine._grace_active = False
+            fake = SimpleNamespace(
+                automation_engine=engine,
+                config=engine.config,
+                control_predicted_indoor=lambda: [("t", 76.0)],
+                _any_sensor_open=lambda: True,
+                _hourly_forecast_temps=[],
+            )
+            calls: list = []
+            with (
+                patch.object(
+                    coord_mod,
+                    "decide_sync",
+                    lambda _c, fn, *a, **k: fn(*a, **{x: v for x, v in k.items() if x != "facts_at"}),
+                ),
+                patch.object(coord_mod, "_build_future_forecast_outdoor", lambda *_a: []),
+                patch.object(coord_mod, "find_temperature_crossing", lambda *a, _c=calls, **k: _c.append(1) or "at"),
+            ):
+                result = coord_mod.ClimateAdvisorCoordinator._predict_nat_vent_start(fake, datetime.now(UTC), None)
+            assert (result == "at") is scanned and bool(calls) is scanned

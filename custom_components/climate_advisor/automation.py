@@ -252,6 +252,7 @@ from .fan_toggle_rate_limit import (
 from .humidity_facts import (
     HUMID_AIR_REASON_CEILING,
     HumidAirVerdict,
+    fmt_dp_log,
     humid_air_ceiling_from_config,
     humid_air_verdict_from_facts,
 )
@@ -284,6 +285,7 @@ from .nat_vent_gate import (
     NatVentStartVetoInputs,
     decide_nat_vent_soft_start_gate,
     explain_nat_vent_gate,
+    fan_available_for_nat_vent,
 )
 from .nat_vent_lifecycle import (
     NatVentLifecycleInputs,
@@ -4517,6 +4519,18 @@ class AutomationEngine:
             return
         await self._fan_cycle_on()
 
+    def _defer_min_runtime_cycle(self, why: str) -> None:
+        """Defer the min-runtime cycle start and retry it in ``WHF_SEALED_CYCLE_RETRY_S`` (Issues #1144, #1691):
+        nothing is started and no "cycle running" flag is set, so the hour's minimum runtime is not lost."""
+        _LOGGER.info("Min-runtime cycle deferred: %s (retry in %ds) role=%s", why, WHF_SEALED_CYCLE_RETRY_S, self.role)
+
+        @callback
+        def _deferred_retry(_now: Any) -> None:
+            self._fan_min_cycle_cancel = None
+            self._spawn_whf_task(self._fan_cycle_on())
+
+        self._fan_min_cycle_cancel = _call_later(self, WHF_SEALED_CYCLE_RETRY_S, _deferred_retry)
+
     def _stop_fan_min_runtime_cycles(self) -> None:
         """Cancel any pending min-runtime cycle timer and clear active flag."""
         if self._fan_min_cycle_cancel:
@@ -4590,41 +4604,20 @@ class AutomationEngine:
             and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_WHOLE_HOUSE
             and self._whf_start_blocked_by_sealed_house()
         ):
-            _LOGGER.info(
-                "Min-runtime cycle deferred: house sealed, whole-house fan runs only with a door/window open "
-                "(retry in %ds) role=%s",
-                WHF_SEALED_CYCLE_RETRY_S,
-                self.role,
-            )
-
-            @callback
-            def _sealed_retry(_now: Any) -> None:
-                self._fan_min_cycle_cancel = None
-                self._spawn_whf_task(self._fan_cycle_on())
-
-            self._fan_min_cycle_cancel = _call_later(self, WHF_SEALED_CYCLE_RETRY_S, _sealed_retry)
+            self._defer_min_runtime_cycle("house sealed, whole-house fan runs only with a door/window open")
             return
 
         # Issue #1691 (#1507 H1): a whole-house-fan install's min-runtime cycle pulls outdoor air through the open
-        # window; on a humid spell it waits like the sealed-house deferral above (a blower install's cycle only
-        # recirculates indoor air and is unaffected).
+        # window; on a humid spell it waits like the sealed-house deferral above. Scope differs from the economizer
+        # and cycling-on guards on purpose: those run only as part of a window-ventilation session (air in through
+        # the window, whatever moves it), while a blower install's min-runtime cycle runs with the windows shut and
+        # only recirculates indoor air, so it is left to the H2 HVAC-fan restrict.
         if (
             outcome in (FanCycleOutcome.ACTIVATE_ALWAYS_ON, FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER)
             and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_WHOLE_HOUSE
             and self._humid_air_blocks_fan_start(starter="min_runtime")
         ):
-            _LOGGER.info(
-                "Min-runtime cycle deferred: humid outdoor air (retry in %ds) role=%s",
-                WHF_SEALED_CYCLE_RETRY_S,
-                self.role,
-            )
-
-            @callback
-            def _humid_retry(_now: Any) -> None:
-                self._fan_min_cycle_cancel = None
-                self._spawn_whf_task(self._fan_cycle_on())
-
-            self._fan_min_cycle_cancel = _call_later(self, WHF_SEALED_CYCLE_RETRY_S, _humid_retry)
+            self._defer_min_runtime_cycle("humid outdoor air")
             return
 
         # Issue #1205: the occupant's fan-off hold also holds off the min-runtime cycle (it restarts when the person
@@ -15697,10 +15690,7 @@ class AutomationEngine:
             humid_guard=profile.humid_guard,
         )
         _state = self.nat_vent_lifecycle_state if profile.live_lifecycle_state else NatVentLifecycleState.INACTIVE
-        _result = _nat_vent_transition(_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_inputs))
-        if profile.humid_guard and at is None:
-            self._note_humid_air_clear(self.humid_air_verdict())
-        return _result
+        return _nat_vent_transition(_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_inputs))
 
     def _forecast_peak_next_2h(self, now: datetime) -> float | None:
         """Highest hourly-forecast temperature in the next 2 hours, or None (Issue #1138).
@@ -15773,10 +15763,24 @@ class AutomationEngine:
             self._facts(now if now is not None else dt_util.now()), humid_air_ceiling_from_config(self.config)
         )
 
-    def _note_humid_air_clear(self, verdict: HumidAirVerdict) -> None:
-        """A start decision found the outdoor air not humid: the next humid spell reports again (one row per spell)."""
-        if not verdict.blocks:
-            self._humid_skip_reported = False
+    def humid_air_status_verdict(self, now: datetime | None = None) -> HumidAirVerdict | None:
+        """The verdict for the Status line (Issue #1691, review A4/B5): only while the guard would actually refuse a
+        fan start that could happen -- a fan exists for ventilation and the day is not a heating day (ventilation is
+        considered for cooling only). None otherwise, so the page never claims a fan was refused on a fan-less
+        install or on a heating day."""
+        if not fan_available_for_nat_vent(str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))):
+            return None
+        c = getattr(self, "_current_classification", None)
+        if c is not None and getattr(c, "hvac_mode", None) == "heat":
+            return None
+        verdict = self.humid_air_verdict(now)
+        return verdict if verdict.blocks else None
+
+    def note_humid_spell_over(self) -> None:
+        """The coordinator's 5-minute dew-point tick found no H1 latch on: the humid spell is over, so the next
+        refused fan start writes its Activity row again (one row per spell). The one reset site (review B1): it runs
+        on the same tick as the latch, whether or not any start decision ran (windows shut all day)."""
+        self._humid_skip_reported = False
 
     def _humid_air_blocks_fan_start(self, *, starter: str) -> bool:
         """The humid-air guard for the fan starts outside the nat-vent start chain (Issue #1691): the economizer,
@@ -15784,7 +15788,6 @@ class AutomationEngine:
         (reported once per humid spell); unknown humidity or the guard Off = False (today's behaviour)."""
         verdict = self.humid_air_verdict()
         if not verdict.blocks:
-            self._note_humid_air_clear(verdict)
             return False
         self._report_humid_air_skip(
             verdict.reason, verdict.indoor_dp_f, verdict.outdoor_dp_f, verdict.ceiling_f, starter
@@ -15800,8 +15803,7 @@ class AutomationEngine:
         starter: str,
     ) -> None:
         """INFO line and ``nat_vent_humid_skip`` Activity row once per humid spell; DEBUG on the repeats."""
-        indoor_s = f"{indoor_dp_f:.2f}" if indoor_dp_f is not None else "unknown"  # degF, native resolution
-        outdoor_s = f"{outdoor_dp_f:.2f}" if outdoor_dp_f is not None else "unknown"
+        indoor_s, outdoor_s = fmt_dp_log(indoor_dp_f), fmt_dp_log(outdoor_dp_f)
         ceiling_s = f"{ceiling_f:.1f}" if ceiling_f is not None else "off"
         if getattr(self, "_humid_skip_reported", False):
             _LOGGER.debug(
@@ -15815,7 +15817,7 @@ class AutomationEngine:
         self._humid_skip_reported = True
         _LOGGER.info(
             "Fan start skipped: humid outdoor air (%s) starter=%s outdoor_dew_point_f=%s indoor_dew_point_f=%s"
-            " ceiling_f=%s -- the house stays closed and the AC holds the band",
+            " ceiling_f=%s -- the fan is not started",
             "at or above the ceiling" if reason == HUMID_AIR_REASON_CEILING else "wetter than the house",
             starter,
             outdoor_s,
@@ -21567,13 +21569,16 @@ class AutomationEngine:
         if not result.changed:
             return True
 
-        if current_state == EconomizerLifecycleState.INACTIVE and self._humid_air_blocks_fan_start(
-            starter="economizer"
+        if (
+            current_state == EconomizerLifecycleState.INACTIVE
+            and fan_available_for_nat_vent(str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)))
+            and self._humid_air_blocks_fan_start(starter="economizer")
         ):
             # Issue #1691 (#1507 H1): no economizer fan START into humid outdoor air (an active economizer moving
             # between cool-down and maintain keeps its running fan: D4 start-only, and applying INACTIVE there would
-            # leave the fan running with no economizer session to stop it). The economizer stays inactive (the open
-            # window pauses HVAC like any other); the guard is asked again on the next tick.
+            # leave the fan running with no economizer session to stop it). A house with no fan keeps its window-cooling
+            # AC run (no fan, no air pulled in: review A1). The economizer stays inactive (the open window pauses HVAC
+            # like any other); the guard is asked again on the next tick.
             self._apply_economizer_fsm_state(EconomizerLifecycleState.INACTIVE)
             return False
 

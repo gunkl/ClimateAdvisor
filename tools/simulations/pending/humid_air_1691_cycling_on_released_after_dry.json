@@ -1,0 +1,100 @@
+{
+  "name": "humid_air_1691_cycling_on_released_after_dry",
+  "description": "After a humid refusal of the cycling-on, the outdoor air dries and the next cycling check switches the fan back on",
+  "source": "synthetic",
+  "issue": 1691,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: a cycling guard that never released (e.g. a sticky refusal) leaves 12:30 reading nat_vent_humid_skip. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: the fan would stay off for the rest of the evening although the air outside dried."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "After a humid refusal of the cycling-on, the outdoor air dries and the next cycling check switches the fan back on",
+    "observed_behavior": "After a humid refusal of the cycling-on, the outdoor air dries and the next cycling check switches the fan back on",
+    "expected_behavior": "After a humid refusal of the cycling-on, the outdoor air dries and the next cycling check switches the fan back on"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "nat_vent_hysteresis_f": 1.0,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-06-12T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "No humidity known."
+    },
+    {
+      "time": "2026-06-12T08:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day."
+    },
+    {
+      "time": "2026-06-12T08:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_window",
+      "note": "Session starts."
+    },
+    {
+      "time": "2026-06-12T10:30:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 70.0,
+      "note": "Fan cycles off."
+    },
+    {
+      "time": "2026-06-12T11:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 65.0,
+      "humidity": 57.0,
+      "outdoor_humidity": 90.0,
+      "note": "Outdoor air turns wetter than the house."
+    },
+    {
+      "time": "2026-06-12T11:30:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 72.0,
+      "note": "On threshold, humid: refused."
+    },
+    {
+      "time": "2026-06-12T12:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.5,
+      "outdoor_f": 65.0,
+      "humidity": 56.1,
+      "outdoor_humidity": 58.3,
+      "note": "The outdoor air dries (dew point 50F)."
+    },
+    {
+      "time": "2026-06-12T12:30:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 72.0,
+      "note": "On threshold again, dry air."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-12T11:30:00",
+      "expect": "nat_vent_humid_skip",
+      "reason": "Refused into wetter-than-house air."
+    },
+    {
+      "at": "2026-06-12T12:30:00",
+      "expect": "nat_vent_fan_on",
+      "reason": "The guard released: the fan cycles back on."
+    },
+    {
+      "at": "2026-06-12T12:30:00",
+      "expect": "nat_vent_still_active",
+      "reason": "The same session continued throughout."
+    }
+  ]
+}

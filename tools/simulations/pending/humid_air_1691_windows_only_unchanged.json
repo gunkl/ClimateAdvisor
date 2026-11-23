@@ -5,7 +5,7 @@
   "issue": 1691,
   "notes": [
     "Dew points (feels_like.dew_point_f): indoor 76.0F at 50.0% = 56.01F; outdoor 70.0F at 90.2% = 66.99F. Ceiling = default 65F (option On).",
-    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: a guard placed before the no-working-fan rule would report a refusal for a fan that does not exist. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: no confusing 'fan not started' row on an install that has no fan."
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: a guard placed before the no-working-fan rule would report a refusal for a fan that does not exist. This is a control scenario: deleting the guard does not fail it, by design. There is no negative event assertion: a humid-air row at the 20:15 re-check would read nat_vent_humid_skip there (last decision wins), which the 20:15 'paused' assertion catches. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid-air guard (Issue #1691)' states this rule and production applies it through humidity_facts.humid_air_verdict. (c) occupant: no confusing 'fan not started' row on an install that has no fan."
   ],
   "verdict": {
     "type": "positive",

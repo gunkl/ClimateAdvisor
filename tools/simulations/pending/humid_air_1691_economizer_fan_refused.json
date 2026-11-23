@@ -1,6 +1,6 @@
 {
   "name": "humid_air_1691_economizer_fan_refused",
-  "description": "Hot-day morning window cooling (economizer) with humid outdoor air (dew point ~67F): the economizer does not start the fan; the AC keeps the band",
+  "description": "Hot-day morning window cooling (economizer) with humid outdoor air (dew point ~67F): the economizer does not start the fan and no economizer session begins (the cool band set by the classification is left as it was; nothing here opens a door/window sensor)",
   "source": "synthetic",
   "issue": 1691,
   "notes": [
@@ -76,6 +76,13 @@
       "at": "2026-07-10T07:00:00",
       "expect": "fan_not_active",
       "reason": "No fan."
+    },
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._economizer_active",
+      "value": false,
+      "reason": "No economizer session was recorded (the refusal applies INACTIVE before any fan command)."
     }
   ]
 }

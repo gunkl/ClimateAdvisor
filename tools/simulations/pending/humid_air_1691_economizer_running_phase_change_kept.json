@@ -72,6 +72,13 @@
       "expect": "economizer_final_phase",
       "phase": "maintain",
       "reason": "The running economizer moves to maintain; humidity does not stop or strand it."
+    },
+    {
+      "at": "2026-07-10T08:00:00",
+      "expect": "field_equals",
+      "field": "engine_state._fan_active",
+      "value": true,
+      "reason": "The economizer's fan is still running and still owned by an economizer session (not stranded)."
     }
   ]
 }

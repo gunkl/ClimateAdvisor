@@ -308,17 +308,19 @@ def _text_fields(field: str, value: Any, lang: str | None, *, code: bool = False
 def humid_air_view(engine: Any, unit: str, lang: str | None = None) -> dict[str, Any] | None:
     """The Status page line while the humid-air guard blocks fan starts (Issue #1691, #1507 H1), else None.
 
-    Read live from the engine's ``humid_air_verdict()`` (the same predicate every fan start asks), never re-decided
-    here. ``{code, outdoor_dew_point, indoor_dew_point, ceiling, text, text_msg}``; dew points in the display unit.
+    Read live from the engine's ``humid_air_status_verdict()`` (the same predicate every fan start asks, shown only
+    when a fan exists and the day is not a heating day), never re-decided here. The one humid-air Status line (the
+    new dashboard and the classic page both read ``humid_air_guard``).
+    ``{code, outdoor_dew_point, indoor_dew_point, ceiling, text, text_msg}``; dew points in the display unit.
     """
-    getter = getattr(engine, "humid_air_verdict", None)
+    getter = getattr(engine, "humid_air_status_verdict", None)
     if not callable(getter):
         return None
     try:
         verdict = getter()
     except Exception:  # noqa: BLE001 - a status read must never break the endpoint
         return None
-    if not getattr(verdict, "blocks", False) or verdict.outdoor_dp_f is None:
+    if verdict is None or not getattr(verdict, "blocks", False) or verdict.outdoor_dp_f is None:
         return None
     outdoor = i18n.Temp(float(verdict.outdoor_dp_f), unit, 1)
     if verdict.reason == "ceiling" and verdict.ceiling_f is not None:

@@ -1580,7 +1580,7 @@ Natural ventilation and the economizer **no longer set `hvac_mode=off`** when th
 
 **Exits with a window still open (Issue #1142 D4/D8):** the outdoor-rise and ceiling exits, the comfort-floor exit (slow and fast loop) and the away-ceiling exit (slow and fast loop) all route through `_exit_nat_vent()`'s sensor-open branch: session ended, window pause recorded, thermostat switched Off right then (`_hold_thermostat_off_for_open_window`), reactivation lockout armed. Closing the window re-arms comfort in ONE write through the selector (away: the setback), so modes do not flap. **Observe-only (Issue #1295, mirror of #1293):** with automation switched off the thermostat may be heating/cooling (nothing turned it Off). Since Issue #1304 no session starts or ends on paper (`_activate_fan()`/`_deactivate_fan()` return `DRY_RUN`, the session is kept while its fan runs), so this branch is reached only when the session ends without a fan command (fan already off, or an occupant fan override) -- defense in depth. The Off-hold's `_set_hvac_mode("off")` then comes back `DRY_RUN`; `_hold_thermostat_off_for_open_window()` returns None and `_exit_nat_vent()` records NO window pause (INFO `[DRY RUN] Nat-vent exit (...): window still open -- pause not recorded`). The session has ended, so session and pause are still never both set (#1141 ordering unchanged: session first, pause only after, here none). Leaving observe-only runs `async_reconcile_after_automation_enabled()`, which pauses for real within seconds (rule 3). Before, a pause with nothing to restore was recorded while the AC ran, and the re-enable reconcile read "already paused". Test: `tests_ha/test_observe_only_nat_vent_exit_1295.py` (hvac_fan and whf).
 
-**Prediction surfaces (Issue #1142 step 7):** the Next Automation card's "Natural ventilation at HH:MM" asks `AutomationEngine._nat_vent_start_decision(NAT_VENT_START_PREDICTION, at=<forecast time>)` -- the same nat-vent FSM answer the engine acts on (full gate, soft start, a fan exists, forecast-peak and thermal-floor guards, lockout, override) -- so it never promises a start the engine would veto; it is offered only while a sensor reads open (not dark), since a dark sensor never starts a fan (Issue #1299). The chart's forecast walk (`_walk_forward_regime`) no longer draws the ODE ceiling guard escalating to cool inside a planned blower (`hvac_fan`) session, matching the runtime rule.
+**Prediction surfaces (Issue #1142 step 7):** the Next Automation card's "Natural ventilation at HH:MM" asks `AutomationEngine._nat_vent_start_decision(NAT_VENT_START_PREDICTION, at=<forecast time>)` -- the same nat-vent FSM answer the engine acts on (full gate, soft start, a fan exists, forecast-peak and thermal-floor guards, lockout, override) -- so it never promises a start the engine would veto (the humid-air guard, which has no forecast humidity, is applied as the live verdict: no prediction while it blocks, Issue #1691); it is offered only while a sensor reads open (not dark), since a dark sensor never starts a fan (Issue #1299). The chart's forecast walk (`_walk_forward_regime`) no longer draws the ODE ceiling guard escalating to cool inside a planned blower (`hvac_fan`) session, matching the runtime rule.
 
 **Sleep window (Issue #341) — historical:** the sleep-window deference only existed to avoid a double band write; with no band written it is moot.
 
@@ -4343,26 +4343,35 @@ Tests: `tests/test_humid_air_guard_1691.py`.
 
 **Occupant view:** on a muggy night neither the whole-house fan nor the HVAC blower starts a ventilation session,
 the economizer does not switch its fan on, a session whose fan cycled off does not get it back, and a whole-house
-fan's min-runtime cycle waits; with the windows open HVAC stays paused for them (household rule 3), with them closed
-the AC holds the band. A dry night is unchanged; unknown humidity or the option Off is today's behaviour. A running
+fan's min-runtime cycle waits; with the windows open HVAC stays paused for them (household rule 3). A house with no
+fan is unaffected (no fan, no air pulled in: it keeps its economizer AC run). This lane does not withdraw window
+advice (Issue #1692 does, through the same predicate). A dry night is unchanged; unknown humidity or the option Off is today's behaviour. A running
 session is never ended by humidity (D4, start-only).
 
 | Fan start | Where the guard sits | On humid air |
 |---|---|---|
 | Window open, idle-open re-entry, paused-by-door reactivation, grace-expiry re-check, routine re-check (all 5 live start profiles, full gate and the #540 soft start) | guard 3 of `nat_vent_gate.decide_nat_vent_start_veto` (`NatVentStartVetoInputs.indoor_dew_point_f` / `outdoor_dew_point_f` / `humid_latches` / `humid_ceiling_f`, defaulted = not asked), evaluated by the FSM only when a gate would start | veto `humid_air`: `INACTIVE` with `vetoed_state`; the window-open handler pauses (`PAUSE_START_VETOED`) |
-| "Next Automation" prediction (`NAT_VENT_START_PREDICTION`, `humid_guard=False`) | not asked (future hours have no humidity) | unchanged |
-| Economizer (`_check_window_cooling_opportunity_fsm`, a MAINTAIN / COOL_DOWN start from `INACTIVE`) | `_humid_air_blocks_fan_start("economizer")` before `_activate_fan`; a running economizer's cool-down -> maintain change is not a start and keeps its fan | economizer stays `INACTIVE`, re-asked next tick |
+| "Next Automation" prediction (`NAT_VENT_START_PREDICTION`, `humid_guard=False`) | not asked per future hour (no forecast humidity); the scan (`coordinator`, natural-ventilation candidate) is skipped while the live verdict blocks | no "Natural ventilation at HH:MM" promise while humid |
+| Economizer (`_check_window_cooling_opportunity_fsm`, a MAINTAIN / COOL_DOWN start from `INACTIVE`, only when a fan exists: `fan_available_for_nat_vent`) | `_humid_air_blocks_fan_start("economizer")` before `_activate_fan`; a running economizer's cool-down -> maintain change is not a start and keeps its fan; a fan-less house keeps its cool-down AC run | economizer stays `INACTIVE`, re-asked next tick |
 | Mid-session cycling-on (`nat_vent_temperature_check`) | `_humid_air_blocks_fan_start("nat_vent_cycling")` | fan stays off, session stays active |
-| Min-runtime cycle, whole-house fan only (`_fan_cycle_on`) | `_humid_air_blocks_fan_start("min_runtime")` | deferred, retry in `WHF_SEALED_CYCLE_RETRY_S` (300 s); a blower install's cycle only recirculates indoor air and is unaffected |
+| Min-runtime cycle, whole-house fan only (`_fan_cycle_on`) | `_humid_air_blocks_fan_start("min_runtime")` | deferred (`_defer_min_runtime_cycle`, shared with the sealed-house deferral), retry in `WHF_SEALED_CYCLE_RETRY_S` (300 s). Scope differs on purpose: the economizer and cycling-on guards run inside a window-ventilation session (air in through the window, whatever fan moves it); a blower install's min-runtime cycle runs with the windows shut and only recirculates indoor air, so it is left to the H2 HVAC-fan restrict |
 
 - **Predicate:** `humidity_facts.humid_air_verdict` on `EngineFacts` (see the predicate section above); the engine
   reads it through `AutomationEngine.humid_air_verdict(now)` (pure).
 - **Visibility:** one `nat_vent_humid_skip` Activity row per humid spell (payload `reason`, `outdoor_dew_point`,
   `indoor_dew_point`, `ceiling`, `starter`, `fan_device`) and one INFO log line `Fan start skipped: humid outdoor
   air (<at or above the ceiling|wetter than the house>) starter=<starter> outdoor_dew_point_f=<x> indoor_dew_point_f=<y>
-  ceiling_f=<z>`, DEBUG on repeats; the spell ends when a start decision finds the air not humid
-  (`_humid_skip_reported`). Status page: a line on the outdoor card while the guard blocks (`humid_air_guard` in the
-  status API, `api.humid_air_view`, catalog `status.humid_air.blocking_ceiling` / `_wetter`).
+  ceiling_f=<z> -- the fan is not started` (dew points through `humidity_facts.fmt_dp_log`), DEBUG on repeats.
+  The spell ends on the coordinator's 5-minute dew-point tick when no H1 latch is on
+  (`AutomationEngine.note_humid_spell_over`, the one reset site, so a humid night after a dry windows-shut day still
+  writes its row). Status page (new dashboard and classic page): a line on the outdoor card, "Fan not started: humid
+  outside (dew point X, ...)", only while the guard would refuse a start that could happen (a fan exists and the day
+  is not a heating day: `AutomationEngine.humid_air_status_verdict`; `humid_air_guard` in the status API,
+  `api.humid_air_view`, catalog `status.humid_air.blocking_ceiling` / `_wetter`).
+- **Hysteresis granularity:** the latches are kept only by the 5-minute tick; each decision re-steps them from the
+  tick's state with its own dew points and does not write back (the veto is stateless by design). Two decisions in
+  one tick at 65.0 then 64.9 °F therefore give block, then clear. Accepted: the guard never stops a running fan, so
+  this cannot toggle a fan; do not add a second latch store.
 - **Sim harness:** `nat_vent_humid_skip` maps to its own outcome (`tools/sim_harness/outcomes.py`, rule-8 note).
 - **Two-zone installs:** each zone judges its own indoor dew point; a zone without indoor humidity gets the ceiling
   only (missing-input table).

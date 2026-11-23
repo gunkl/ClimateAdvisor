@@ -1209,19 +1209,18 @@ CONFIG_METADATA = {
     "humid_air_guard_enabled": {
         "label": "Humid-Air Guard",
         "description": (
-            "When on, the whole-house fan and natural ventilation do not start, and opening the windows is not "
-            "suggested, while the outdoor air is too humid: its dew point is at or above the ceiling, or the "
-            "outdoor air is humid and clearly wetter than the house. The house stays closed and the AC holds your "
-            "temperatures. A running session is not stopped. Without an outdoor humidity reading nothing changes. "
-            "On by default."
+            "When on, the whole-house fan and natural ventilation do not start while the outdoor air is too "
+            "humid: its dew point is at or above the ceiling, or the outdoor air is humid and clearly wetter than "
+            "the house. A running session is not stopped. Without an outdoor humidity reading nothing changes. On "
+            "by default."
         ),
         "category": "fan",
     },
     "humid_air_guard_ceiling_f": {
         "label": "Humid-Air Dew Point Ceiling",
         "description": (
-            "Outdoor dew point at or above which the Humid-Air Guard never starts the fan or suggests opening the "
-            "windows, whatever the house's humidity. Lower blocks more nights. The guard releases just below it."
+            "Outdoor dew point at or above which the Humid-Air Guard never starts the fan, whatever the house's "
+            "humidity. Lower blocks more nights. The guard releases just below it."
         ),
         "category": "fan",
         "display_transform": "temp_abs",

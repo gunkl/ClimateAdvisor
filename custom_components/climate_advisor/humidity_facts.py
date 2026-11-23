@@ -450,6 +450,12 @@ def update_latches(
 # ---------------------------------------------------------------------------------------------------------------
 
 
+def fmt_dp_log(dp_f: float | None) -> str:
+    """A dew point (°F) for a log line, at the resolution it was computed (2 dp), or ``unknown``. The one formatter
+    for every humid-air log line (review B11)."""
+    return f"{dp_f:.2f}" if dp_f is not None else "unknown"
+
+
 def humid_air_signals(indoor_dp_f: float | None, outdoor_dp_f: float | None) -> dict[str, float | None]:
     """The derived latch signals of the H1 guard (pure).
 

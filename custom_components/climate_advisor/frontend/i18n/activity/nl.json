@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "laatste weersverwachting (weerdienst niet bereikbaar)",
   "activity.outdoor_source_weather_attribute": "weerdienst (actuele omstandigheden)",
   "activity.outdoor_source_weather_interpolation": "weerdienst (verwachting per uur)",
-  "activity.overcool_ended": "Vochtige overkoeling beëindigd -- {reason, select, dried {de lucht is droger} cap {limiet van 60 minuten bereikt} run_ended {koelcyclus voorbij, de instelling keert terug na de uitloop} other {een andere instelling nam het over}}{has_minutes, select, yes { na {minutes} min} other {}}",
+  "activity.overcool_ended": "Vochtige overkoeling beëindigd -- {reason, select, dried {de lucht is droger} cap {limiet van 60 minuten bereikt} run_ended {koelcyclus voorbij, de instelling keert terug na de uitloop} automation_off {vrijgegeven toen de automatisering werd uitgeschakeld} other {een andere instelling nam het over}}{has_minutes, select, yes { na {minutes} min} other {}}",
   "activity.overcool_started": "Vochtige overkoeling gestart -- airco {lowering} onder {target} gezet om de lucht te drogen (dauwpunt {dew_point})",
   "activity.overcool_started_lowering": "Vochtige overkoeling gestart -- airco {lowering} lager gezet om de lucht te drogen",
   "activity.overcool_started_plain": "Vochtige overkoeling gestart",

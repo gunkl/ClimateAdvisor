@@ -113,6 +113,24 @@ class TestDecision:
         d = ho.decide_overcool(_active(), _inp(now=T0 + timedelta(minutes=10), humid=False))
         assert (d.action, d.reason, d.write) == (ho.ACTION_RELEASE, ho.REASON_DRIED, True)
 
+    def test_dew_point_unknown_releases_but_keeps_the_spell_budget(self):
+        """Review FINAL-A A-4: the indoor humidity sensor dropping out mid-spell releases the lowering (unknown is
+        never humid) but is not "the house dried": when it comes back in the same muggy spell, the minutes already
+        used still count. Only a known dew point at or below 58 F renews the budget."""
+        used = 40 * 60.0
+        st = _active(spell_used_s=used - 10 * 60.0)  # 30 min from earlier runs + 10 min of this stretch
+        lost = ho.decide_overcool(st, _inp(now=T0 + timedelta(minutes=10), humid=False, dew_point_known=False))
+        assert lost.action == ho.ACTION_RELEASE and lost.state.magnitude_f == 0.0
+        assert lost.state.spell_used_s == pytest.approx(used)
+        idle = ho.OvercoolState(spell_used_s=used, lowered_since=T0)
+        still_unknown = ho.decide_overcool(idle, _inp(humid=False, dew_point_known=False, cooling=False))
+        assert still_unknown.state.spell_used_s == pytest.approx(used)
+        assert still_unknown.state.lowered_since == T0
+        # The control: a known dry dew point (latch released at 58 F) ends the spell and renews the budget.
+        dried = ho.decide_overcool(st, _inp(now=T0 + timedelta(minutes=10), humid=False))
+        assert dried.state.spell_used_s == 0.0
+        assert ho.decide_overcool(idle, _inp(humid=False, cooling=False)).state.spell_used_s == 0.0
+
     def test_blip_shorter_than_the_grace_keeps_the_run(self):
         st = _active()
         off = ho.decide_overcool(st, _inp(cooling=False, now=T0 + timedelta(minutes=10)))
@@ -292,6 +310,8 @@ def test_activity_renderers():
     assert "60-minute" in cap and "60 min" in cap
     other, _ = EVENT_RENDERERS["overcool_ended"]({"reason": "gate:away", "minutes": "x"}, "fahrenheit")
     assert "another setting" in other
+    off, _ = EVENT_RENDERERS["overcool_ended"]({"reason": "gate:automation_off", "minutes": None}, "fahrenheit")
+    assert "automation was turned off" in off and "another setting" not in off
 
 
 # ── the real engine: the one setpoint path ──────────────────────────────────────────────────────────────────────────
@@ -869,6 +889,27 @@ class TestReleaseOnAutomationOff:
         assert env.sp()[-1] == 76.0 and env.engine._remote_offset_applied_f == 0.0
         assert env.engine._remote_offset_f == 0.0
 
+    @pytest.mark.parametrize("bank", [True, False])
+    def test_release_during_a_tou_bank_takes_the_bank_writes_sanity_skip(self, bank):
+        """Review FINAL-B F3: the bedroom offset rides TOU bank writes, so switching automation off during a cool bank
+        below comfort_heat - 1 re-sends the bank target. That is the bank's own value, not a SETPOINT INCONSISTENCY;
+        outside a bank the same write still trips the check (the control)."""
+        from unittest.mock import MagicMock
+
+        env = Env(enabled=False, comfort_heat=72.0)
+        env.write(70.0, skip_setpoint_sanity_check=True)  # the bank write
+        env.engine._remote_offset_applied_f = -1.0  # the bedroom loop's offset rode it
+        env.engine._remote_offset_f = -1.0
+        if bank:
+            env.engine._tou_precondition_until = T0 + timedelta(hours=1)
+            env.engine._tou_precondition_mode = "cool"
+        incident = MagicMock()
+        env.engine._emit_engine_incident = incident
+        env.run(env.engine.release_command_adjustments())
+        assert env.sp()[-1] == 70.0 and env.engine._remote_offset_applied_f == 0.0
+        tripped = [c for c in incident.call_args_list if c[0][0] == "setpoint_mode_inconsistency"]
+        assert bool(tripped) is (not bank)
+
     def test_coordinator_entry_releases_before_switching_off(self):
         import asyncio
 
@@ -896,9 +937,70 @@ class TestReleaseOnAutomationOff:
         coord.automation_engine = SimpleNamespace(command_adjustments_applied=lambda: 1 / 0)
         asyncio.run(coord.async_set_automation_enabled(False))  # never raises
         assert calls[-1] == ("set", False)
-        stub = SimpleNamespace(set_automation_enabled=lambda enabled: calls.append(("stub", enabled)))
-        asyncio.run(co.switch_automation(stub, True))
-        assert calls[-1] == ("stub", True)
+        # The one entry (switch, dashboard, harness) always goes through async_set_automation_enabled.
+        coord.automation_engine = _Engine()
+        asyncio.run(co.switch_automation(coord, False))
+        assert calls[-2:] == [("release", True), ("set", False)]
+
+
+class TestReleaseOnUnload:
+    """Review FINAL-B F1 (mirror of automation-off): removing, disabling or reloading the zone during an overcool or
+    bedroom-offset night puts the plain setpoint back before the shutdown latch stops writes; a Home Assistant stop
+    writes nothing (commands are refused then; the start-up plan writes the plain target after the restart).
+    Drives the real coordinator through the harness's HA-style unload."""
+
+    THERMOSTAT = "climate.zone_a_thermostat"
+
+    def _zone(self):
+        from tools.sim_harness.build_coordinator import build_headless_multi_zone
+
+        zones, hass, scheduler = build_headless_multi_zone(
+            configs=[{"climate_entity": self.THERMOSTAT, "zone_title": "Zone A", "fan_mode": "disabled"}]
+        )
+        zone = zones["zone_0"]
+        coord, entry = zone["coordinator"], zone["entry"]
+        ae = coord.automation_engine
+        hass.states.set(self.THERMOSTAT, FakeState(state="cool", attributes={"temperature": 74.0}))
+        # The bedroom loop's offset (or a humid-overcool lowering) is on the thermostat: 76 F target sent as 74 F.
+        ae._remote_target_f, ae._remote_target_mode = 76.0, "cool"
+        ae._remote_offset_f = ae._remote_offset_applied_f = -2.0
+        return coord, entry, hass, scheduler
+
+    def _writes(self, hass):
+        return [
+            a["data"]["temperature"]
+            for a in hass.action_log
+            if a["domain"] == "climate" and a["service"] == "set_temperature"
+        ]
+
+    def test_unload_puts_the_plain_setpoint_back(self):
+        from tools.sim_harness.build_coordinator import async_unload_entry_like_ha
+
+        coord, entry, hass, scheduler = self._zone()
+        before = len(self._writes(hass))
+        with scheduler.installed():
+            run_coro(async_unload_entry_like_ha(hass, entry))
+        assert self._writes(hass)[before:] == [76.0]
+        assert coord._shut_down is True and coord.automation_engine._shut_down is True
+
+    def test_observe_only_unload_writes_nothing(self):
+        from tools.sim_harness.build_coordinator import async_unload_entry_like_ha
+
+        coord, entry, hass, scheduler = self._zone()
+        coord._automation_enabled = False  # observe-only (set_automation_enabled's flags; its save needs a real entry)
+        coord.automation_engine.dry_run = True
+        before = len(self._writes(hass))
+        with scheduler.installed():
+            run_coro(async_unload_entry_like_ha(hass, entry))
+        assert self._writes(hass)[before:] == []
+
+    def test_home_assistant_stop_writes_nothing(self):
+        coord, _entry, hass, scheduler = self._zone()
+        before = len(self._writes(hass))
+        with scheduler.installed():
+            coord._async_homeassistant_stop(None)
+            run_coro(coord.async_shutdown())
+        assert self._writes(hass)[before:] == []
 
 
 class TestEngineReviewFixes:

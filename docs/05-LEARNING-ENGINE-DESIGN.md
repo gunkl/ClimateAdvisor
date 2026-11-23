@@ -91,7 +91,7 @@ the room without drying it, and Humid Overcool (`humid_overcool_enabled`, Issue 
 what turning it on would do; the person decides.
 **Detection:** the option is OFF (read live from the zone's config through the `humid_overcool_enabled` reader the
 coordinator hands `LearningEngine`; with no reader, or one that fails, the suggestion is never made, so it can never
-suggest an option that may already be on), and the last 14 non-vacation daily records hold at least
+suggest an option that may already be on), and the last 14 daily records, vacation days excluded, hold at least
 `HUMID_OVERCOOL_SUGGEST_MINUTES` (240 min = 4 h) of `hvac_cool_humid_runtime_minutes`.
 **`hvac_cool_humid_runtime_minutes`** (daily record, additive: a record stored before 0.9.80 reads 0): the part of
 `hvac_cool_runtime_minutes` during which humid overcool would call the house humid: the one overcool reader,

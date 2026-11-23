@@ -1196,13 +1196,10 @@ def _whf_safety_after_event(after: Callable[[Any, Any], None]) -> Callable[[Any]
 
 
 async def switch_automation(coordinator: Any, enabled: bool) -> None:
-    """The automation switch's one entry (switch entity, dashboard toggle): the real coordinator's
-    ``async_set_automation_enabled`` (which first puts the plain target back when a setpoint adjustment is on the
-    thermostat, Issue #1694); any other object (a test double) gets ``set_automation_enabled`` as before."""
-    if getattr(type(coordinator), "async_set_automation_enabled", None) is not None:
-        await coordinator.async_set_automation_enabled(enabled)
-    else:
-        coordinator.set_automation_enabled(enabled)
+    """The automation switch's one entry (switch entity, dashboard toggle, sim harness):
+    ``async_set_automation_enabled``, which first puts the plain target back when a setpoint adjustment is on the
+    thermostat (Issue #1694)."""
+    await coordinator.async_set_automation_enabled(enabled)
 
 
 def _overcool_after_thermostat_event(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -1977,14 +1974,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         the thermostat (Issue #1694, review W3A-A A1). That one write is made while automation is still on, so
         observe-only sends nothing; without it the thermostat stayed 1-2 F off the occupant's setting for as long as
         automation was off. Never raises."""
-        engine = getattr(self, "automation_engine", None)
-        if not enabled and self._automation_enabled and engine is not None:
-            try:
-                if engine.command_adjustments_applied():
-                    await decide(self, engine.release_command_adjustments)
-            except Exception:  # noqa: BLE001 - switching automation off must always work
-                _LOGGER.warning("Releasing the setpoint adjustments before observe-only failed", exc_info=True)
+        if not enabled:
+            await self._release_command_adjustments("observe-only")
         self.set_automation_enabled(enabled)
+
+    async def _release_command_adjustments(self, why: str) -> None:
+        """Put the plain comfort target back when CA's command adjustment (humid overcool, the bedroom-sensor offset)
+        is on the thermostat and automation is on (Issue #1694 and review FINAL-B F1). Callers: switching automation
+        off, and unloading this zone (removal, disable, reload) before the shutdown latch stops writes. Not on a Home
+        Assistant stop/restart: commands are refused then, and the start-up plan writes the plain target. Never
+        raises."""
+        engine = getattr(self, "automation_engine", None)
+        if engine is None or not getattr(self, "_automation_enabled", False):
+            return
+        try:
+            if engine.command_adjustments_applied():
+                await decide(self, engine.release_command_adjustments)
+        except Exception:  # noqa: BLE001 - switching off / unloading must always work
+            _LOGGER.warning("Releasing the setpoint adjustments before %s failed", why, exc_info=True)
 
     def set_automation_enabled(self, enabled: bool) -> None:
         """Enable or disable automation actions (observe-only mode)."""
@@ -10531,7 +10538,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if classification.windows_recommended and not self._today_record.windows_recommended:
                 self._today_record.windows_recommended = True
             return
-        _prev = self._today_record if (self._today_record and self._today_record.date == _today_str) else None
+        # A new day's record starts from zero (the early return above keeps an existing record for today, so nothing
+        # is carried over; review FINAL-A A-8 removed the dead "carry the previous record" fields).
         self._today_record = DailyRecord(
             date=_today_str,
             day_type=classification.day_type,
@@ -10546,18 +10554,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ClimateAdvisorCoordinator.day_zone_service(self).shown_mode(classification.hvac_mode)
                 or classification.hvac_mode
             ),
-            hvac_runtime_minutes=_prev.hvac_runtime_minutes if _prev else 0.0,
-            hvac_heat_runtime_minutes=_prev.hvac_heat_runtime_minutes if _prev else 0.0,
-            hvac_cool_runtime_minutes=_prev.hvac_cool_runtime_minutes if _prev else 0.0,
-            hvac_cool_humid_runtime_minutes=_prev.hvac_cool_humid_runtime_minutes if _prev else 0.0,
-            thermostat_fan_only_runtime_minutes=(_prev.thermostat_fan_only_runtime_minutes if _prev else 0.0),
-            comfort_violations_minutes=_prev.comfort_violations_minutes if _prev else 0.0,
-            manual_overrides=_prev.manual_overrides if _prev else 0,
-            thermal_session_count=_prev.thermal_session_count if _prev else 0,
-            occupancy_away_minutes=_prev.occupancy_away_minutes if _prev else 0.0,
-            windows_opened=_prev.windows_opened if _prev else False,
-            window_open_actual_time=_prev.window_open_actual_time if _prev else None,
-            override_details=list(_prev.override_details) if _prev else [],
         )
         # Capture raw forecast high/low for weather bias learning
         if self.config.get("learning_enabled", True):
@@ -21687,6 +21683,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if getattr(self, "_shut_down", False) is True:
             _LOGGER.debug("async_shutdown: instance %s already shut down — no-op", _instance_tag(self))
             return
+        # Review FINAL-B F1: unloading this zone (removal, disable, reload) during an overcool or bedroom-offset night
+        # puts the plain setpoint back, as switching automation off does, before the latch below stops every write.
+        # A Home Assistant stop has already refused commands (``_ha_stopping``): nothing is written then; the start-up
+        # plan writes the plain target after the restart.
+        if getattr(self, "_ha_stopping", False) is not True:
+            await self._release_command_adjustments("unload")
         self._shut_down = True
         engine = getattr(self, "automation_engine", None)
         if engine is not None:

@@ -98,6 +98,9 @@ class OvercoolInputs:
     humid: bool  # the overcool latch is on (indoor dew point >= 60 °F, held above 58 °F)
     at_trigger: bool  # the decision dew point is at or above the trigger now (for the second step)
     headroom_f: float  # how far the gap rule lets overcool lower the commanded setpoint for the current target
+    # The decision dew point is known (review FINAL-A A-4): an unknown one releases the latch (``humid`` False) but is
+    # not "the house dried", so the spell budget is renewed only on a known dew point at or below the release.
+    dew_point_known: bool = True
 
 
 @dataclass(frozen=True)
@@ -169,7 +172,8 @@ def decide_overcool(state: OvercoolState, inp: OvercoolInputs) -> OvercoolDecisi
     )
     ended = _run_ended(tracked, inp.now)
     lowering = tracked.phase in (PHASE_ACTIVE, PHASE_COASTING)
-    if not inp.humid and not lowering and (tracked.spell_used_s or tracked.lowered_since is not None):
+    dried = not inp.humid and inp.dew_point_known  # an unknown dew point is not a dry house: the spell goes on
+    if dried and not lowering and (tracked.spell_used_s or tracked.lowered_since is not None):
         tracked = replace(tracked, spell_used_s=0.0, lowered_since=None)  # the humid spell is over: a fresh budget
     if inp.gate == "closed":
         if lowering:
@@ -235,7 +239,7 @@ def decide_overcool(state: OvercoolState, inp: OvercoolInputs) -> OvercoolDecisi
     engaged_s = _since(tracked.engaged_at, inp.now) or 0.0
     if not inp.humid or _spent(tracked, inp.now):
         done = replace(_close_stretch(tracked, inp.now), phase=PHASE_DONE, magnitude_f=0.0, engaged_at=None)
-        if not inp.humid:
+        if dried:
             done = replace(done, spell_used_s=0.0)  # dried: the spell is over, the next one has its full budget
         reason = REASON_DRIED if not inp.humid else REASON_CAP
         return OvercoolDecision(done, ACTION_RELEASE, reason, write=True, event=EVENT_ENDED)

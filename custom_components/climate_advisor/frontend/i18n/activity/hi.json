@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "आखिरी मौसम पूर्वानुमान (मौसम सेवा बंद)",
   "activity.outdoor_source_weather_attribute": "मौसम सेवा (मौजूदा स्थिति)",
   "activity.outdoor_source_weather_interpolation": "मौसम सेवा (घंटेवार पूर्वानुमान)",
-  "activity.overcool_ended": "नमी के लिए अतिरिक्त ठंडक समाप्त -- {reason, select, dried {हवा अधिक सूखी है} cap {60 मिनट की सीमा पूरी} run_ended {AC चक्र समाप्त, ठहराव के बाद सेटिंग लौटेगी} other {किसी अन्य सेटिंग ने नियंत्रण लिया}}{has_minutes, select, yes { {minutes} मिनट बाद} other {}}",
+  "activity.overcool_ended": "नमी के लिए अतिरिक्त ठंडक समाप्त -- {reason, select, dried {हवा अधिक सूखी है} cap {60 मिनट की सीमा पूरी} run_ended {AC चक्र समाप्त, ठहराव के बाद सेटिंग लौटेगी} automation_off {ऑटोमेशन बंद करने पर हटाया गया} other {किसी अन्य सेटिंग ने नियंत्रण लिया}}{has_minutes, select, yes { {minutes} मिनट बाद} other {}}",
   "activity.overcool_started": "नमी के लिए अतिरिक्त ठंडक शुरू -- हवा सुखाने के लिए AC को {target} से {lowering} नीचे सेट किया (ओस बिंदु {dew_point})",
   "activity.overcool_started_lowering": "नमी के लिए अतिरिक्त ठंडक शुरू -- हवा सुखाने के लिए AC को {lowering} नीचे सेट किया",
   "activity.overcool_started_plain": "नमी के लिए अतिरिक्त ठंडक शुरू",

@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "son hava durumu tahmini (hava durumu servisi kapalı)",
   "activity.outdoor_source_weather_attribute": "hava durumu servisi (güncel koşullar)",
   "activity.outdoor_source_weather_interpolation": "hava durumu servisi (saatlik tahmin)",
-  "activity.overcool_ended": "Nem için ek soğutma sona erdi -- {reason, select, dried {hava daha kuru} cap {60 dakika sınırına ulaşıldı} run_ended {soğutma çalışması bitti, ayar ataletten sonra geri döner} other {başka bir ayar devraldı}}{has_minutes, select, yes { {minutes} dk sonra} other {}}",
+  "activity.overcool_ended": "Nem için ek soğutma sona erdi -- {reason, select, dried {hava daha kuru} cap {60 dakika sınırına ulaşıldı} run_ended {soğutma çalışması bitti, ayar ataletten sonra geri döner} automation_off {otomasyon kapatıldığında bırakıldı} other {başka bir ayar devraldı}}{has_minutes, select, yes { {minutes} dk sonra} other {}}",
   "activity.overcool_started": "Nem için ek soğutma başladı -- havayı kurutmak için klima {target} değerinin {lowering} altına ayarlandı (çiy noktası {dew_point})",
   "activity.overcool_started_lowering": "Nem için ek soğutma başladı -- havayı kurutmak için klima {lowering} daha düşüğe ayarlandı",
   "activity.overcool_started_plain": "Nem için ek soğutma başladı",

@@ -4315,9 +4315,10 @@ overcool ([below](#humid-overcool-issue-1694)); unknown always means today's beh
   reader path used when no outdoor humidity sensor is configured (its `dew_point`, else its `temperature` +
   `humidity`; the stale, plausibility and glitch checks apply to the weather values). The fact's source then names
   the weather (`weather.x#humidity`, paired `weather.x#dew_point` / `#temperature`); `DewPoint.fallback_from` /
-  `fallback_reason` keep the sensor and why. A stale humidity reading, a wrong unit or an implausible / glitching
-  sensor temperature do NOT fall back (unknown as before); a weather entity that is unusable too leaves the sensor's
-  reason. Indoor stays strict (same device only). Logged once per change by `_note_outdoor_dew_point_source` (the
+  `fallback_reason` keep the sensor and why. A stale humidity reading with a fresh, readable temperature, a wrong
+  humidity unit or an implausible / glitching sensor temperature do NOT fall back (unknown as before). The
+  temperature is checked first, so a sensor whose humidity is stale AND whose temperature is missing or unreadable
+  (a dead device) does fall back to the weather; a weather entity that is unusable too leaves the sensor's reason. Indoor stays strict (same device only). Logged once per change by `_note_outdoor_dew_point_source` (the
   5-minute sample, `_source_changed` / `_announce_source`): `Zone "<z>": outdoor dew point using weather service
   weather.x#dew_point (dew_point_f=68.00): outdoor humidity sensor <id> has no usable temperature (<reason>)`, and a
   `now from ... instead of ...` line when the sensor pair answers again; installs that never fall back log nothing.
@@ -4501,7 +4502,7 @@ default** (owner decision D3); never in the sleep window (D5).
 | idle | the same, but this humid spell's 60 lowered minutes are used | nothing until the latch releases and re-arms | target | none |
 | idle, observe-only (automation off) | the same | once per run, the write path's own `[DRY RUN] Would set temperature to <target - 1> ... overcool=-1` line (nothing sent) | nothing | none |
 | active | 30 min after engaging, still cooling, the decision dew point still >= 60 °F, room under the gap rule | step | target - 2 °F (max) | none (the write's own row) |
-| active | the latch let go (dew point <= 58 °F, or unknown) | release now | target | `overcool_ended` `dried` |
+| active | the latch let go (dew point <= 58 °F, or unknown) | release now; the spell's budget is renewed only for a known dew point <= 58 °F (an unknown one keeps the minutes used, review FINAL-A A-4) | target | `overcool_ended` `dried` |
 | active | the humid spell's budget is used: 60 lowered minutes (active and coasting, `OVERCOOL_RUN_CAP_S`) since the latch last re-armed, across back-to-back runs | release now; no re-engage until the latch releases (dew point <= 58 °F) and re-arms | target | `overcool_ended` `cap` |
 | active | not cooling for 5 min (`OVERCOOL_RUN_END_GRACE_S`; a shorter cooling -> fan / idle -> cooling blip is the same run) | run ended: HOLD the lowered value | unchanged | `overcool_ended` `run_ended` |
 | coasting | the 45-min post-run coast (`CYCLE_POST_OFF_WINDOW_S`, the #1512 coast window) closed | restore | target | none |
@@ -4510,7 +4511,7 @@ default** (owner decision D3); never in the sleep window (D5).
 | any lowering | the gate closed (an owner took the thermostat) | zero the term, no write of its own (the owner writes; the occupant's value is never restored over); no re-engage this run | the owner's | `overcool_ended` `gate:<why>` |
 | any lowering | the gate closed for a window open past its debounce with no pause (no owner writes) | one plain-target write | target | `overcool_ended` `gate:window_open` |
 | any | `FREEZE` (a door/window open inside its debounce) | hold everything (no step, cap, release) | unchanged | none |
-| any lowering | automation is switched off (switch entity or dashboard: `coordinator.async_set_automation_enabled(False)`) | one plain-target write while automation is still on, then observe-only (review W3A-A A1). The bedroom loop's offset is released the same way (the mirror had the same strand) | target | `overcool_ended` `gate:automation_off` |
+| any lowering | automation is switched off (switch entity or dashboard: `coordinator.async_set_automation_enabled(False)`), or the zone is unloaded (removal, disable, reload: `async_shutdown` before its latch; not a Home Assistant stop, which refuses commands, the start-up plan then writes the plain target) | one plain-target write while automation is still on, then observe-only (review W3A-A A1, FINAL-B F1); during a TOU bank it takes the bank write's sanity-check skip (FINAL-B F3). The bedroom loop's offset is released the same way (the mirror had the same strand). The spell's budget starts afresh after an off/on toggle, as after a restart | target | `overcool_ended` `gate:automation_off` ("released when automation was turned off") |
 
 - **Latch:** `humidity_facts.OVERCOOL_HUMID_LATCH` on the indoor dew point (60 °F on, 58 °F off), in `LATCH_SPECS`,
   stepped on the coordinator's 5-minute dew-point tick and re-stepped by each decision from `EngineFacts.humid_latches`
@@ -4584,7 +4585,7 @@ default** (owner decision D3); never in the sleep window (D5).
   counted from today's `overcool_started` rows), and the AI CURRENT STATE `humid_decisions_today` line adds
   `overcooled runs=N`.
 - **Suggestion while the option is off (Issue #1695):** the learning card "Turn on Humid Overcool" (advice only, #1652)
-  appears when the last 14 non-vacation days hold at least 240 minutes of REPORTED cooling with this latch on
+  appears when the last 14 daily records (vacation days excluded) hold at least 240 minutes of REPORTED cooling with this latch on
   (`DailyRecord.hvac_cool_humid_runtime_minutes`, credited by `_flush_runtime_for_mode("cool")` through
   `overcool_humid_from_facts`, the reader this decision uses; the 5-minute tick flushes a running cool session before
   taking its sample). Never while the option is on. Detection, the counter and
@@ -4756,8 +4757,9 @@ The measured sensor reports on change in ~0.18 F steps and idled up to 105 min, 
 guarded; a no-op in dry-run, after shutdown, with no setpoint written yet, or when the thermostat is not in the
 target's mode (the loop never changes the mode). **Automation switched off (Issue #1694, the mirror of the humid-overcool fix):** since observe-only sends
 nothing, an offset on the thermostat used to stay there for as long as automation was off. Switching automation off now
-first writes the plain target once (`AutomationEngine.release_command_adjustments`, called from
-`coordinator.async_set_automation_enabled(False)` while automation is still on, so P3 observe-only silence holds), unless
+first writes the plain target once (`AutomationEngine.release_command_adjustments`, called through
+`coordinator._release_command_adjustments` from `async_set_automation_enabled(False)` while automation is still on, so P3
+observe-only silence holds, and from `async_shutdown` when the zone is removed, disabled or reloaded), unless
 the occupant's change is protected or the thermostat is not in the target's mode; the loop then starts from offset 0
 when automation is switched back on.
 

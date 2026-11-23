@@ -107,6 +107,33 @@ class TestDeactivateFanIsTheHook:
         assert engine._fan_active is False
         assert [c[0][2]["fan_mode"] for c in _fan_mode_calls(engine)][:1] == ["auto"]
 
+    def test_wakeup_runs_the_economizer_teardown(self):
+        """Mirror of the bedtime fix: wake-up with window cooling running ends it through its own teardown (fan
+        stop, comfort restore, "Economizer deactivated"), not only through the fan-stop hook's bookkeeping."""
+        engine = _engine_in_cool_down(FAN_MODE_HVAC)
+        engine._fan_active = True
+        engine._deactivate_economizer = AsyncMock(wraps=engine._deactivate_economizer)
+
+        asyncio.run(engine.handle_morning_wakeup())
+
+        engine._deactivate_economizer.assert_awaited_once()
+        assert engine._economizer_active is False
+        assert engine._fan_active is False
+        assert [c[0][2]["fan_mode"] for c in _fan_mode_calls(engine)][:1] == ["auto"]
+
+    def test_wakeup_without_window_cooling_only_stops_the_fan(self):
+        """Control: no economizer session, so no economizer teardown; the overnight fan is stopped as before."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._current_classification = _make_hot_classification()
+        _thermostat(engine)
+        engine._fan_active = True
+        engine._deactivate_economizer = AsyncMock()
+
+        asyncio.run(engine.handle_morning_wakeup())
+
+        engine._deactivate_economizer.assert_not_awaited()
+        assert engine._fan_active is False
+
 
 class TestMinRuntimeCycleOffLeavesATakenOverFan:
     """Mirror: a min-runtime cycle's off phase must not stop a blower window cooling or nat-vent took over."""

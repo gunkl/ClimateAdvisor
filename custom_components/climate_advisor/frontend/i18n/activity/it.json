@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "ultime previsioni meteo (servizio meteo non raggiungibile)",
   "activity.outdoor_source_weather_attribute": "servizio meteo (condizioni attuali)",
   "activity.outdoor_source_weather_interpolation": "servizio meteo (previsioni orarie)",
-  "activity.overcool_ended": "Sovraraffreddamento per umidità terminato -- {reason, select, dried {l'aria è più secca} cap {limite di 60 minuti raggiunto} run_ended {ciclo di raffrescamento finito, l'impostazione torna dopo l'inerzia} other {un'altra impostazione ha preso il controllo}}{has_minutes, select, yes { dopo {minutes} min} other {}}",
+  "activity.overcool_ended": "Sovraraffreddamento per umidità terminato -- {reason, select, dried {l'aria è più secca} cap {limite di 60 minuti raggiunto} run_ended {ciclo di raffrescamento finito, l'impostazione torna dopo l'inerzia} automation_off {rilasciato quando l'automazione è stata disattivata} other {un'altra impostazione ha preso il controllo}}{has_minutes, select, yes { dopo {minutes} min} other {}}",
   "activity.overcool_started": "Sovraraffreddamento per umidità avviato -- climatizzatore {lowering} sotto {target} per asciugare l'aria (punto di rugiada {dew_point})",
   "activity.overcool_started_lowering": "Sovraraffreddamento per umidità avviato -- climatizzatore {lowering} più basso per asciugare l'aria",
   "activity.overcool_started_plain": "Sovraraffreddamento per umidità avviato",

@@ -3689,13 +3689,16 @@ def _render_overcool_started(p: dict, unit: str) -> tuple[Cell, Cell]:
 
 
 _OVERCOOL_END_REASONS = ("dried", "cap", "run_ended")
+# Review FINAL-B F5: the release that switching automation off makes (``release_command_adjustments``) says so.
+_OVERCOOL_END_REASON_ALIASES = {"gate:automation_off": "automation_off"}
 
 
 @_msg_renderer
 def _render_overcool_ended(p: dict, unit: str) -> tuple[Cell, Cell]:
-    """Issue #1694 (#1507 H3): humid overcool released (air dried, 60-minute cap, run ended, or another owner)."""
+    """Issue #1694 (#1507 H3): humid overcool released (air dried, 60-minute cap, run ended, automation switched off,
+    or another owner)."""
     reason = str(p.get("reason") or "")
-    code = reason if reason in _OVERCOOL_END_REASONS else "other"
+    code = reason if reason in _OVERCOOL_END_REASONS else _OVERCOOL_END_REASON_ALIASES.get(reason, "other")
     minutes = p.get("minutes")
     try:
         minutes_txt = f"{float(minutes):.0f}" if minutes is not None else None

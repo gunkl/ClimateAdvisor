@@ -324,8 +324,7 @@ def read_dew_point(
                 return _unknown(REASON_STALE, rh=rh, source=source, temp=temp_source)
             if _stale(temp_state, stale_hours, now, temp_entity, configured_sources):
                 return _no_usable_temperature(_unknown(REASON_STALE, rh=rh, source=source, temp=temp_source))
-        if _stale(temp_state, stale_hours, now, temp_entity, configured_sources):
-            return _unknown(REASON_STALE, rh=rh, source=source, temp=temp_source)
+        # (An attribute source's temperature is on the state already checked for staleness above.)
         if temp_entity in set(false_entities):
             return _unknown("recalibrating", rh=rh, source=source, temp=temp_source)
         first_after = reconnect is not None and (

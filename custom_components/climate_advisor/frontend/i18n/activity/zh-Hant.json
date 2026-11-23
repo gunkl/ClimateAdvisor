@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "最近一次天氣預報（天氣服務中斷）",
   "activity.outdoor_source_weather_attribute": "天氣服務（目前狀況）",
   "activity.outdoor_source_weather_interpolation": "天氣服務（逐時預報）",
-  "activity.overcool_ended": "除濕額外冷房已結束 -- {reason, select, dried {空氣更乾燥了} cap {已達 60 分鐘上限} run_ended {冷房運轉結束，慣性階段後恢復設定} other {另一項設定接管了控制}}{has_minutes, select, yes {（{minutes} 分鐘後）} other {}}",
+  "activity.overcool_ended": "除濕額外冷房已結束 -- {reason, select, dried {空氣更乾燥了} cap {已達 60 分鐘上限} run_ended {冷房運轉結束，慣性階段後恢復設定} automation_off {關閉自動化時已解除} other {另一項設定接管了控制}}{has_minutes, select, yes {（{minutes} 分鐘後）} other {}}",
   "activity.overcool_started": "除濕額外冷房已開始 -- 為乾燥空氣，冷氣設為比 {target} 低 {lowering}（露點 {dew_point}）",
   "activity.overcool_started_lowering": "除濕額外冷房已開始 -- 為乾燥空氣，冷氣調低 {lowering}",
   "activity.overcool_started_plain": "除濕額外冷房已開始",

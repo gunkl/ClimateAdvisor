@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "last weather forecast (weather service down)",
   "activity.outdoor_source_weather_attribute": "weather service (current conditions)",
   "activity.outdoor_source_weather_interpolation": "weather service (hourly forecast)",
-  "activity.overcool_ended": "Humid overcool ended -- {reason, select, dried {the air is drier} cap {60-minute limit reached} run_ended {AC run over, the setting returns after the coast} other {another setting took over}}{has_minutes, select, yes { after {minutes} min} other {}}",
+  "activity.overcool_ended": "Humid overcool ended -- {reason, select, dried {the air is drier} cap {60-minute limit reached} run_ended {AC run over, the setting returns after the coast} automation_off {released when automation was turned off} other {another setting took over}}{has_minutes, select, yes { after {minutes} min} other {}}",
   "activity.overcool_started": "Humid overcool started -- AC set {lowering} below {target} to dry the air (dew point {dew_point})",
   "activity.overcool_started_lowering": "Humid overcool started -- AC set {lowering} lower to dry the air",
   "activity.overcool_started_plain": "Humid overcool started",

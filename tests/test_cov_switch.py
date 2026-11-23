@@ -7,7 +7,7 @@ no notifications). Turning it off must reach the coordinator and show at once; t
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from custom_components.climate_advisor import switch as switch_platform
 
@@ -15,6 +15,7 @@ from custom_components.climate_advisor import switch as switch_platform
 def _switch():
     coord = MagicMock()
     coord.automation_enabled = True
+    coord.async_set_automation_enabled = AsyncMock()
     entry = MagicMock()
     entry.entry_id = "zone1"
     entry.title = "Living Room"
@@ -43,14 +44,14 @@ def test_state_follows_the_coordinator_flag():
 def test_turn_off_enters_observe_only_and_shows_it():
     coord, switch = _switch()
     asyncio.run(switch.async_turn_off())
-    coord.set_automation_enabled.assert_called_once_with(False)
+    coord.async_set_automation_enabled.assert_awaited_once_with(False)
     switch.async_write_ha_state.assert_called_once()
 
 
 def test_turn_on_resumes_control_and_shows_it():
     coord, switch = _switch()
     asyncio.run(switch.async_turn_on())
-    coord.set_automation_enabled.assert_called_once_with(True)
+    coord.async_set_automation_enabled.assert_awaited_once_with(True)
     switch.async_write_ha_state.assert_called_once()
 
 

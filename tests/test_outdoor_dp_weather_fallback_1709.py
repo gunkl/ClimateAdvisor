@@ -82,6 +82,28 @@ class TestPureReader:
         states = {RH_ONLY: _st("60.0", PCT, age_h=7.0), OUT_T: _st("70.0", DEG_F), WEATHER: _weather()}
         assert _out(states, chosen=RH_ONLY, temps={RH_ONLY: (OUT_T,)}).reason == "stale"
 
+    def test_stale_humidity_on_a_dead_device_falls_back(self):
+        """Review FINAL-A A-6 (kept, better for the occupant): the temperature is checked first, so a sensor whose
+        humidity is stale AND whose temperature is unavailable (the device is dead) reads the weather."""
+        states = {RH_ONLY: _st("60.0", PCT, age_h=7.0), OUT_T: _st("unavailable"), WEATHER: _weather()}
+        dp = _out(states, chosen=RH_ONLY, temps={RH_ONLY: (OUT_T,)})
+        assert dp.known and dp.fallback_from == RH_ONLY and dp.fallback_reason == "unavailable"
+
+    def test_wrong_unit_does_not_fall_back(self):
+        """A humidity entity not in % is not a humidity reading: unknown (as before), never the weather."""
+        states = {RH_ONLY: _st("60.0", {"unit_of_measurement": "g/m³"}), WEATHER: _weather()}
+        dp = _out(states, chosen=RH_ONLY)
+        assert not dp.known and dp.reason == "wrong_unit" and dp.fallback_from is None
+        # control: the same humidity-only sensor in % falls back
+        states[RH_ONLY] = _st("60.0", PCT)
+        assert _out(states, chosen=RH_ONLY).fallback_from == RH_ONLY
+
+    def test_implausible_sensor_temperature_does_not_fall_back(self):
+        """A same-device temperature that reads but is out of range is a broken pair: unknown, never the weather."""
+        states = {RH_ONLY: _st("60.0", PCT), OUT_T: _st("180.0", DEG_F), WEATHER: _weather()}
+        dp = _out(states, chosen=RH_ONLY, temps={RH_ONLY: (OUT_T,)})
+        assert not dp.known and dp.reason == "implausible" and dp.fallback_from is None
+
     def test_weather_without_dew_point_uses_its_own_temperature_and_humidity(self):
         states = {RH_ONLY: _st("88.0", PCT), WEATHER: _weather(dew_point=None)}
         dp = _out(states, chosen=RH_ONLY)

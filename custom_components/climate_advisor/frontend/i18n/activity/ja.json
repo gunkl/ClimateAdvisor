@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "直近の天気予報(気象サービス停止中)",
   "activity.outdoor_source_weather_attribute": "気象サービス(現在の状況)",
   "activity.outdoor_source_weather_interpolation": "気象サービス(1 時間ごとの予報)",
-  "activity.overcool_ended": "除湿のための追加冷房を終了 -- {reason, select, dried {空気が乾きました} cap {60分の上限に達しました} run_ended {冷房運転が終わり、余熱期間の後に設定が戻ります} other {別の設定が優先されました}}{has_minutes, select, yes {（{minutes}分後）} other {}}",
+  "activity.overcool_ended": "除湿のための追加冷房を終了 -- {reason, select, dried {空気が乾きました} cap {60分の上限に達しました} run_ended {冷房運転が終わり、余熱期間の後に設定が戻ります} automation_off {自動制御をオフにしたため解除} other {別の設定が優先されました}}{has_minutes, select, yes {（{minutes}分後）} other {}}",
   "activity.overcool_started": "除湿のための追加冷房を開始 -- 空気を乾かすため {target} より {lowering} 低く設定（露点 {dew_point}）",
   "activity.overcool_started_lowering": "除湿のための追加冷房を開始 -- 空気を乾かすため {lowering} 低く設定",
   "activity.overcool_started_plain": "除湿のための追加冷房を開始",

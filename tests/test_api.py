@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.api import (
     API_VIEWS,
@@ -423,20 +423,21 @@ class TestToggleAutomationView:
 
         coord = MagicMock()
         coord.automation_enabled = enabled
+        coord.async_set_automation_enabled = AsyncMock()
         resp = asyncio.run(ClimateAdvisorToggleAutomationView().post(_make_view_request(coord)))
         return coord, resp
 
     def test_toggle_disables_when_enabled(self):
         """Toggling when enabled should disable automation."""
         coord, resp = self._post_toggle(True)
-        coord.set_automation_enabled.assert_called_once_with(False)
+        coord.async_set_automation_enabled.assert_awaited_once_with(False)
         assert resp.status == 200
         assert resp.json_data["automation_enabled"] is False
 
     def test_toggle_enables_when_disabled(self):
         """Toggling when disabled should enable automation."""
         coord, resp = self._post_toggle(False)
-        coord.set_automation_enabled.assert_called_once_with(True)
+        coord.async_set_automation_enabled.assert_awaited_once_with(True)
         assert resp.status == 200
         assert resp.json_data["automation_enabled"] is True
 

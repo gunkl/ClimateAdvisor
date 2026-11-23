@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "última previsão meteorológica (serviço meteorológico indisponível)",
   "activity.outdoor_source_weather_attribute": "serviço meteorológico (condições atuais)",
   "activity.outdoor_source_weather_interpolation": "serviço meteorológico (previsão horária)",
-  "activity.overcool_ended": "Sobrearrefecimento por umidade encerrado -- {reason, select, dried {o ar está mais seco} cap {limite de 60 minutos atingido} run_ended {ciclo do ar terminado, o ajuste volta após a inércia} other {outro ajuste assumiu}}{has_minutes, select, yes { após {minutes} min} other {}}",
+  "activity.overcool_ended": "Sobrearrefecimento por umidade encerrado -- {reason, select, dried {o ar está mais seco} cap {limite de 60 minutos atingido} run_ended {ciclo do ar terminado, o ajuste volta após a inércia} automation_off {liberado quando a automação foi desligada} other {outro ajuste assumiu}}{has_minutes, select, yes { após {minutes} min} other {}}",
   "activity.overcool_started": "Sobrearrefecimento por umidade iniciado -- ar ajustado {lowering} abaixo de {target} para secar o ar (ponto de orvalho {dew_point})",
   "activity.overcool_started_lowering": "Sobrearrefecimento por umidade iniciado -- ar ajustado {lowering} mais baixo para secar o ar",
   "activity.overcool_started_plain": "Sobrearrefecimento por umidade iniciado",

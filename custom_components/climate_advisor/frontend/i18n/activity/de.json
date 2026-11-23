@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "letzte Wettervorhersage (Wetterdienst ausgefallen)",
   "activity.outdoor_source_weather_attribute": "Wetterdienst (aktuelle Bedingungen)",
   "activity.outdoor_source_weather_interpolation": "Wetterdienst (stündliche Vorhersage)",
-  "activity.overcool_ended": "Feuchte-Überkühlung beendet -- {reason, select, dried {die Luft ist trockener} cap {60-Minuten-Grenze erreicht} run_ended {Kühllauf vorbei, der Sollwert kehrt nach dem Nachlauf zurück} other {eine andere Einstellung hat übernommen}}{has_minutes, select, yes { nach {minutes} Min.} other {}}",
+  "activity.overcool_ended": "Feuchte-Überkühlung beendet -- {reason, select, dried {die Luft ist trockener} cap {60-Minuten-Grenze erreicht} run_ended {Kühllauf vorbei, der Sollwert kehrt nach dem Nachlauf zurück} automation_off {freigegeben, als die Automatik ausgeschaltet wurde} other {eine andere Einstellung hat übernommen}}{has_minutes, select, yes { nach {minutes} Min.} other {}}",
   "activity.overcool_started": "Feuchte-Überkühlung gestartet -- Klimaanlage {lowering} unter {target} gestellt, um die Luft zu trocknen (Taupunkt {dew_point})",
   "activity.overcool_started_lowering": "Feuchte-Überkühlung gestartet -- Klimaanlage {lowering} tiefer gestellt, um die Luft zu trocknen",
   "activity.overcool_started_plain": "Feuchte-Überkühlung gestartet",

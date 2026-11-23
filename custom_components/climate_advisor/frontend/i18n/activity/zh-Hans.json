@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "最近一次天气预报（天气服务已中断）",
   "activity.outdoor_source_weather_attribute": "天气服务（当前状况）",
   "activity.outdoor_source_weather_interpolation": "天气服务（逐小时预报）",
-  "activity.overcool_ended": "除湿额外制冷已结束 -- {reason, select, dried {空气更干燥了} cap {已达到 60 分钟上限} run_ended {制冷运行结束，惯性阶段后恢复设定} other {另一项设置接管了控制}}{has_minutes, select, yes {（{minutes} 分钟后）} other {}}",
+  "activity.overcool_ended": "除湿额外制冷已结束 -- {reason, select, dried {空气更干燥了} cap {已达到 60 分钟上限} run_ended {制冷运行结束，惯性阶段后恢复设定} automation_off {关闭自动化时已解除} other {另一项设置接管了控制}}{has_minutes, select, yes {（{minutes} 分钟后）} other {}}",
   "activity.overcool_started": "除湿额外制冷已开始 -- 为干燥空气，空调设为比 {target} 低 {lowering}（露点 {dew_point}）",
   "activity.overcool_started_lowering": "除湿额外制冷已开始 -- 为干燥空气，空调调低 {lowering}",
   "activity.overcool_started_plain": "除湿额外制冷已开始",

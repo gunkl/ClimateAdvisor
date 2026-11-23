@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "последний прогноз погоды (сервис погоды недоступен)",
   "activity.outdoor_source_weather_attribute": "сервис погоды (текущие условия)",
   "activity.outdoor_source_weather_interpolation": "сервис погоды (почасовой прогноз)",
-  "activity.overcool_ended": "Дополнительное охлаждение из-за влажности завершено -- {reason, select, dried {воздух стал суше} cap {достигнут предел 60 минут} run_ended {цикл охлаждения закончен, уставка вернётся после выбега} other {управление перешло к другой настройке}}{has_minutes, select, yes { через {minutes} мин} other {}}",
+  "activity.overcool_ended": "Дополнительное охлаждение из-за влажности завершено -- {reason, select, dried {воздух стал суше} cap {достигнут предел 60 минут} run_ended {цикл охлаждения закончен, уставка вернётся после выбега} automation_off {отменено при выключении автоматизации} other {управление перешло к другой настройке}}{has_minutes, select, yes { через {minutes} мин} other {}}",
   "activity.overcool_started": "Дополнительное охлаждение из-за влажности начато -- кондиционер на {lowering} ниже {target}, чтобы осушить воздух (точка росы {dew_point})",
   "activity.overcool_started_lowering": "Дополнительное охлаждение из-за влажности начато -- кондиционер на {lowering} ниже, чтобы осушить воздух",
   "activity.overcool_started_plain": "Дополнительное охлаждение из-за влажности начато",

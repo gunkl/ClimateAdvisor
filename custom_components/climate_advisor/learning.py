@@ -2785,9 +2785,9 @@ class LearningEngine:
 
         Occupant view: on muggy days the AC ran with the house's dew point at or above the overcool trigger, and Humid
         Overcool (off by default) is off. The suggestion says what turning it on would do. Made only when the option
-        is known to be off, the last 14 non-vacation days hold at least ``HUMID_OVERCOOL_SUGGEST_MINUTES`` of reported
-        humid cooling (``hvac_cool_humid_runtime_minutes``; a record stored before the field reads 0) and the key is
-        neither dismissed nor held back.
+        is known to be off, the last 14 daily records (vacation days excluded) hold at least
+        ``HUMID_OVERCOOL_SUGGEST_MINUTES`` of reported humid cooling (``hvac_cool_humid_runtime_minutes``; a record
+        stored before the field reads 0) and the key is neither dismissed nor held back.
         """
         key = "humid_overcool"
         probe = self._humid_overcool_enabled

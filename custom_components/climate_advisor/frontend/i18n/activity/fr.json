@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "dernières prévisions météo (service météo indisponible)",
   "activity.outdoor_source_weather_attribute": "service météo (conditions actuelles)",
   "activity.outdoor_source_weather_interpolation": "service météo (prévisions horaires)",
-  "activity.overcool_ended": "Surrefroidissement humide terminé -- {reason, select, dried {l'air est plus sec} cap {limite de 60 minutes atteinte} run_ended {cycle de clim fini, la consigne revient après la phase de roue libre} other {un autre réglage a pris le relais}}{has_minutes, select, yes { après {minutes} min} other {}}",
+  "activity.overcool_ended": "Surrefroidissement humide terminé -- {reason, select, dried {l'air est plus sec} cap {limite de 60 minutes atteinte} run_ended {cycle de clim fini, la consigne revient après la phase de roue libre} automation_off {rétabli quand l'automatisation a été désactivée} other {un autre réglage a pris le relais}}{has_minutes, select, yes { après {minutes} min} other {}}",
   "activity.overcool_started": "Surrefroidissement humide démarré -- clim réglée {lowering} sous {target} pour assécher l'air (point de rosée {dew_point})",
   "activity.overcool_started_lowering": "Surrefroidissement humide démarré -- clim réglée {lowering} plus bas pour assécher l'air",
   "activity.overcool_started_plain": "Surrefroidissement humide démarré",

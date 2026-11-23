@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "ostatnia prognoza pogody (serwis pogodowy niedostępny)",
   "activity.outdoor_source_weather_attribute": "serwis pogodowy (bieżące warunki)",
   "activity.outdoor_source_weather_interpolation": "serwis pogodowy (prognoza godzinowa)",
-  "activity.overcool_ended": "Dochładzanie przy wilgoci zakończone -- {reason, select, dried {powietrze jest suchsze} cap {osiągnięto limit 60 minut} run_ended {praca klimatyzacji zakończona, nastawa wróci po wybiegu} other {przejęło inne ustawienie}}{has_minutes, select, yes { po {minutes} min} other {}}",
+  "activity.overcool_ended": "Dochładzanie przy wilgoci zakończone -- {reason, select, dried {powietrze jest suchsze} cap {osiągnięto limit 60 minut} run_ended {praca klimatyzacji zakończona, nastawa wróci po wybiegu} automation_off {zwolnione po wyłączeniu automatyki} other {przejęło inne ustawienie}}{has_minutes, select, yes { po {minutes} min} other {}}",
   "activity.overcool_started": "Dochładzanie przy wilgoci rozpoczęte -- klimatyzacja {lowering} poniżej {target}, aby osuszyć powietrze (punkt rosy {dew_point})",
   "activity.overcool_started_lowering": "Dochładzanie przy wilgoci rozpoczęte -- klimatyzacja {lowering} niżej, aby osuszyć powietrze",
   "activity.overcool_started_plain": "Dochładzanie przy wilgoci rozpoczęte",

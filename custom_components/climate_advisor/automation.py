@@ -7830,9 +7830,9 @@ class AutomationEngine:
                 {"reason": "gate:automation_off", "lowering_f": lowering, "minutes": None, "target": target},
             )
         self._reset_overcool()
-        self._reset_remote_offset()
+        # Not writable: an owner holds it, so the thermostat's value is not CA's to clear (its held value is unknown).
+        self._reset_remote_offset(applied_unknown=not writable)
         if not writable or target is None or mode is None:
-            self._remote_offset_applied_f = None  # an owner holds it: the thermostat's value is not CA's to clear
             return
         _LOGGER.info(
             "Automation turned off: plain setpoint restored target=%s (mode=%s) overcool=-%s remote_offset=%s role=%s",
@@ -7844,8 +7844,15 @@ class AutomationEngine:
         )
         self._force_plain_write = True
         try:
+            # Review FINAL-B F3: while a TOU bank owns the setpoint the plain target IS the bank target (the bedroom
+            # offset also rides bank writes), so this write takes the bank write's own sanity-check skip: a cool bank
+            # below comfort_heat - 1 is by design, not a SETPOINT INCONSISTENCY.
             await self._set_temperature(
-                float(target), reason=_R("reason_adjustments_released"), mode=mode, keep_pre_cool_hold=True
+                float(target),
+                reason=_R("reason_adjustments_released"),
+                mode=mode,
+                keep_pre_cool_hold=True,
+                skip_setpoint_sanity_check=self._tou_precondition_active(dt_util.now()),
             )
         finally:
             self._force_plain_write = False
@@ -7935,6 +7942,7 @@ class AutomationEngine:
             humid=humid,
             at_trigger=at_trigger,
             headroom_f=self._overcool_headroom(),
+            dew_point_known=dp is not None,
         )
 
     def _apply_overcool_decision_sync(self, gate: str, reason: str | None) -> Any:
@@ -13363,6 +13371,26 @@ class AutomationEngine:
         _vac_decision = self._resolve_occupancy_away_vacation_fsm_state(mode="vacation")
         await self._apply_occupancy_away_vacation_decision("vacation", _vac_decision)
 
+    async def _scheduled_fan_teardown(
+        self, reason: str | i18n.Msg, *, fan_was_overridden: bool, end_nat_vent_session: bool = True
+    ) -> None:
+        """Bedtime / wake-up fan stop (Issue #1705 and its wake-up mirror): window cooling's own teardown first.
+
+        Occupant view: when bedtime or wake-up stops a blower that window cooling (the economizer) is running, window
+        cooling ends the way it always ends: the blower off, the comfort setting put back (#1208) and "Economizer
+        deactivated" in the log. Stopping the fan first would end the session through ``_deactivate_fan()``'s hook
+        (bookkeeping only) and skip all of that. Then any other CA fan still on is stopped unless the occupant
+        overrode it; bedtime also ends the nat-vent session through the shared sole writer (Issue #931: a
+        rate-limited/deferred command never strands the fan with the retry disarmed). Wake-up keeps its old fan stop
+        (``end_nat_vent_session=False``).
+        """
+        if self.economizer_session_active:
+            await self._deactivate_economizer(outdoor_temp=0)
+        if self._fan_active and not fan_was_overridden:
+            result = await self._deactivate_fan(reason=reason)
+            if end_nat_vent_session:
+                self._end_nat_vent_session(result)
+
     async def handle_bedtime(self) -> None:
         """Apply bedtime setback."""
         # Issue #299: guard against double-write when this task is fired via async_create_task
@@ -13494,16 +13522,9 @@ class AutomationEngine:
                 self._today_record.setback_skipped_reason = "no_classification"
             # No sleep target available — deactivate fan/economizer unless nat-vent/WHF owns it.
             if _gate != ScheduledBandGate.DEFER_NAT_VENT:
-                # Issue #1705: window cooling's own teardown first (its fan stop, comfort restore and log). Stopping
-                # the fan first would end the session through _deactivate_fan()'s hook and skip all of that.
-                if self.economizer_session_active:
-                    await self._deactivate_economizer(outdoor_temp=0)
-                if self._fan_active and not _fan_was_overridden:
-                    _no_class_result = await self._deactivate_fan(reason=_R("reason_bedtime_no_classification"))
-                    # Issue #931: was an unconditional clear — now routed through the
-                    # shared sole writer so a rate-limited/deferred command doesn't
-                    # strand the fan running with the retry mechanism disarmed.
-                    self._end_nat_vent_session(_no_class_result)
+                await self._scheduled_fan_teardown(
+                    _R("reason_bedtime_no_classification"), fan_was_overridden=_fan_was_overridden
+                )
             return
 
         _sleep_band = select_comfort_band(
@@ -13525,15 +13546,9 @@ class AutomationEngine:
         if _gate == ScheduledBandGate.DEFER_NAT_VENT:
             _LOGGER.info("Bedtime: nat-vent/WHF session active — leaving fan alone")
         else:
-            # Issue #1705: window cooling's own teardown first (see the no-classification branch above).
-            if self.economizer_session_active:
-                await self._deactivate_economizer(outdoor_temp=0)
-            if self._fan_active and not _fan_was_overridden:
-                _not_active_result = await self._deactivate_fan(reason=_R("reason_bedtime_nv_not_active"))
-                # Issue #931: was an unconditional clear — now routed through the
-                # shared sole writer so a rate-limited/deferred command doesn't
-                # strand the fan running with the retry mechanism disarmed.
-                self._end_nat_vent_session(_not_active_result)
+            await self._scheduled_fan_teardown(
+                _R("reason_bedtime_nv_not_active"), fan_was_overridden=_fan_was_overridden
+            )
 
         if (
             _gate == ScheduledBandGate.DEFER_NAT_VENT
@@ -13905,8 +13920,10 @@ class AutomationEngine:
 
         # Deactivate fan if still running from overnight — unless the user is overriding it
         # or nat-vent/WHF currently owns HVAC (Issue #498 fix — see docstring note above).
-        if _gate != ScheduledBandGate.DEFER_NAT_VENT and self._fan_active and not _fan_was_overridden:
-            await self._deactivate_fan(reason=_R("reason_morning_wakeup_fan"))
+        if _gate != ScheduledBandGate.DEFER_NAT_VENT:
+            await self._scheduled_fan_teardown(
+                _R("reason_morning_wakeup_fan"), fan_was_overridden=_fan_was_overridden, end_nat_vent_session=False
+            )
 
         c = self._current_classification
         if not c:

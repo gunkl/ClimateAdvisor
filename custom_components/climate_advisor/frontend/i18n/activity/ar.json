@@ -317,7 +317,7 @@
   "activity.outdoor_source_kept_forecast": "آخر توقعات للطقس (خدمة الطقس متوقفة)",
   "activity.outdoor_source_weather_attribute": "خدمة الطقس (الظروف الحالية)",
   "activity.outdoor_source_weather_interpolation": "خدمة الطقس (توقعات كل ساعة)",
-  "activity.overcool_ended": "انتهى التبريد الإضافي للرطوبة -- {reason, select, dried {الهواء أكثر جفافًا} cap {تم بلوغ حد 60 دقيقة} run_ended {انتهت دورة التبريد، ويعود الإعداد بعد فترة الاستمرار} other {تولّى إعداد آخر التحكم}}{has_minutes, select, yes { بعد {minutes} دقيقة} other {}}",
+  "activity.overcool_ended": "انتهى التبريد الإضافي للرطوبة -- {reason, select, dried {الهواء أكثر جفافًا} cap {تم بلوغ حد 60 دقيقة} run_ended {انتهت دورة التبريد، ويعود الإعداد بعد فترة الاستمرار} automation_off {أُلغي عند إيقاف التشغيل التلقائي} other {تولّى إعداد آخر التحكم}}{has_minutes, select, yes { بعد {minutes} دقيقة} other {}}",
   "activity.overcool_started": "بدأ التبريد الإضافي للرطوبة -- ضُبط المكيف أقل من {target} بمقدار {lowering} لتجفيف الهواء (نقطة الندى {dew_point})",
   "activity.overcool_started_lowering": "بدأ التبريد الإضافي للرطوبة -- ضُبط المكيف أقل بمقدار {lowering} لتجفيف الهواء",
   "activity.overcool_started_plain": "بدأ التبريد الإضافي للرطوبة",

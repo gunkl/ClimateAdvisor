@@ -27,6 +27,7 @@ The automation logic table and all threshold constants in this document are expr
 | Which log line says Climate Advisor switched the humidity source a Status chart line reads (room, bedroom, outdoor)? | One INFO line per real change per role per zone: `Zone "<title>": <room\|bedroom\|outdoor> humidity now from <new> instead of <old>: <reason>`, each source written `"<friendly name>" (<id>, <kind>, <RH>%)` or `no humidity source`, plus a `humidity_source_changed` Activity row (Issue #1455, 0.9.11). Reasons: `the chosen sensor is unavailable`, `back to your chosen sensor`, `no humidity sensor found on the device`, `weather service (no outdoor humidity sensor)`, `humidity sensor found on the device`. Silent during startup coalescing and on repeats; one `<role> humidity using ...` line after it. Same writer as the room-temperature line (`coordinator._announce_source()`). Chart only: no Repairs card. | [Chart Log Spec](chart-log-spec.md#humidity-source-changes-issue-1455) |
 | What dew point does Climate Advisor carry for decisions, and what makes it unknown (Issue #1690)? | `EngineFacts.indoor_dew_point_f` / `outdoor_dew_point_f` (+ the source used): the chart's humidity source paired with the same device's temperature (read as the temperature readers read it), Magnus (`feels_like.dew_point_f`), median of 15 min of 5-min samples. Unknown on no source, stale (indoor 120 min, outdoor 6 h), non-% unit, no same-device temperature, thermostat recalibrating, or a reconnect glitch (0 % / 32 °F, a lone 0 % RH). Sleep window: bedroom, else the room. Read by the humid-air guard on fan starts (Issue #1691). | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
 | Why did the fan not start on a humid night (Issue #1691)? | The humid-air guard: outdoor dew point at or above `humid_air_guard_ceiling_f` (65 °F), or at least 55 °F and 2 °F above the house's (1 °F hysteresis). Every fan start asks it (5 nat-vent start profiles incl. soft start, economizer, cycling-on, whole-house-fan min-runtime); the Next Automation prediction does not. One `nat_vent_humid_skip` row per humid spell, INFO `Fan start skipped: humid outdoor air ...`, a Status line on the outdoor card. | [Humid-air guard on fan starts](08-COMPUTATION-REFERENCE.md#humid-air-guard-on-fan-starts-issue-1691) |
+| With `hvac_fan_restrict_mode` Heat only, why did the blower run (or not) right after cooling (Issue #1693)? | The "cooled within the last 2 h" clause holds only while the house is humid: indoor dew point at or above `HVAC_FAN_RESTRICT_DP_F` (55 °F), released at `HVAC_FAN_RESTRICT_DP_RELEASE_F` (54 °F), latch `hvac_fan_restrict_humid` in `humidity_facts.LATCH_SPECS` (5-minute tick, read from `EngineFacts`). Unknown indoor dew point = the 2 h rule as before. "Currently in cool mode", `both` (default), the whole-house fan and the Cool only ("heated within 2 h") restriction ignore humidity. INFO `Feature suppressed: HVAC fan not activated — ... humid indoors (indoor_dew_point_f=X)` or `HVAC fan restriction lifted: ... dry indoors`. | [hvac_fan_restrict_mode](08-COMPUTATION-REFERENCE.md#hvac_fan_restrict_mode--heatcoolboth-restriction-issue-835) |
 | Can the outdoor sensor's reconnect value (0 % / 32 °F) reach an outdoor temperature decision (Issue #1689)? | No: `_read_outdoor_sensor` rejects it (`paired_glitch`: 0 % same-device humidity with exactly 32.0 °F, or a first reading of exactly 32.0 °F within 30 s after `unavailable` / `unknown`) as `implausible`; the weather service answers until the sensor's next reading or the 5-minute refresh. Any other first reading is used at once. | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
 | What temperature thresholds map to each day type? | HOT ≥ 85°F, WARM ≥ 75°F, MILD ≥ 60°F, COOL ≥ 45°F, COLD < 45°F; all thresholds are °F constants in `const.py`. | [§1. Day Classification](08-COMPUTATION-REFERENCE.md#1-day-classification) |
 | How is the setback modifier computed and what values can it take? | `avg_delta = ((tomorrow_high − today_high) + (tomorrow_low − today_low)) / 2`; modifier ranges from −3.0 (strong warming) to +3.0 (significant cold front); stable trend → 0. | [§3. Setback Modifier](08-COMPUTATION-REFERENCE.md#3-setback-modifier) |
@@ -2035,10 +2036,37 @@ Orthogonal to `fan_mode` (which mechanism runs) and independently configured: `h
 | Value | Behavior |
 |---|---|
 | `both` (default) | No restriction — current/legacy behavior, unchanged. |
-| `heat` | Blocks HVAC-fan activation while the thermostat is currently in `cool` mode, or `off` with a cooling cycle (`hvac_action == "cooling"`) recorded within the last 2 hours. Recommended for humid climates. |
-| `cool` | Symmetric restriction: blocks activation while currently in `heat` mode, or `off` with a heating cycle within the last 2 hours. No known real-world use case; included for selector symmetry. |
+| `heat` | Blocks HVAC-fan activation while the thermostat is currently in `cool` mode, or `off` with a cooling cycle (`hvac_action == "cooling"`) recorded within the last 2 hours **while the house is humid** (Issue #1693, below). Recommended for humid climates. |
+| `cool` | Symmetric restriction: blocks activation while currently in `heat` mode, or `off` with a heating cycle within the last 2 hours. No known real-world use case; included for selector symmetry. Humidity never changes it (heating leaves no condensate on the coil; deliberately unchanged by Issue #1693). |
 
-Implementation: `AutomationEngine._hvac_fan_restriction_block_reason()` is the single choke point, called from `_activate_fan()` right before the `climate.set_fan_mode(on)` write — both HVAC-fan trigger paths (the periodic duty-cycle circulation and the natural-vent/economizer free-cooling path) converge there before any hardware write happens, so no duplicated gate logic exists. When blocked, `_activate_fan()` returns `FanCommandResult.SUPPRESSED` and logs `"Feature suppressed: HVAC fan not activated — <reason>"` at INFO — no `fan_activated` event fires and `_fan_active` is not set, since nothing was actually commanded. This is a **start-gate only**: it does not force an already-running HVAC-fan cycle off mid-run if HVAC begins actively heating/cooling in the restricted direction partway through.
+**Humid-aware "cooled within 2 h" clause (Issue #1693, plan #1507 H2).** Occupant view: on a blower install that
+chose Heat only, the blower waits out the 2 hours after a cooling run only while the house is humid, because only then
+does a wet coil blow its water back into the room; a dry house gets its blower circulation (free cooling) straight
+away. The clause applies when the decision's indoor dew point (`EngineFacts.indoor_dew_point_f`,
+[Dew-point facts](#dew-point-facts-issue-1690)) is at or above `HVAC_FAN_RESTRICT_DP_F` (55 °F) and stays applied
+until it falls to `HVAC_FAN_RESTRICT_DP_RELEASE_F` (54 °F): one latch `hvac_fan_restrict_humid`
+(`humidity_facts.HVAC_FAN_RESTRICT_LATCH_SPEC` in `LATCH_SPECS`, `latch_above`), stepped on the coordinator's
+5-minute dew-point tick with the other humid latches and re-stepped by each decision from `EngineFacts.humid_latches`
+(`humidity_facts.hvac_fan_restrict_humid`, pure; the one facts reader `_facts_dew_points`, shared with the humid-air
+guard, takes only a finite number, anything else is unknown). The constants live with the humid-air guard's in
+`humidity_facts.py`. **Unknown indoor dew point = the 2 h rule exactly as before.** Internal constants, no option; not tied to
+the humid-air guard's On/Off option (a different rule: the guard judges outdoor air brought in, this judges the
+house's own air). The same 55 °F as the guard's relative floor with a different meaning (distinct constants). The
+humid clause never extends the 2 h window, and the "currently in `cool` mode" clause, `both` (default, restricts
+nothing) and the whole-house fan leg are unchanged. One verdict per activation:
+`AutomationEngine._hvac_fan_restriction_verdict()` is read once by `_activate_fan()`. For `hvac_fan` it is taken at
+the early check (before the toggle floor, #1196) and reused by the blower write, with no await in between; for `both`
+it is taken at the blower write, after the whole-house-fan leg's `_suppress_hvac_for_whf()` switched the thermostat
+off, so the blower is judged on the thermostat it will actually run with (as before #1693).
+`_hvac_fan_restriction_block_reason()` (its `.reason`) serves `_fan_start_runtime_refusal()`. Logs: the existing INFO `Feature suppressed: HVAC fan not activated — restricted to
+heat — HVAC cooled within the last 2h, humid indoors (indoor_dew_point_f=<x>) (<trigger>)` when humid (the unchanged
+reason when unknown), and INFO `HVAC fan restriction lifted: cooled within the last 2h but dry indoors
+indoor_dew_point_f=<x> release_f=54.0 -- the blower may run (<trigger>)` when dry (dew points through
+`humidity_facts.fmt_dp_log`). No Activity row (the restriction never had one) and no Status line.
+Tests: `tests/test_humid_fan_restrict_1693.py`; Tier-A scenarios
+`tools/simulations/pending/humid_fan_restrict_1693_*.json` (awaiting owner review for promotion to golden).
+
+Implementation: `AutomationEngine._hvac_fan_restriction_verdict()` is the single choke point, read by `_activate_fan()` before the `climate.set_fan_mode(on)` write (at the early check for `hvac_fan`, at the blower write for `both`; see above) — both HVAC-fan trigger paths (the periodic duty-cycle circulation and the natural-vent/economizer free-cooling path) converge there before any hardware write happens, so no duplicated gate logic exists. When blocked, `_activate_fan()` returns `FanCommandResult.SUPPRESSED` and logs `"Feature suppressed: HVAC fan not activated — <reason>"` at INFO — no `fan_activated` event fires and `_fan_active` is not set, since nothing was actually commanded. This is a **start-gate only**: it does not force an already-running HVAC-fan cycle off mid-run if HVAC begins actively heating/cooling in the restricted direction partway through.
 
 `AutomationEngine._last_hvac_heating_active` / `_last_hvac_cooling_active` (ISO timestamps) track the most recent live `hvac_action` read of `"heating"`/`"cooling"`, updated once per coordinator cycle (piggybacking on the existing unconditional `hvac_action` read in `_async_update_data()` rather than polling separately). Unlike override/grace state, these two fields are **restored** (not clean-slate) across an HA restart via `get_serializable_state()`/`restore_state()` — forgetting a recent cooling cycle on restart would let the guard immediately approve activation into a still-wet coil, recreating exactly the issue the feature exists to prevent. No recorded history for the restricted mode is treated as "not recently active" (allowed) — absence of evidence isn't itself a block.
 
@@ -4241,8 +4269,11 @@ Tests: `tests/test_thermostat_recal_1676.py` (state machine, resolver, coordinat
 (76 °F at 60 % is a 61 °F dew point, at 35 % a 46 °F one). Before any rule may act on it (the #1507 waves 2-3: humid
 fan-start guard, window advice, humid overcool), Climate Advisor carries the house's and the outside air's dew point
 in the decision facts. Since Issue #1691 the humid-air guard on fan starts reads them
-([below](#humid-air-guard-on-fan-starts-issue-1691)), and since Issue #1692 the window advice
-([below](#humid-air-window-advice-issue-1692)); unknown always means today's behaviour.
+([below](#humid-air-guard-on-fan-starts-issue-1691)), since Issue #1692 the window advice
+([below](#humid-air-window-advice-issue-1692)), and since Issue #1693 the `hvac_fan_restrict_mode` "cooled within
+2 h" clause reads the indoor one
+([`hvac_fan_restrict_mode`](#hvac_fan_restrict_mode--heatcoolboth-restriction-issue-835)); unknown always means
+today's behaviour.
 
 - **One resolver, two outputs.** `humidity_sources.resolve_humidity_paired` picks the humidity source exactly as the
   chart does ([Chart Log Spec](chart-log-spec.md#humidity-and-feels-like-fields-issue-1414)) and also says through
@@ -4289,7 +4320,8 @@ in the decision facts. Since Issue #1691 the humid-air guard on fan starts reads
   (pinned by `tests/test_chart_humidity_1414.py::test_humidity_reaches_only_the_dew_point_reader`). Latches step on
   the 5-minute tick through the one hysteresis helper `latch_above(value, on, off, was_on)` (on at `on`, stays on
   while above `off`, off at or below `off`, unknown releases); `humidity_facts.LATCH_SPECS` holds the H1 wetter
-  latch and `step_humid_latches` adds the configured ceiling latch (Issue #1691). The device lookups the readers use are cache-only, so building facts never reads the entity
+  latch and the H2 restrict latch `hvac_fan_restrict_humid` (indoor, 55 / 54 °F, Issue #1693), and
+  `step_humid_latches` adds the configured ceiling latch (Issue #1691). The device lookups the readers use are cache-only, so building facts never reads the entity
   registry (safe on any thread).
 - **Missing inputs (for the #1507 rules that will read these facts):**
 

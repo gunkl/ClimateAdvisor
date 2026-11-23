@@ -317,7 +317,7 @@
           "automation_grace_seconds": "Climate Advisor otomatik bir değişiklik yaptıktan sonra bir diğerine izin vermeden önce ne kadar beklenir.",
           "override_confirm_seconds": "Sistem değişiklikleri ile manuel değişikliğin onaylanması arasındaki süre. Bu süre içinde sona eren geçici olaylar (termostat yeniden başlatma, fan döngüleri) otomatik olarak yok sayılır. Değişiklikleri hemen onaylamak için 0 yapın.",
           "fan_mode": "Havalandırma için fanların nasıl kontrol edileceği. 'Tüm ev fanı' ayrılmış bir fan varlığını kontrol eder. 'HVAC fanı' termostatın fan modunu kullanır.",
-          "hvac_fan_restrict_mode": "Nemli iklimlerde 'Yalnızca ısıtma', ıslak serpantin neminden kaçınmak için soğutmadan sonra 2 saat HVAC fanını atlar.",
+          "hvac_fan_restrict_mode": "Nemli iklimlerde 'Yalnızca ısıtma', ıslak serpantin neminden kaçınmak için ev nemliyken soğutmadan sonra 2 saat HVAC fanını atlar.",
           "fan_entity": "Kontrol edilecek fan veya anahtar varlığı (yalnızca tüm ev fanı modunda gerekir).",
           "fan_state_entity": "Fanın fiziksel durumunu okumak için isteğe bağlı ayrı sensör (çift varlıklı tüm ev fanları için). Durum için de Fan varlığını kullanmak üzere boş bırakın.",
           "fan_state_feedback": "Fan varlığınız veya durum sensörünüz gerçek motor durumunu bildiriyorsa (yalnızca gönderilen son komutu değil) bunu AÇIN. Emin değilseniz KAPALI bırakın; CA her döngüde fana istenen durumu komut olarak gönderir.",

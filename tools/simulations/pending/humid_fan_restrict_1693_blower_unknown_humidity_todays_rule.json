@@ -1,0 +1,209 @@
+{
+  "name": "humid_fan_restrict_1693_blower_unknown_humidity_todays_rule",
+  "description": "Blower install, restrict 'heat only', no indoor humidity: the 2-hour rule after cooling applies exactly as before",
+  "source": "synthetic",
+  "issue": 1693,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "No indoor humidity on any event (indoor dew point unknown). Outdoor 70.0F at 49.1% = 50.01F dew point (dry: the #1691 humid-air guard does not block).",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: treating unknown as dry would make 20:00 read fan_activated and 20:30 natural_ventilation. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md missing-input table, H2 column: indoor DP unknown -> today's rule; production returns the unchanged 'cooled within the last 2h' reason when hvac_fan_restrict_humid is None. (c) occupant: a house CA cannot judge keeps the protection the occupant chose."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Blower install, restrict 'heat only', no indoor humidity: the 2-hour rule after cooling applies exactly as before",
+    "observed_behavior": "paused (no blower)",
+    "expected_behavior": "paused (no blower)"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "hvac_fan",
+    "hvac_fan_restrict_mode": "heat",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T19:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "Hot evening, windows closed, the house is above the 76F ceiling."
+    },
+    {
+      "time": "2026-07-12T19:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day, cool band: the AC runs (the thermostat reports hvac_action cooling, which stamps the restriction's last-cooled time)."
+    },
+    {
+      "time": "2026-07-12T19:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T20:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "The occupant opens a window: HVAC pauses (cool -> off); the coil is still wet from the run that just stopped."
+    },
+    {
+      "time": "2026-07-12T20:05:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "Window open; no indoor humidity reading (thermostat without a humidity sensor)."
+    },
+    {
+      "time": "2026-07-12T20:10:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "Window open; no indoor humidity reading (thermostat without a humidity sensor)."
+    },
+    {
+      "time": "2026-07-12T20:15:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "Window open; no indoor humidity reading (thermostat without a humidity sensor)."
+    },
+    {
+      "time": "2026-07-12T20:20:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "Window open; no indoor humidity reading (thermostat without a humidity sensor)."
+    },
+    {
+      "time": "2026-07-12T20:25:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "Window open; no indoor humidity reading (thermostat without a humidity sensor)."
+    },
+    {
+      "time": "2026-07-12T20:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "outdoor_humidity": 49.1,
+      "note": "Window open; no indoor humidity reading (thermostat without a humidity sensor)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T20:00:00",
+      "expect": "paused",
+      "reason": "Unknown indoor humidity: the restriction refuses the blower as it always did."
+    },
+    {
+      "at": "2026-07-12T20:30:00",
+      "expect": "paused",
+      "reason": "Still within 2 h of cooling: no blower."
+    },
+    {
+      "at": "2026-07-12T20:30:00",
+      "expect": "fan_not_active",
+      "reason": "The blower never ran."
+    }
+  ]
+}

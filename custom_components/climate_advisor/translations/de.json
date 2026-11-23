@@ -317,7 +317,7 @@
           "automation_grace_seconds": "Wie lange nach einer automatischen Änderung von Climate Advisor gewartet wird, bevor eine weitere erlaubt ist.",
           "override_confirm_seconds": "Zeit zwischen Systemänderungen und der Bestätigung einer manuellen Änderung. Kurzzeitige Ereignisse (Thermostat-Neustart, Lüfterzyklen), die sich innerhalb dieses Zeitfensters erledigen, werden automatisch ignoriert. Mit 0 werden manuelle Änderungen sofort bestätigt.",
           "fan_mode": "Wie Lüfter zur Belüftung gesteuert werden. „Hausventilator“ steuert eine eigene Lüfter-Entität. „Heizungs-/Klimagebläse“ nutzt den Lüftermodus des Thermostats.",
-          "hvac_fan_restrict_mode": "Für feuchte Klimazonen: „Nur Heizen“ lässt das Gebläse nach dem Kühlen 2 Stunden aus, um Feuchtigkeit am nassen Verdampfer zu vermeiden.",
+          "hvac_fan_restrict_mode": "Für feuchte Klimazonen: „Nur Heizen“ lässt das Gebläse nach dem Kühlen 2 Stunden aus, solange das Haus feucht ist, um Feuchtigkeit am nassen Verdampfer zu vermeiden.",
           "fan_entity": "Die Lüfter- oder Schalter-Entität, die gesteuert werden soll (nur für den Hausventilator-Modus nötig).",
           "fan_state_entity": "Optionaler separater Sensor für den physischen Lüfterzustand (für Hausventilatoren mit zwei Entitäten). Leer lassen, um auch für den Zustand die Lüfter-Entität zu verwenden.",
           "fan_state_feedback": "Aktiviere dies, wenn deine Lüfter-Entität oder dein Statussensor den tatsächlichen Motorzustand meldet (nicht nur den zuletzt gesendeten Befehl). Lass es aus, wenn du unsicher bist — CA sendet dann in jedem Zyklus den gewünschten Zustand an den Lüfter.",

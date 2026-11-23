@@ -317,7 +317,7 @@
           "automation_grace_seconds": "Quanto tempo esperar depois de o Climate Advisor fazer uma alteração automática antes de permitir outra.",
           "override_confirm_seconds": "Tempo entre alterações do sistema e a confirmação de uma alteração manual. Eventos passageiros (reinício do termóstato, ciclos da ventoinha) que terminem dentro deste intervalo são ignorados automaticamente. Defina 0 para confirmar de imediato.",
           "fan_mode": "Como controlar as ventoinhas para ventilação. «Ventoinha de toda a casa» controla uma entidade de ventoinha dedicada. «Ventoinha do AVAC» usa o modo de ventoinha do termóstato.",
-          "hvac_fan_restrict_mode": "Em climas húmidos, «Apenas aquecimento» não usa a ventoinha do AVAC durante 2 horas após arrefecer, para evitar a humidade da serpentina molhada.",
+          "hvac_fan_restrict_mode": "Em climas húmidos, «Apenas aquecimento» não usa a ventoinha do AVAC durante 2 horas após arrefecer enquanto a casa estiver húmida, para evitar a humidade da serpentina molhada.",
           "fan_entity": "A entidade de ventoinha ou interruptor a controlar (necessária apenas no modo de ventoinha de toda a casa).",
           "fan_state_entity": "Sensor separado opcional para ler o estado físico da ventoinha (para ventoinhas de toda a casa com duas entidades). Deixe em branco para usar também a entidade da ventoinha para o estado.",
           "fan_state_feedback": "Ative se a sua entidade de ventoinha ou sensor de estado indicar o estado real do motor (e não apenas o último comando enviado). Deixe desligado se tiver dúvidas — o CA envia o comando do estado pretendido em cada ciclo.",

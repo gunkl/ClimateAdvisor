@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.77] — 2026-11-22
+
+### Changed
+- #1693 (humidity, step 3 of #1507): on a blower install that chose **HVAC Fan Restriction: Heat only**, the blower now waits out the 2 hours after the AC stops only while the house is humid (indoor dew point 55 °F or more, released at 54 °F so it does not flip back and forth). That wait exists so the wet AC coil does not blow its water back into a humid room; in a dry house the blower now circulates (and gives free cooling with the windows open) straight away. When Climate Advisor cannot read the indoor humidity, the 2-hour wait applies exactly as before. Nothing changes while the thermostat is in cool mode, with the default **Both (no restriction)**, for a whole-house fan, or for **Cool only** (heating leaves no water on the coil). The log says which applied, with the dew point.
+
 ## [0.9.76] — 2026-11-22
 
 ### Added

@@ -251,10 +251,12 @@ from .fan_toggle_rate_limit import (
 )
 from .humidity_facts import (
     HUMID_AIR_REASON_CEILING,
+    HVAC_FAN_RESTRICT_DP_RELEASE_F,
     HumidAirVerdict,
     fmt_dp_log,
     humid_air_ceiling_from_config,
     humid_air_verdict_from_facts,
+    hvac_fan_restrict_humid_from_facts,
 )
 from .hvac_action import is_hvac_compressor_active
 from .incident_payload import build_incident_payload, is_climate_validation_error
@@ -516,6 +518,20 @@ def _refuse_if_shut_down(obj: Any, action: str, *, label: Callable[[Any], str] |
     else:
         _LOGGER.info("Home Assistant is stopping: %s asked to %s — skipped", who, action)
     return True
+
+
+@dataclass(frozen=True)
+class HvacFanRestriction:
+    """One ``hvac_fan_restrict_mode`` verdict (Issue #835; humid clause Issue #1693).
+
+    ``reason`` set = the blower start is refused (the log text). ``dry_lifted`` = the 'heat' restriction's "cooled
+    within the last 2h" clause would have refused it, but the house is dry (indoor dew point below the restrict
+    latch), so it may run; ``indoor_dew_point_f`` is the dew point judged (None = unknown or not asked).
+    """
+
+    reason: str | None
+    dry_lifted: bool = False
+    indoor_dew_point_f: float | None = None
 
 
 class FanCommandResult(Enum):
@@ -19778,7 +19794,11 @@ class AutomationEngine:
         return self.command_context_matches("fan", event_context_id, event_context_parent_id)
 
     def _hvac_fan_restriction_block_reason(self) -> str | None:
-        """Return a short reason if hvac_fan_restrict_mode blocks HVAC-fan activation now.
+        """Return a short reason if hvac_fan_restrict_mode blocks HVAC-fan activation now (pure read, no log)."""
+        return self._hvac_fan_restriction_verdict().reason
+
+    def _hvac_fan_restriction_verdict(self) -> HvacFanRestriction:
+        """Whether hvac_fan_restrict_mode blocks HVAC-fan activation now, and whether a dry house lifted it.
 
         Issue #835: 'heat' means never run the HVAC fan while the thermostat is
         currently in cool mode, or off with a cooling cycle within the last 2 hours
@@ -19786,10 +19806,16 @@ class AutomationEngine:
         'cool' is the symmetric restriction for heat. 'both' (default) applies no
         restriction. No recorded history for the restricted mode is treated as
         "not recently active" — absence of evidence isn't itself a block.
+
+        Issue #1693 (plan #1507 H2): the "cooled within the last 2h" clause applies only while the house is humid
+        (indoor dew point >= ``HVAC_FAN_RESTRICT_DP_F``, released at ``HVAC_FAN_RESTRICT_DP_RELEASE_F``; one verdict
+        from the decision's facts, ``humidity_facts.hvac_fan_restrict_humid``). Unknown indoor dew point = the 2 h
+        rule as before. The "currently in cool mode" clause and the 'cool' restriction ("heated within 2h") are
+        unchanged: heating leaves no condensate on the coil.
         """
         restrict = self.config.get(CONF_HVAC_FAN_RESTRICT_MODE, DEFAULT_HVAC_FAN_RESTRICT_MODE)
         if restrict == HVAC_FAN_RESTRICT_BOTH:
-            return None
+            return HvacFanRestriction(None)
 
         hvac_state = self.hass.states.get(self.climate_entity)
         hvac_mode = hvac_state.state if hvac_state else "unknown"
@@ -19813,15 +19839,24 @@ class AutomationEngine:
 
         if restrict == HVAC_FAN_RESTRICT_HEAT:
             if hvac_mode == "cool":
-                return "restricted to heat — HVAC currently in cool mode"
+                return HvacFanRestriction("restricted to heat — HVAC currently in cool mode")
             if hvac_mode == "off" and _recent(self._last_hvac_cooling_active):
-                return "restricted to heat — HVAC cooled within the last 2h"
+                humid, indoor_dp = hvac_fan_restrict_humid_from_facts(self._facts(dt_util.now()))
+                if humid is None:  # indoor dew point unknown: the 2 h rule as before
+                    return HvacFanRestriction("restricted to heat — HVAC cooled within the last 2h")
+                if humid:
+                    return HvacFanRestriction(
+                        "restricted to heat — HVAC cooled within the last 2h, humid indoors"
+                        f" (indoor_dew_point_f={fmt_dp_log(indoor_dp)})",
+                        indoor_dew_point_f=indoor_dp,
+                    )
+                return HvacFanRestriction(None, dry_lifted=True, indoor_dew_point_f=indoor_dp)
         elif restrict == HVAC_FAN_RESTRICT_COOL:
             if hvac_mode == "heat":
-                return "restricted to cool — HVAC currently in heat mode"
+                return HvacFanRestriction("restricted to cool — HVAC currently in heat mode")
             if hvac_mode == "off" and _recent(self._last_hvac_heating_active):
-                return "restricted to cool — HVAC heated within the last 2h"
-        return None
+                return HvacFanRestriction("restricted to cool — HVAC heated within the last 2h")
+        return HvacFanRestriction(None)
 
     def _fan_start_blind(self) -> bool:
         """True when Climate Advisor cannot read the indoor temperature, so it must not START a fan (Issue #1370, P5).
@@ -19964,8 +19999,12 @@ class AutomationEngine:
         # all -- it used to be judged by the floor first, which deferred it (recording an activation that would
         # never run) or, once stamped, made the NEXT attempt look rate-limited. hvac_fan only: with BOTH the WHF
         # leg still runs, so the restriction is applied to the blower leg further down.
+        # Issue #1693: hvac_fan takes one restriction verdict per activation (the humid clause reads the facts once),
+        # reused by the blower write below (no await runs in between that could change the thermostat). With BOTH the
+        # blower leg is judged at its write, after the WHF leg turned the thermostat off (review W2C A1/B1).
+        _restriction = self._hvac_fan_restriction_verdict() if fan_mode == FAN_MODE_HVAC else HvacFanRestriction(None)
         if fan_mode == FAN_MODE_HVAC:
-            _early_restrict_reason = self._hvac_fan_restriction_block_reason()
+            _early_restrict_reason = _restriction.reason
             if _early_restrict_reason:
                 _LOGGER.info("Feature suppressed: HVAC fan not activated — %s (%s)", _early_restrict_reason, reason)
                 # A deferral recorded by an earlier attempt is moot (the start is refused, nothing is pending);
@@ -20079,10 +20118,20 @@ class AutomationEngine:
                 # Issue #835: heat/cool/both restriction — never affects the WHF leg
                 # above. Blocks only the HVAC-blower write when the configured
                 # restriction and recent heat/cool history say so.
-                _restrict_reason = self._hvac_fan_restriction_block_reason()
+                if fan_mode == FAN_MODE_BOTH:
+                    _restriction = self._hvac_fan_restriction_verdict()  # after _suppress_hvac_for_whf (cool -> off)
+                _restrict_reason = _restriction.reason
                 if _restrict_reason:
                     _LOGGER.info("Feature suppressed: HVAC fan not activated — %s (%s)", _restrict_reason, reason)
                 else:
+                    if _restriction.dry_lifted:
+                        _LOGGER.info(
+                            "HVAC fan restriction lifted: cooled within the last 2h but dry indoors"
+                            " indoor_dew_point_f=%s release_f=%.1f -- the blower may run (%s)",
+                            fmt_dp_log(_restriction.indoor_dew_point_f),
+                            HVAC_FAN_RESTRICT_DP_RELEASE_F,
+                            reason,
+                        )
                     hvac_state = self.hass.states.get(self.climate_entity)
                     hvac_mode = hvac_state.state if hvac_state else "unknown"
                     if hvac_mode == "off":

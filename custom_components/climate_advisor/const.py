@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.76"
+VERSION = "0.9.77"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -1148,7 +1148,7 @@ CONFIG_METADATA = {
             "Restricts when the HVAC fan (thermostat blower circulation) is allowed to run,"
             " based on which HVAC mode last ran. Does not affect the whole-house fan."
             " 'Heat only' blocks the HVAC fan while the thermostat is in cool mode, or off"
-            " within 2 hours of a cooling cycle — avoids raising humidity by re-evaporating"
+            " within 2 hours of a cooling cycle while the house is humid — avoids raising humidity by re-evaporating"
             " condensate off wet coils, useful in humid climates. 'Cool only' is the symmetric"
             " restriction. 'Both' (default) applies no restriction — current behavior."
         ),

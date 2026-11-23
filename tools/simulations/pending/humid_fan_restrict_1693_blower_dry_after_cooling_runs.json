@@ -1,0 +1,227 @@
+{
+  "name": "humid_fan_restrict_1693_blower_dry_after_cooling_runs",
+  "description": "Blower install, restrict 'heat only': after cooling, a dry house (indoor dew point 50F) lets the blower run as with no restriction",
+  "source": "synthetic",
+  "issue": 1693,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Dew points: indoor 77.0F at 38.8% / 76.0F at 40.1% = ~50F, below the 54F release. Outdoor 70.0F at 49.1% = 50.01F dew point (dry: the #1691 humid-air guard does not block).",
+    "Same timeline as humid_fan_restrict_1693_blower_humid_after_cooling_restricted and the same outcomes as hvac_fan_restrict_mode 'both' (the 20:05 fan_running_untracked / backstop reconcile and the 20:10 restart are the unrestricted timeline too, not this feature).",
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: deleting the humid condition (today's 2 h rule) makes 20:00 and 20:30 read paused with no fan_activated. (b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'hvac_fan_restrict_mode' states a dry house is not restricted after cooling; production lifts the clause when humidity_facts.hvac_fan_restrict_humid is False. (c) occupant: with a dry house the free blower cooling would be refused for 2 hours for no humidity benefit."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Blower install, restrict 'heat only': after cooling, a dry house (indoor dew point 50F) lets the blower run as with no restriction",
+    "observed_behavior": "economizer blower on, natural_ventilation",
+    "expected_behavior": "economizer blower on, natural_ventilation"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": [
+      "binary_sensor.living_window"
+    ],
+    "fan_mode": "hvac_fan",
+    "hvac_fan_restrict_mode": "heat",
+    "outdoor_temp_source": "sensor",
+    "outdoor_temp_entity": "sensor.outdoor_temp"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T19:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 70.0,
+      "humidity": 37.5,
+      "outdoor_humidity": 49.1,
+      "note": "Hot evening, windows closed, the house is above the 76F ceiling."
+    },
+    {
+      "time": "2026-07-12T19:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day, cool band: the AC runs (the thermostat reports hvac_action cooling, which stamps the restriction's last-cooled time)."
+    },
+    {
+      "time": "2026-07-12T19:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T19:55:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 70.0,
+      "humidity": 38.8,
+      "outdoor_humidity": 49.1,
+      "note": "The AC is still cooling toward 76F."
+    },
+    {
+      "time": "2026-07-12T20:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_window",
+      "note": "The occupant opens a window: HVAC pauses (cool -> off); the coil is still wet from the run that just stopped."
+    },
+    {
+      "time": "2026-07-12T20:05:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 40.1,
+      "outdoor_humidity": 49.1,
+      "note": "Window open, outdoor air cooler; the house is dry (indoor dew point 50F)."
+    },
+    {
+      "time": "2026-07-12T20:10:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 40.1,
+      "outdoor_humidity": 49.1,
+      "note": "Window open, outdoor air cooler; the house is dry (indoor dew point 50F)."
+    },
+    {
+      "time": "2026-07-12T20:15:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 40.1,
+      "outdoor_humidity": 49.1,
+      "note": "Window open, outdoor air cooler; the house is dry (indoor dew point 50F)."
+    },
+    {
+      "time": "2026-07-12T20:20:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 40.1,
+      "outdoor_humidity": 49.1,
+      "note": "Window open, outdoor air cooler; the house is dry (indoor dew point 50F)."
+    },
+    {
+      "time": "2026-07-12T20:25:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 40.1,
+      "outdoor_humidity": 49.1,
+      "note": "Window open, outdoor air cooler; the house is dry (indoor dew point 50F)."
+    },
+    {
+      "time": "2026-07-12T20:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "humidity": 40.1,
+      "outdoor_humidity": 49.1,
+      "note": "Window open, outdoor air cooler; the house is dry (indoor dew point 50F)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T20:00:00",
+      "expect": "event_emitted",
+      "event": "fan_activated",
+      "payload_subset": {
+        "fan_device": "hvac_fan"
+      },
+      "reason": "Dry house: the restriction lifts and the economizer starts the blower right after the pause."
+    },
+    {
+      "at": "2026-07-12T20:30:00",
+      "expect": "natural_ventilation",
+      "reason": "The paused window gets its blower session within the 2 h after cooling."
+    }
+  ]
+}

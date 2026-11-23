@@ -317,7 +317,7 @@
           "automation_grace_seconds": "Quanto attendere dopo una modifica automatica di Climate Advisor prima di consentirne un’altra.",
           "override_confirm_seconds": "Tempo tra le modifiche del sistema e la conferma di una modifica manuale. Gli eventi transitori (riavvio del termostato, cicli della ventola) che si risolvono entro questo tempo vengono ignorati automaticamente. Impostare 0 per confermare subito.",
           "fan_mode": "Come controllare le ventole per la ventilazione. «Ventola per tutta la casa» controlla un’entità ventola dedicata. «Ventola della climatizzazione» usa la modalità ventola del termostato.",
-          "hvac_fan_restrict_mode": "Per i climi umidi, «Solo riscaldamento» non usa la ventola della climatizzazione per 2 ore dopo il raffreddamento, per evitare l’umidità della batteria bagnata.",
+          "hvac_fan_restrict_mode": "Per i climi umidi, «Solo riscaldamento» non usa la ventola della climatizzazione per 2 ore dopo il raffreddamento finché la casa è umida, per evitare l’umidità della batteria bagnata.",
           "fan_entity": "L’entità ventola o interruttore da controllare (necessaria solo per la modalità ventola per tutta la casa).",
           "fan_state_entity": "Sensore separato facoltativo per leggere lo stato fisico della ventola (per ventole per tutta la casa a due entità). Lasciare vuoto per usare anche l’entità della ventola per lo stato.",
           "fan_state_feedback": "Attivare se l’entità ventola o il sensore di stato riporta lo stato reale del motore (non solo l’ultimo comando inviato). Lasciare disattivato in caso di dubbio: CA comanderà la ventola allo stato desiderato a ogni ciclo.",

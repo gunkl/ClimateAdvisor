@@ -23,6 +23,7 @@ from custom_components.climate_advisor.humidity_facts import (
     HUMID_AIR_REASON_CEILING,
     HUMID_AIR_REASON_WETTER,
     HUMID_AIR_WETTER_LATCH,
+    HVAC_FAN_RESTRICT_HUMID_LATCH,
     LATCH_SPECS,
     SIGNAL_INDOOR,
     SIGNAL_OUTDOOR,
@@ -120,14 +121,19 @@ class TestMissingInputs:
 class TestLatchStep:
     def test_tick_and_verdict_share_one_step(self):
         state = step_humid_latches({SIGNAL_INDOOR: 55.0, SIGNAL_OUTDOOR: 66.0}, {}, ceiling_f=CEIL)
-        assert state == {HUMID_AIR_WETTER_LATCH: True, HUMID_AIR_CEILING_LATCH: True}
+        # Issue #1693 (H2) steps its indoor latch in the same step: indoor 55 F engages it
+        assert state == {
+            HUMID_AIR_WETTER_LATCH: True,
+            HUMID_AIR_CEILING_LATCH: True,
+            HVAC_FAN_RESTRICT_HUMID_LATCH: True,
+        }
         state = step_humid_latches({SIGNAL_INDOOR: 55.0, SIGNAL_OUTDOOR: 64.5}, state, ceiling_f=CEIL)
         assert state[HUMID_AIR_CEILING_LATCH] is True  # inside the band
         latched = {k for k, on in state.items() if on}
         assert humid_air_verdict(55.0, 64.5, ceiling_f=CEIL, latched=latched).reason == HUMID_AIR_REASON_CEILING
 
     def test_specs(self):
-        assert [s.name for s in LATCH_SPECS] == [HUMID_AIR_WETTER_LATCH]
+        assert [s.name for s in LATCH_SPECS] == [HUMID_AIR_WETTER_LATCH, HVAC_FAN_RESTRICT_HUMID_LATCH]  # + #1693 H2
         (spec,) = humid_air_latch_specs(60.0)
         assert (spec.name, spec.signal, spec.on, spec.off) == (HUMID_AIR_CEILING_LATCH, SIGNAL_OUTDOOR, 60.0, 59.0)
         assert humid_air_latch_specs(None) == ()

@@ -131,7 +131,7 @@
       "time": "2026-07-12T19:52:00",
       "type": "economizer_check",
       "outdoor_temp": 70.0,
-      "indoor_temp": 77.5,
+      "indoor_temp": 78.0,
       "windows_open": true,
       "hour": 19,
       "note": "Window cooling starts the blower while the thermostat is still in cool (direct check; see notes)."

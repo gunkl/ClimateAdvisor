@@ -91,6 +91,8 @@ REFERENCES: dict[str, list[str]] = {
     "fe:learning.suggestion.frequent_overrides_no_detail": [TAB_SETTINGS],
     "fe:learning.suggestion.high_runtime_mild_days": [TAB_SETTINGS],
     "fe:learning.suggestion.short_departures": [TAB_SETTINGS],
+    # Issue #1695: "Turn on Humid Overcool" names the setting and the tab it is on
+    "fe:learning.suggestion.humid_overcool": [TAB_SETTINGS, "fe:settings.humid_overcool_enabled.label"],
     "fe:settings.energy_rate.description": [TAB_ANALYSIS],
     "fe:settings.briefing_notifications_enabled.description": [SEND_BRIEFING, ACTIONS],
     "ha:options.step.notifications.data_description.briefing_notifications_enabled": [SEND_BRIEFING, ACTIONS],

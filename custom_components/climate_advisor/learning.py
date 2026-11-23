@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,8 @@ from .const import (
     MIN_DATA_POINTS_FOR_SUGGESTION,
     MIN_WEATHER_BIAS_OBSERVATIONS,
     OBS_TYPE_HVAC_HEAT,
+    OVERCOOL_MAX_F,
+    OVERCOOL_TRIGGER_DP_F,
     REJECT_ABANDONED,
     REJECT_NO_K_PASSIVE,
     REJECT_OLS_BAD_FIT,
@@ -96,8 +99,18 @@ SUGGESTION_KEYS = frozenset(
         "thermal_model_ready",
         "forecast_bias_significant",
         "high_runtime_mild_days",
+        "humid_overcool",
     }
 )
+
+# Issue #1695 (plan #1507 wave 3b, I6): "Turn on Humid Overcool" (advice only, #1652) needs this many minutes of
+# reported cooling with the overcool humid latch on (indoor dew point at or above OVERCOOL_TRIGGER_DP_F, released at
+# OVERCOOL_RELEASE_DP_F) over the last 14 daily records. Chosen by what-if (docs/05-LEARNING-ENGINE-DESIGN.md
+# "Pattern: Humid Cooling With Humid Overcool Off"): a humid-climate house (indoor dew point ~59-65 °F, 1.5-2.3 h of AC
+# on a humid day) reaches it in 2-5 humid days and within 13 days even in the slowest case; the owner's dry-summer
+# house reaches it only in its single muggiest fortnight (max 281 min in any 14 days, May-Oct 2026), when overcool
+# would have acted. 360 min never fires there and misses the slowest humid case (19 days).
+HUMID_OVERCOOL_SUGGEST_MINUTES = 240.0
 
 # Issue #1110: which shutdown path persisted the restart-cause diagnostics.
 SHUTDOWN_KIND_UNLOAD = "unload"  # config-entry unload (zone reload / repair / removal)
@@ -1205,6 +1218,11 @@ class DailyRecord:
     # optional cost estimate can price heating and cooling at their own power ratings.
     hvac_heat_runtime_minutes: float = 0.0
     hvac_cool_runtime_minutes: float = 0.0
+    # Issue #1695: the part of hvac_cool_runtime_minutes during which humid overcool would call the house humid
+    # (humidity_facts.overcool_humid_from_facts: indoor dew point at or above the trigger, released at 58 F). Counted
+    # only from reported cooling (hvac_action), like its parent; never above it. Additive field: a record stored
+    # before 0.9.80 reads 0.
+    hvac_cool_humid_runtime_minutes: float = 0.0
     # Issue #912: fan_only (thermostat or WHF-driven) runtime tracked separately from
     # true compressor/burner runtime above — never blend the two into a number that
     # implies heat/cool actually ran. Deliberately prefixed "thermostat_" to avoid
@@ -1272,7 +1290,13 @@ class LearningState:
 class LearningEngine:
     """Tracks patterns and generates adaptive suggestions."""
 
-    def __init__(self, storage_path: Path, entry_id: str = "", temp_unit: str = "fahrenheit") -> None:
+    def __init__(
+        self,
+        storage_path: Path,
+        entry_id: str = "",
+        temp_unit: str = "fahrenheit",
+        humid_overcool_enabled: Callable[[], bool] | None = None,
+    ) -> None:
         """Initialize the learning engine.
 
         Args:
@@ -1282,6 +1306,8 @@ class LearningEngine:
                 path — see `storage_paths.resolve_entry_scoped_path`.
             temp_unit: The user's configured display unit ("fahrenheit"/"celsius"), used only to
                 word temperatures in suggestion text (Issue #1048). All stored values stay degF.
+            humid_overcool_enabled: reads the live Humid Overcool option (Issue #1695). ``None`` = unknown, and the
+                "Turn on Humid Overcool" suggestion is never made (it must never suggest an option that may be on).
 
         Note: Call load_state() after construction to read persisted data
         from disk.  This is intentionally not done in __init__ because
@@ -1291,6 +1317,7 @@ class LearningEngine:
         self._storage_dir = storage_path
         self._entry_id = entry_id
         self._temp_unit = temp_unit
+        self._humid_overcool_enabled = humid_overcool_enabled
         self._db_path = resolve_entry_scoped_path(storage_path, LEARNING_DB_FILE, entry_id)
         self._state = LearningState()
         self._last_suggestion_keys: list[str] = []
@@ -2696,6 +2723,11 @@ class LearningEngine:
                     )
                 )
 
+        # --- Pattern: humid cooling with Humid Overcool off (Issue #1695) ---
+        humid_pair = self._humid_overcool_suggestion(non_vacation, recently_dismissed | recently_accepted_or_incorrect)
+        if humid_pair is not None:
+            pairs.append(humid_pair)
+
         # Issue #1652 (owner decision): no comfort_violations or frequent_door_pauses suggestion. Learning never
         # proposes a longer door/window pause or milder away temperatures; a stored record naming either key
         # (dismissed list, settings history, suggestion_sent) is simply ignored.
@@ -2747,6 +2779,44 @@ class LearningEngine:
         self._last_suggestion_msgs = msgs
         _LOGGER.debug("Generated %d learning suggestions", len(msgs))
         return msgs
+
+    def _humid_overcool_suggestion(self, days: list[dict], held_back: set[str]) -> tuple[str, i18n.Msg] | None:
+        """The "Turn on Humid Overcool" suggestion (Issue #1695): advice only (#1652), the option is never changed.
+
+        Occupant view: on muggy days the AC ran with the house's dew point at or above the overcool trigger, and Humid
+        Overcool (off by default) is off. The suggestion says what turning it on would do. Made only when the option
+        is known to be off, the last 14 non-vacation days hold at least ``HUMID_OVERCOOL_SUGGEST_MINUTES`` of reported
+        humid cooling (``hvac_cool_humid_runtime_minutes``; a record stored before the field reads 0) and the key is
+        neither dismissed nor held back.
+        """
+        key = "humid_overcool"
+        probe = self._humid_overcool_enabled
+        if probe is None or key in held_back:
+            return None
+        try:
+            if probe():
+                return None
+        except Exception:  # noqa: BLE001 - an unreadable option is "unknown": never suggest
+            _LOGGER.debug("Humid overcool option unreadable; no humid overcool suggestion", exc_info=True)
+            return None
+        minutes = sum(float(r.get("hvac_cool_humid_runtime_minutes") or 0.0) for r in days)
+        if minutes < HUMID_OVERCOOL_SUGGEST_MINUTES:
+            return None
+        _LOGGER.info(
+            "Learning suggestion humid_overcool: humid_cooling_minutes=%.1f over %d days (threshold %.0f), option off",
+            minutes,
+            len(days),
+            HUMID_OVERCOOL_SUGGEST_MINUTES,
+        )
+        return (
+            key,
+            i18n.Msg(
+                "learning.suggestion.humid_overcool",
+                hours=round(minutes / 60.0),
+                dew_point=i18n.Temp(OVERCOOL_TRIGGER_DP_F, self._temp_unit),
+                lowering=i18n.TempDelta(OVERCOOL_MAX_F, self._temp_unit),
+            ),
+        )
 
     def get_last_suggestion_msgs(self) -> list[i18n.Msg]:
         """The messages of the most recently generated suggestions (parallel to ``get_last_suggestion_keys``)."""

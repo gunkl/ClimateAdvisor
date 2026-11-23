@@ -393,6 +393,7 @@ from .humidity_facts import (
     fmt_dp_log,
     humid_air_ceiling_from_config,
     humid_overcool_enabled,
+    overcool_humid_from_facts,
     paired_glitch,
     read_dew_point,
     step_humid_latches,
@@ -1519,7 +1520,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_night_replay_failed_logged = False
         self._v4_night_replay_running = False
         self.learning = LearningEngine(
-            Path(hass.config.config_dir), entry_id=self._entry_id, temp_unit=config.get("temp_unit", "fahrenheit")
+            Path(hass.config.config_dir),
+            entry_id=self._entry_id,
+            temp_unit=config.get("temp_unit", "fahrenheit"),
+            # Issue #1695: the live option, so "Turn on Humid Overcool" is never suggested while it is on.
+            humid_overcool_enabled=lambda: humid_overcool_enabled(getattr(self, "config", None)),
         )
         # Issue #757 Phase 6 Step 8: this used to construct two live AutomationEngine
         # instances (_engine_a/_engine_b) behind a runtime-switchable primary/shadow
@@ -3551,7 +3556,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             split_field = self._RUNTIME_MODE_FIELD.get(mode)
             if split_field:
                 setattr(self._today_record, split_field, getattr(self._today_record, split_field) + elapsed)
+            if mode == "cool" and self._overcool_humid_now(now):
+                # Issue #1695: reported cooling while the house was humid by the verdict humid overcool engages on (the
+                # 5-minute dew-point tick flushes a running cool session before taking its sample, so each slice gets
+                # the verdict it ran under).
+                self._today_record.hvac_cool_humid_runtime_minutes += elapsed
             setattr(self, on_since_attr, now)  # Reset to now for continued tracking
+
+    def _overcool_humid_now(self, now: datetime) -> bool:
+        """Whether humid overcool would call the house humid at ``now`` (Issue #1695): the one reader the decision
+        uses (``humidity_facts.overcool_humid_from_facts`` on this coordinator's ``engine_facts``: the overcool humid
+        latch, on at a 60 °F indoor dew point, off at or below 58 °F). Unknown or unreadable = not humid."""
+        try:
+            return overcool_humid_from_facts(self.engine_facts(now))[0]
+        except Exception:  # noqa: BLE001 - runtime accounting must never break on a humidity read
+            _LOGGER.debug("humid overcool verdict for runtime split failed", exc_info=True)
+            return False
 
     def _runtime_today_for_mode(self, mode: str) -> float:
         """Return today's accumulated runtime (minutes) for a tracked session mode.
@@ -7305,6 +7325,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 watched.extend(self._companion_sensors(chosen, "temperature", exclude))
             for eid in dict.fromkeys(watched):
                 watch.observe(eid, self.hass.states.get(eid))
+        if getattr(self, "_hvac_session_mode", None) == "cool":
+            # Issue #1695: credit the cooling minutes since the last flush under the humid-overcool verdict they ran
+            # with, before this sample enters the window and the latch moves (the humid-cooling minutes the "Turn on
+            # Humid Overcool" suggestion reads).
+            self._flush_runtime_for_mode("cool")
         dew_points: dict[str, float | None] = {}
         for signal in (SIGNAL_INDOOR, SIGNAL_OUTDOOR):
             reading = self._read_dew_point(signal, now)
@@ -10524,6 +10549,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             hvac_runtime_minutes=_prev.hvac_runtime_minutes if _prev else 0.0,
             hvac_heat_runtime_minutes=_prev.hvac_heat_runtime_minutes if _prev else 0.0,
             hvac_cool_runtime_minutes=_prev.hvac_cool_runtime_minutes if _prev else 0.0,
+            hvac_cool_humid_runtime_minutes=_prev.hvac_cool_humid_runtime_minutes if _prev else 0.0,
             thermostat_fan_only_runtime_minutes=(_prev.thermostat_fan_only_runtime_minutes if _prev else 0.0),
             comfort_violations_minutes=_prev.comfort_violations_minutes if _prev else 0.0,
             manual_overrides=_prev.manual_overrides if _prev else 0,

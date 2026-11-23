@@ -4583,6 +4583,12 @@ default** (owner decision D3); never in the sleep window (D5).
   dry the air (humid overcool)" (`briefing.humidity.overcooled`, from `humid_decisions_today()["overcool_runs"]`,
   counted from today's `overcool_started` rows), and the AI CURRENT STATE `humid_decisions_today` line adds
   `overcooled runs=N`.
+- **Suggestion while the option is off (Issue #1695):** the learning card "Turn on Humid Overcool" (advice only, #1652)
+  appears when the last 14 non-vacation days hold at least 240 minutes of REPORTED cooling with this latch on
+  (`DailyRecord.hvac_cool_humid_runtime_minutes`, credited by `_flush_runtime_for_mode("cool")` through
+  `overcool_humid_from_facts`, the reader this decision uses; the 5-minute tick flushes a running cool session before
+  taking its sample). Never while the option is on. Detection, the counter and
+  the what-if behind 240: [Learning engine](05-LEARNING-ENGINE-DESIGN.md#pattern-humid-cooling-with-humid-overcool-off-issue-1695).
 - **Sim harness:** `overcool_started` / `overcool_ended` are registered unmapped in `tools/sim_harness/outcomes.py`
   (rule-8 note: a mapped row would shadow the run's real decision); scenarios assert the effect through
   `setpoint_writes` / `commanded_setpoint_at` and `event_emitted`.

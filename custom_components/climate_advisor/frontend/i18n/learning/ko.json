@@ -5,6 +5,7 @@
   "learning.suggestion.frequent_overrides": "최근 2주 동안 온도 조절기를 {count, plural, other {#회}} 수동으로 변경하셨습니다({detail}). 쾌적 온도가 맞지 않으시면 설정에서 변경하세요. Climate Advisor가 새 온도를 유지합니다.",
   "learning.suggestion.frequent_overrides_no_detail": "최근 2주 동안 온도 조절기를 {count, plural, other {#회}} 수동으로 변경하셨습니다. 쾌적 온도 설정이 선호와 맞지 않을 수 있습니다. 설정에서 변경할 수 있습니다.",
   "learning.suggestion.high_runtime_mild_days": "온화하고 따뜻한 날에 냉난방이 평균 {minutes, plural, other {#분}} 동작하여 예상보다 길었습니다. 센서가 없는 문이나 창문이 열려 있거나, 쾌적 온도 범위가 집에 필요한 것보다 좁을 수 있습니다. 문/창문 센서를 추가하거나 설정에서 쾌적 온도 범위를 넓히면 도움이 될 수 있습니다.",
+  "learning.suggestion.humid_overcool": "지난 2주 동안 집 안 공기가 습할 때(이슬점 {dew_point} 이상) 에어컨이 약 {hours, plural, other {#시간}} 동작했습니다. 습도 과냉방(기본값 꺼짐)을 켜면 이렇게 후덥지근한 날 에어컨을 조금 더 오래 돌립니다. 온도 조절기를 냉방 온도보다 최대 {lowering} 낮게 설정하되 쾌적 온도 범위 안에 머물러, 공기 중 습기를 더 많이 제거합니다. 집이 끈적하게 느껴지면 설정에서 켤 수 있습니다. 직접 켜지 않으면 아무것도 바뀌지 않습니다.",
   "learning.suggestion.low_window_compliance": "창문 열기를 권장한 최근 {days, plural, other {#일}} 동안 실제로 창문을 연 시간은 {compliance, number, ::percent}에 그쳤습니다. 창문을 여는 것은 선택 사항입니다. 창문을 닫아 두어도 Climate Advisor가 냉난방으로 쾌적함을 유지하며, 에너지를 조금 더 사용합니다.",
   "learning.suggestion.short_departures": "30~45분 정도의 짧은 외출이 잦아, 돌아오기 전에 절약 온도가 적용되기에는 시간이 부족합니다. 귀가 시 집이 서늘하거나 더운 것이 불편하시면 설정에서 외출 온도를 완화하세요.",
   "learning.suggestion.thermal_model_ready": "집의 단열 특성과 냉난방 성능을 추정할 만큼 열 관측 데이터가 충분히 모였습니다. 예열 시점과 취침 시 절약 온도는 집의 실제 동작에 맞춰 자동으로 조정됩니다. 별도로 하실 일은 없습니다."

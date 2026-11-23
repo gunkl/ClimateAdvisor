@@ -19891,7 +19891,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and _predicted_indoor
             # Issue #1691 (review B4): future hours have no humidity, so the prediction asks no humid-air guard; while
             # the live guard blocks (the best forecast for the next hours), the card promises no fan start at all.
-            and not getattr(decide_sync(self, ae.humid_air_verdict), "blocks", False)
+            and getattr(decide_sync(self, ae.humid_air_verdict), "blocks", False) is not True
         ):
 
             def _nat_vent_gate_comparator(ts: datetime, outdoor: float, indoor: float) -> bool:

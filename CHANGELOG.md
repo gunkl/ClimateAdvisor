@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.79] — 2026-11-23
+
+### Fixed
+- Fix #1705: on a blower (HVAC fan) install, opening a window on a warm evening starts free cooling with the blower, and Climate Advisor turned its own blower off about 5 minutes later as "fan running without Climate Advisor's warrant". If the house stayed above its cooling ceiling the blower never came back for the rest of the window session, so the house got no free cooling. The thermostat's report of Climate Advisor's own fan command was being read as "the thermostat was switched off". Now only a real switch to Off clears the blower record, never while window cooling or natural ventilation is running the blower, and a door/window pause no longer switches window cooling's blower to auto; switching the thermostat Off yourself during Climate Advisor's own blower run still clears it as before. Also, if anything else stops or records off the window-cooling fan (the fan check, your own fan-off, a fan found not running), window cooling now ends its session, so its next check can start the fan again if free cooling still applies (never during your fan-off hold).
+
 ## [0.9.78] — 2026-11-22
 
 ### Fixed

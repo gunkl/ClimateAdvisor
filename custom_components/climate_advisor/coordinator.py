@@ -13360,13 +13360,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     thermostat_blower_phase=_recent_hvac_session_ended_618,
                 )
 
-        # If thermostat is now fully off, clear any stale HVAC-based fan active flag.
+        # If thermostat is now fully off, clear any stale HVAC-based fan active flag (#89).
         # Only applies to HVAC/Both fan modes — whole-house fans run independently.
-        # Natural ventilation is intentionally hvac_mode=off + fan active — do not clear.
+        # Natural ventilation and the economizer intentionally run the blower with hvac_mode=off — do not clear.
+        # Issue #1705: only a real change to Off. An off -> off event (the echo of CA's own fan_mode write while
+        # paused, or any later poll) is not one; clearing on it dropped the economizer's blower flag, so the
+        # untracked-fan backstop stopped the blower 5 min later. CA's own Off still counts: outside nat-vent and the
+        # economizer (exempt below) _set_hvac_mode("off") itself sets fan_mode auto, so the blower is stopped.
         ae = self.automation_engine
-        if not recheck and new_state.state == "off" and ae._fan_active and not ae._fan_override_active:
+        if (
+            not recheck
+            and new_state.state == "off"
+            and old_state.state != "off"
+            and ae._fan_active
+            and not ae._fan_override_active
+        ):
             _fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-            if _fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH) and not ae._natural_vent_active:
+            if (
+                _fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH)
+                and not ae._natural_vent_active
+                and not ae.economizer_session_active
+            ):
                 _LOGGER.warning("Thermostat set to off while HVAC fan was marked active — clearing stale fan state")
                 ae.clear_stale_hvac_fan_flag()
 

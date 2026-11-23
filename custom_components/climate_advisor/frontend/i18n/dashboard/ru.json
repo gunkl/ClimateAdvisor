@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "потепление",
   "dashboard.chart.event.classification_change": "переклассификация дня",
   "dashboard.chart.event.hvac_action_change": "смена состояния HVAC",
+  "dashboard.chart.event.setpoint_change": "смена уставки",
   "dashboard.chart.event.occupancy_change": "смена присутствия",
   "dashboard.chart.event.occupancy_setback": "температура на время отсутствия задана",
   "dashboard.chart.event.override": "ручное изменение",

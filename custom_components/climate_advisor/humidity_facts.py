@@ -53,6 +53,8 @@ from .const import (
     MAX_PLAUSIBLE_OUTDOOR_F,
     MIN_HUMID_AIR_GUARD_CEILING_F,
     MIN_PLAUSIBLE_OUTDOOR_F,
+    OVERCOOL_RELEASE_DP_F,
+    OVERCOOL_TRIGGER_DP_F,
     SENSOR_RECONNECT_SETTLE_S,
     is_availability_recovery,
     is_unavailable_state,
@@ -79,13 +81,11 @@ REASON_GLITCH = "glitch"
 REASON_STALE = "stale"
 
 # Event types reserved for the later #1507 lanes (registered unmapped in tools/sim_harness/outcomes.py now, so the
-# lanes cannot collide on names). Nothing emits them yet. ``nat_vent_humid_skip`` left this list when Issue #1691
-# started emitting it (mapped in outcomes.py); ``humid_windows_close_notice`` when Issue #1692 did (re-justified
-# unmapped in outcomes.py).
-RESERVED_EVENT_TYPES: tuple[str, ...] = (
-    "overcool_started",  # H3: humid overcool lowered the commanded cool setpoint
-    "overcool_ended",  # H3: humid overcool released (dew point dropped, run ended, 60-minute cap, gate closed)
-)
+# lanes cannot collide on names). ``nat_vent_humid_skip`` left this list when Issue #1691 started emitting it
+# (mapped in outcomes.py); ``humid_windows_close_notice`` when Issue #1692 did (re-justified unmapped in outcomes.py);
+# ``overcool_started`` / ``overcool_ended`` when Issue #1694 did (re-justified unmapped in outcomes.py, rule 8). Every
+# reserved name is now emitted; the tuple stays so a later lane can reserve a name the same way.
+RESERVED_EVENT_TYPES: tuple[str, ...] = ()
 
 
 def paired_glitch(temp_f: float | None, rh: float | None, *, first_after_unavailable: bool = False) -> bool:
@@ -444,9 +444,15 @@ HVAC_FAN_RESTRICT_LATCH_SPEC = LatchSpec(
     HVAC_FAN_RESTRICT_HUMID_LATCH, SIGNAL_INDOOR, HVAC_FAN_RESTRICT_DP_F, HVAC_FAN_RESTRICT_DP_RELEASE_F
 )
 
+# H3 humid overcool (Issue #1694, plan #1507 H3): the house is humid enough to overcool a cooling run. On at the
+# trigger (60 °F indoor dew point), off at or below the release (58 °F). Stepped on the coordinator's 5-minute tick like
+# every latch, whether or not the option is on (a latch is a fact; only the overcool decision reads the option).
+OVERCOOL_HUMID_LATCH = "overcool_humid"
+
 LATCH_SPECS: tuple[LatchSpec, ...] = (
     LatchSpec(HUMID_AIR_WETTER_LATCH, SIGNAL_OUTDOOR_WETTER_MARGIN, 0.0, -HUMID_AIR_HYSTERESIS_F),
     HVAC_FAN_RESTRICT_LATCH_SPEC,
+    LatchSpec(OVERCOOL_HUMID_LATCH, SIGNAL_INDOOR, OVERCOOL_TRIGGER_DP_F, OVERCOOL_RELEASE_DP_F),
 )
 
 

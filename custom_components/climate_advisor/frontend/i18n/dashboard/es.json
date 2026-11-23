@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "calentamiento",
   "dashboard.chart.event.classification_change": "reclasificación del día",
   "dashboard.chart.event.hvac_action_change": "cambio de estado de la climatización",
+  "dashboard.chart.event.setpoint_change": "cambio de consigna",
   "dashboard.chart.event.occupancy_change": "cambio de ocupación",
   "dashboard.chart.event.occupancy_setback": "temperatura de ausencia aplicada",
   "dashboard.chart.event.override": "cambio manual",

@@ -177,6 +177,8 @@
   "settings.humid_air_guard_ceiling_f.label": "潮湿空气露点上限",
   "settings.humid_air_guard_enabled.description": "开启后，在室外空气过于潮湿时，全屋换气扇和自然通风不会启动：室外露点达到或超过上限，或室外空气潮湿且明显比室内更潮湿。正在运行的通风不会被停止。没有室外湿度读数时一切照旧。默认开启。",
   "settings.humid_air_guard_enabled.label": "潮湿空气保护",
+  "settings.humid_overcool_enabled.description": "开启后，闷热天气时 Climate Advisor 会让空调多运行一会儿以干燥空气：空调制冷且室内露点达到 60 °F（15.6 °C）或以上时，温控器设为比您的制冷温度低 1 °F（0.6 °C），30 分钟后仍潮湿则低 2 °F（1.1 °C），每次运行最多 60 分钟。房间在舒适范围内约凉 1 °F 且更干燥；您的温度设定不变。睡眠时段、开窗、离家、暂停或您自行更改期间绝不启用。需要能报告何时在制冷的温控器。默认关闭。",
+  "settings.humid_overcool_enabled.label": "除湿额外制冷",
   "settings.hvac_fan_restrict_mode.description": "根据最后运行的是哪种 HVAC 模式，限制 HVAC 风机（恒温器的送风循环）何时可以运行。不影响全屋换气扇。“仅供暖”会在恒温器处于制冷模式，或关闭且距上次制冷周期不足 2 小时、室内潮湿时禁止 HVAC 风机运行——避免湿盘管上的冷凝水再次蒸发而增加湿度，适合潮湿气候。“仅制冷”是对称的限制。“两者”（默认）不做限制——即当前行为。",
   "settings.hvac_fan_restrict_mode.label": "风机限制",
   "settings.hvac_season.description": "自动会制热和制冷。仅制热或仅制冷会在本季去掉另一侧，就像温控器做不到一样；远超该侧舒适边界的房屋仍会使用它。",

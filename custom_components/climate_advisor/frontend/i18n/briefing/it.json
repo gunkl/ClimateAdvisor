@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 Umidità\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "Da mezzanotte ho chiesto di chiudere le finestre {count, plural, one {una volta} many {# volte} other {# volte}} perché entrava aria umida.",
   "briefing.humidity.fan_held": "Da mezzanotte la ventola è rimasta spenta durante {count, plural, one {un periodo umido} many {# periodi umidi} other {# periodi umidi}}: l’aria esterna era troppo umida per farla entrare.",
+  "briefing.humidity.overcooled": "Da mezzanotte ho fatto funzionare il climatizzatore più a lungo {count, plural, one {una volta} other {# volte}} per asciugare l'aria (sovraraffreddamento per umidità).",
   "briefing.humidity.reading": "{where, select, indoor {In casa} other {Fuori}}: punto di rugiada {dew_point}{has_rh, select, yes { ({rh}% di umidità relativa)} other {}}.",
   "briefing.humidity.withheld": "L’aria esterna è troppo umida per farla entrare ora (punto di rugiada {dew_point}, {why, select, ceiling {pari o superiore al limite di {limit}} other {più umida dell’aria in casa}}), quindi non suggerisco di aprire le finestre.",
   "briefing.leaving.away_band": "Al momento sei fuori casa. Mantengo l’intervallo di risparmio energetico più ampio ({band}) finché sei via, quindi dovrebbe funzionare poco. Il comfort verrà ripristinato al tuo ritorno.",

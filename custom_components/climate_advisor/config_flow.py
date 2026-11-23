@@ -68,6 +68,7 @@ from .const import (
     CONF_HOME_TOGGLE_INVERT,
     CONF_HUMID_AIR_GUARD_CEILING_F,
     CONF_HUMID_AIR_GUARD_ENABLED,
+    CONF_HUMID_OVERCOOL_ENABLED,
     CONF_HVAC_FAN_RESTRICT_MODE,
     CONF_HVAC_SEASON,
     CONF_INDOOR_HUMIDITY_ENTITY,
@@ -115,6 +116,7 @@ from .const import (
     DEFAULT_FAN_MODE,
     DEFAULT_HUMID_AIR_GUARD_CEILING_F,
     DEFAULT_HUMID_AIR_GUARD_ENABLED,
+    DEFAULT_HUMID_OVERCOOL_ENABLED,
     DEFAULT_HVAC_FAN_RESTRICT_MODE,
     DEFAULT_HVAC_SEASON,
     DEFAULT_MANUAL_GRACE_SECONDS,
@@ -2305,6 +2307,11 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         "aggressive_savings",
                         default=current.get("aggressive_savings", False),
+                    ): selector.BooleanSelector(),
+                    # Issue #1694 (#1507 H3): humid overcool, opt-in (trigger, depth and cap are internal constants).
+                    vol.Required(
+                        CONF_HUMID_OVERCOOL_ENABLED,
+                        default=current.get(CONF_HUMID_OVERCOOL_ENABLED, DEFAULT_HUMID_OVERCOOL_ENABLED),
                     ): selector.BooleanSelector(),
                     vol.Required(
                         "comfort_mode_switch_min_interval_s",

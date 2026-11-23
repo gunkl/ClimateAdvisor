@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 湿度\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "由于潮湿空气正在进入，自午夜起我{count, plural, other {#次}}请您关窗。",
   "briefing.humidity.fan_held": "自午夜起，在{count, plural, other {#段}}潮湿时段内风扇保持关闭：室外空气太潮湿，不宜引入。",
+  "briefing.humidity.overcooled": "自午夜以来，我{count, plural, other {#次}}让空调多运行一会儿以干燥空气（除湿额外制冷）。",
   "briefing.humidity.reading": "{where, select, indoor {室内} other {室外}}：露点 {dew_point}{has_rh, select, yes {（相对湿度 {rh}%）} other {}}。",
   "briefing.humidity.withheld": "室外空气现在太潮湿，不宜引入（露点 {dew_point}，{why, select, ceiling {达到或超过您的上限 {limit}} other {比屋内空气更潮湿}}），所以我不建议开窗。",
   "briefing.leaving.away_band": "您目前不在家。外出期间我会保持更宽的节能范围（{band}），因此几乎不会运行。您回家后会恢复舒适温度。",

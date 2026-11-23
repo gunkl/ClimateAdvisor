@@ -126,6 +126,7 @@ class TestLatchStep:
             HUMID_AIR_WETTER_LATCH: True,
             HUMID_AIR_CEILING_LATCH: True,
             HVAC_FAN_RESTRICT_HUMID_LATCH: True,
+            "overcool_humid": False,  # Issue #1694 (H3): 55 F is below its 60 F trigger
         }
         state = step_humid_latches({SIGNAL_INDOOR: 55.0, SIGNAL_OUTDOOR: 64.5}, state, ceiling_f=CEIL)
         assert state[HUMID_AIR_CEILING_LATCH] is True  # inside the band
@@ -133,7 +134,11 @@ class TestLatchStep:
         assert humid_air_verdict(55.0, 64.5, ceiling_f=CEIL, latched=latched).reason == HUMID_AIR_REASON_CEILING
 
     def test_specs(self):
-        assert [s.name for s in LATCH_SPECS] == [HUMID_AIR_WETTER_LATCH, HVAC_FAN_RESTRICT_HUMID_LATCH]  # + #1693 H2
+        assert [s.name for s in LATCH_SPECS] == [
+            HUMID_AIR_WETTER_LATCH,
+            HVAC_FAN_RESTRICT_HUMID_LATCH,
+            "overcool_humid",  # + #1693 H2, #1694 H3
+        ]
         (spec,) = humid_air_latch_specs(60.0)
         assert (spec.name, spec.signal, spec.on, spec.off) == (HUMID_AIR_CEILING_LATCH, SIGNAL_OUTDOOR, 60.0, 59.0)
         assert humid_air_latch_specs(None) == ()

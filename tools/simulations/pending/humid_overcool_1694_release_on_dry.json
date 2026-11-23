@@ -1,0 +1,168 @@
+{
+  "name": "humid_overcool_1694_release_on_dry",
+  "description": "Overcool lets go once the dew point falls to 57 F (at or below the 58 F release): the thermostat goes back to 76",
+  "source": "synthetic",
+  "issue": 1694,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: without the release the 76 write would come only at the cap (15:05) and a 74 step would appear.",
+    "(b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid overcool (Issue #1694)' states this rule; production applies it through humid_overcool.decide_overcool and AutomationEngine._command_adjustments (the one setpoint path).",
+    "(c) occupant: once the air is dry the AC stops overcooling; a regression would keep chilling a dry house."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Release on dry air",
+    "observed_behavior": "75, 76",
+    "expected_behavior": "75, 76"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 82,
+    "humid_overcool_enabled": true,
+    "sleep_time": "22:30",
+    "wake_time": "06:30"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64,
+      "note": "Muggy house: 77 F at 64 % RH, dew point 63.9 F (at or above the 60 F trigger)."
+    },
+    {
+      "time": "2026-07-12T14:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day: the cool band 68-76 F is armed (cool 76 F)."
+    },
+    {
+      "time": "2026-07-12T14:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:05:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "cooling"
+    },
+    {
+      "time": "2026-07-12T14:10:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T14:15:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T14:20:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T14:25:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T14:35:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T14:40:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T14:45:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T14:50:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T14:55:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    },
+    {
+      "time": "2026-07-12T15:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "humidity": 52,
+      "note": "The AC dried the house: 76 F at 52 % RH, dew point 57.1 F (at or below the 58 F release)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T15:00:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-12T14:02:00",
+      "values": [
+        75.0,
+        76.0
+      ],
+      "reason": "75 at the start; 76 as soon as the house is dry (before the 30-minute step)."
+    },
+    {
+      "at": "2026-07-12T14:34:00",
+      "expect": "event_emitted",
+      "event": "overcool_ended",
+      "payload_subset": {
+        "reason": "dried"
+      },
+      "reason": "Released on the dew point (the 15-minute median has gone dry), before the 30-minute step could land."
+    }
+  ]
+}

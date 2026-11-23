@@ -710,7 +710,8 @@ class TestBriefing:
             {"time": "2026-07-15T19:05:00+00:00", "type": "nat_vent_humid_skip"},
             {"time": "2026-07-15T19:10:00+00:00", "type": "nat_vent_humid_skip"},
         ]
-        assert coord.humid_decisions_today(now) == {"fan_starts_held": 2, "close_notices": 1}
+        # Issue #1694 added the humid-overcool count (none here)
+        assert coord.humid_decisions_today(now) == {"fan_starts_held": 2, "close_notices": 1, "overcool_runs": 0}
 
 
 class TestAIContext:
@@ -730,7 +731,7 @@ class TestAIContext:
         assert "indoor_dew_point:    55.0°F (RH 50%)" in lines
         assert "outdoor_dew_point:   66.9°F (RH 90%)" in lines
         assert "blocking (ceiling; ceiling 65.0°F): open-window advice withdrawn" in lines
-        assert "close-window notices=1 fan starts held=3" in lines
+        assert "close-window notices=1 fan starts held=3 overcooled runs=0" in lines
         assert m._moisture_lines(SimpleNamespace()) == []
 
     def test_activity_row_for_the_notice(self):

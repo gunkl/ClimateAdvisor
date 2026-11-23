@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 आर्द्रता\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "नम हवा अंदर आ रही थी, इसलिए आधी रात से मैंने आपसे {count, plural, one {# बार} other {# बार}} खिड़कियाँ बंद करने को कहा।",
   "briefing.humidity.fan_held": "आधी रात से {count, plural, one {# नम दौर} other {# नम दौरों}} में पंखा बंद रहा: बाहर की हवा अंदर लाने के लिए बहुत नम थी।",
+  "briefing.humidity.overcooled": "आधी रात से मैंने हवा सुखाने के लिए AC को {count, plural, one {एक बार} other {# बार}} अधिक देर चलाया (नमी के लिए अतिरिक्त ठंडक)।",
   "briefing.humidity.reading": "{where, select, indoor {अंदर} other {बाहर}}: ओसांक {dew_point}{has_rh, select, yes { (सापेक्ष आर्द्रता {rh}%)} other {}}।",
   "briefing.humidity.withheld": "बाहर की हवा अभी अंदर लाने के लिए बहुत नम है (ओसांक {dew_point}, {why, select, ceiling {आपकी {limit} सीमा पर या उससे ऊपर} other {घर की हवा से अधिक नम}}), इसलिए मैं खिड़कियाँ खोलने का सुझाव नहीं दे रहा।",
   "briefing.leaving.away_band": "आप अभी बाहर हैं। आपके बाहर रहने तक ऊर्जा बचत की चौड़ी सीमा ({band}) बनाए रखी जा रही है, इसलिए ज़्यादा कुछ नहीं चलेगा। आपके लौटने पर आरामदायक तापमान बहाल कर दिया जाएगा।",

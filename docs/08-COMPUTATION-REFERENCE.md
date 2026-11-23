@@ -4270,10 +4270,10 @@ Tests: `tests/test_thermostat_recal_1676.py` (state machine, resolver, coordinat
 fan-start guard, window advice, humid overcool), Climate Advisor carries the house's and the outside air's dew point
 in the decision facts. Since Issue #1691 the humid-air guard on fan starts reads them
 ([below](#humid-air-guard-on-fan-starts-issue-1691)), since Issue #1692 the window advice
-([below](#humid-air-window-advice-issue-1692)), and since Issue #1693 the `hvac_fan_restrict_mode` "cooled within
+([below](#humid-air-window-advice-issue-1692)), since Issue #1693 the `hvac_fan_restrict_mode` "cooled within
 2 h" clause reads the indoor one
-([`hvac_fan_restrict_mode`](#hvac_fan_restrict_mode--heatcoolboth-restriction-issue-835)); unknown always means
-today's behaviour.
+([`hvac_fan_restrict_mode`](#hvac_fan_restrict_mode--heatcoolboth-restriction-issue-835)), and since Issue #1694 humid
+overcool ([below](#humid-overcool-issue-1694)); unknown always means today's behaviour.
 
 - **One resolver, two outputs.** `humidity_sources.resolve_humidity_paired` picks the humidity source exactly as the
   chart does ([Chart Log Spec](chart-log-spec.md#humidity-and-feels-like-fields-issue-1414)) and also says through
@@ -4466,6 +4466,104 @@ humid-air guard changed today, so a closed-up muggy day is explained rather than
 
 Tests: `tests/test_humid_window_advice_1692.py::TestBriefing`, `::TestAIContext`.
 
+### Humid overcool (Issue #1694)
+
+**Occupant view:** on a muggy day the AC's short runs cool the room but barely dry it (median run 5.5 min; later run
+minutes dry 1.35-2.5x more than the first 10), so the house stays sticky. With the option on, a humid cooling run gets
+the thermostat set a little below the comfort target so the AC runs about 25 minutes longer: the room ends about 1 °F
+cooler and about 1 °F dew point drier, still inside the comfort band. A dry day is unchanged. On this house (May-Oct)
+it would have acted on 12 of 677 runs on 8 days, about +6 h of AC (+6 %). Option `humid_overcool_enabled`, **Off by
+default** (owner decision D3); never in the sleep window (D5).
+
+**The rule** (pure: `humid_overcool.decide_overcool`; engine: `AutomationEngine.overcool_check`):
+
+| Phase | Condition | Action | Thermostat told | Activity |
+|---|---|---|---|---|
+| idle | a cooling run is REPORTED (`hvac_action` cooling only, owner rule), the overcool latch is on, the gate is open, the gap rule leaves room | engage | target - 1 °F | `overcool_started` |
+| idle, observe-only (automation off) | the same | log `[DRY RUN] Humid overcool would start` once per run | nothing | none |
+| active | 30 min after engaging, still cooling, the decision dew point still >= 60 °F, room under the gap rule | step | target - 2 °F (max) | none (the write's own row) |
+| active | the latch let go (dew point <= 58 °F, or unknown) | release now | target | `overcool_ended` `dried` |
+| active | 60 min after engaging | release now, no re-engage this run | target | `overcool_ended` `cap` |
+| active | not cooling for 5 min (`OVERCOOL_RUN_END_GRACE_S`; a shorter cooling -> fan / idle -> cooling blip is the same run) | run ended: HOLD the lowered value | unchanged | `overcool_ended` `run_ended` |
+| coasting | the 45-min post-run coast (`CYCLE_POST_OFF_WINDOW_S`, the #1512 coast window) closed | restore | target | none |
+| coasting | the next cooling run starts first | restore, then the new run may engage (a new 60-min budget) | target, or target - 1 °F | `overcool_started` when it engages |
+| any lowering | the gate closed (an owner took the thermostat) | zero the term, no write of its own (the owner writes; the occupant's value is never restored over); no re-engage this run | the owner's | `overcool_ended` `gate:<why>` |
+| any lowering | the gate closed for a window open past its debounce with no pause (no owner writes) | one plain-target write | target | `overcool_ended` `gate:window_open` |
+| any | `FREEZE` (a door/window open inside its debounce) | hold everything (no step, cap, release) | unchanged | none |
+
+- **Latch:** `humidity_facts.OVERCOOL_HUMID_LATCH` on the indoor dew point (60 °F on, 58 °F off), in `LATCH_SPECS`,
+  stepped on the coordinator's 5-minute dew-point tick and re-stepped by each decision from `EngineFacts.humid_latches`
+  (like H1). Unknown humidity = no overcool (today's behaviour); a lowering in force is released.
+- **Constants** (`const.py`, the D3 defaults; not options): `OVERCOOL_TRIGGER_DP_F` 60, `OVERCOOL_RELEASE_DP_F` 58,
+  `OVERCOOL_STEP_F` 1, `OVERCOOL_MAX_F` 2, `OVERCOOL_STEP_AFTER_S` 30 min, `OVERCOOL_RUN_CAP_S` 60 min,
+  `OVERCOOL_RUN_END_GRACE_S` 5 min. The Ecobee goes cooling -> fan at 91 % of run ends and restarts within 5 min at 8 %;
+  both endings (cooling -> fan, cooling -> idle) are covered.
+- **One setpoint path, one clamp.** The lowering is a second signed command adjustment applied ONLY inside
+  `_set_temperature_impl` (`_command_adjustments`: `("remote", offset)` then `("overcool", -lowering)`), summed through
+  ONE clamp, `remote_offset.combine_adjustments`: the remote-sensor offset keeps its own cap and band-edge rule
+  unchanged, and overcool may only lower the commanded cool setpoint to `MIN_HEAT_COOL_GAP_F` (4 °F) above the floor of
+  the band being written, after the remote offset (a band of 4 °F or less never overcools; at this house's 74/68 band
+  that caps it at 2 °F). Every writer (the 30-minute cycle, the reactive tick, the fan-off and WHF-release re-asserts,
+  retries and nudges, the remote loop) keeps passing the comfort target, so none can undo or double it; a TOU bank write
+  (`skip_setpoint_sanity_check`) and any heat write never carry it. `temperature` / `_pending_setpoint_target` stay the
+  comfort target; `_pending_setpoint_single` is the commanded value, so the read-back verify, the echo memory and
+  override detection see CA's own write (never an occupant change). With no overcool in force `_command_adjustments`
+  returns the remote offset alone, so bedroom-offset installs are byte-identical.
+- **Gate** (`_overcool_gate_and_reason`): the remote offset's ONE gate, `_remote_offset_gate_and_reason` (occupant
+  change pending or confirmed, away/vacation, override, door/window pause, nat-vent/WHF ownership, a window open past
+  its debounce; FREEZE inside the debounce), plus the overcool vetoes: a manual override or ANY grace (so an overcool
+  write can never reverse an occupant change: the household promise P4 has nothing to judge), CA's last write and the
+  thermostat both in `cool` (CA writes a single cool setpoint, so a heat_cool thermostat only occurs under an
+  occupant override), no TOU bank (`_tou_precondition_active`), no held pre-cool (`_pre_cool_band_in_force_now`), not
+  the sleep window (D5). The write path asks the same gate, so a gate that closed since the last check zeroes the term
+  before that write.
+- **Checks:** `overcool_check` runs on the coordinator's 5-minute dew-point tick, after every thermostat event whose
+  `hvac_action` changed (after the listener, so an occupant change in the same event closes the gate first;
+  `_overcool_after_thermostat_event`), and on one deadline timer (`humid_overcool.next_deadline_s`: step, cap, run end,
+  coast end). Option Off: no tick, no timer, no extra await. Silent during startup coalescing.
+- **Not persisted:** `restore_state` resets it; the startup plan writes the plain target.
+- **Occupant change:** the gate closes and zeroes the term; nothing is restored over the occupant's value. An
+  Off -> Cool toggle brings the thermostat back at CA's lowered value: override adoption reads that value as the target
+  (`_overcool_adopt_setpoint`, both in `_override_matches_current_decision` and the override/grace FSM inputs), and if
+  the change self-resolves with the thermostat still at the lowered value, the next check writes the target once (it
+  is never held there by a grace, and not left for the next 30-minute cycle).
+- **Cycle learning (#1512):** a setpoint change that is CA's own write changing ONLY the overcool term (same comfort
+  target, same remote offset; `AutomationEngine.overcool_adjustment_echo`, within 15 min and 0.3 °F) does not close or
+  split the cycle (`coordinator._cycle_overcool_echo` in `_cycle_thermostat_event`), so engaging, stepping and
+  restoring never cut a run or its coast. Swing on-samples stay valid; the off-point of an overcooled run is dropped
+  (setpoint moved mid-run, `swing.py`).
+- **Chart (Chart Coverage rule):** `_read_chart_comfort_target` returns the comfort target while overcool lowers the
+  setpoint, exactly like the remote offset (chart_log `comfort_target`), so the Target line stays at the room's target and
+  the commanded value is the `Thermostat set` series (`commanded_setpoint_history`); the Target Band
+  (`_compute_target_band_schedule`) is the band. The ODE prediction (`_build_predicted_indoor_future`) gets the commanded
+  cool setpoint for the hours the overcool can still be in force (`overcool_commanded_window`, until the 60-min cap plus
+  the coast; `coordinator._band_with_commanded_window`, a copy of the band for the ODE only). A thermostat echo of a CA write that changed only a command
+  adjustment (same comfort target and mode: an overcool step or restore, a bedroom-loop step) writes a generic chart_log
+  row `event="setpoint_change"` (see the chart-log spec), so v4 learns each step against the setpoint the thermostat
+  really held, read after the echo. A write with a new comfort target (a band change, the home restore) is not one: its
+  own row (classification, occupancy, hvac edge) already records it, and a row at its echo would carry the band before
+  the change.
+- **Judging:** comfort incidents, P7 (`remote_comfort_target_f`, now also the target while overcool holds a lowering),
+  the Comfort Score and the ODE ceiling guard judge the normal band; the room stays inside it. P1 already skips a lowered
+  cool setpoint (`invariant_watchdog`: `defending = setpoint >= edge - slack`).
+- **Visibility:** INFO `Humid overcool <engage|step|release|run_ended|restore|zero>: reason=... lowering=... target=...
+  indoor_dew_point_f=... gate=...`; the `Set temperature` line carries ` overcool=-X` while a lowering is sent. Status
+  (both dashboards, through `remote_offset_view_for`, key `remote_offset.overcool`): "Humid overcool: thermostat set 74°F
+  (2°F below 76°F) to dry the air, dew point 63.9°F", "... stays at 74°F ... until the AC run's coast ends", and, with
+  the option on and the thermostat's "never reports heating/cooling" notice up, "Humid overcool is on but cannot act: the
+  thermostat does not report when it is cooling" (the option is inert: no run is ever seen). The thermostat is expected
+  at the commanded value, so the Status card never shows the overcool as a disagreement.
+- **Briefing and AI context:** the briefing's Humidity section adds "Since midnight I let the AC run longer N times to
+  dry the air (humid overcool)" (`briefing.humidity.overcooled`, from `humid_decisions_today()["overcool_runs"]`,
+  counted from today's `overcool_started` rows), and the AI CURRENT STATE `humid_decisions_today` line adds
+  `overcooled runs=N`.
+- **Sim harness:** `overcool_started` / `overcool_ended` are registered unmapped in `tools/sim_harness/outcomes.py`
+  (rule-8 note: a mapped row would shadow the run's real decision); scenarios assert the effect through
+  `setpoint_writes` / `commanded_setpoint_at` and `event_emitted`.
+
+Tests: `tests/test_humid_overcool_1694.py`; Tier-A scenarios `tools/simulations/pending/humid_overcool_1694_*.json`
+(coordinator mode; awaiting owner review for promotion to golden).
+
 ### Indoor sensor failure reasons and announcements (Issue #1033)
 
 Mirror of the outdoor-sensor fallback (Issue #1032) for the indoor side. There is no
@@ -4563,7 +4661,9 @@ instead of `primary_value`. A future remote-sensor context sets it in `indoor_te
 test to `AutomationEngine._remote_sensor_configured()`; nothing else changes. No separate toggle: on whenever the
 sleep sensor is configured, for that sensor's context. Installs without one run none of this.
 
-**The single setpoint path.** `AutomationEngine._set_temperature_impl()` is the ONE place the offset is applied.
+**The single setpoint path.** `AutomationEngine._set_temperature_impl()` is the ONE place the offset is applied (since
+Issue #1694 as the first of the signed command adjustments, `_command_adjustments`, with humid overcool the second, all
+through one clamp, `remote_offset.combine_adjustments`; the offset's own caps are unchanged).
 Every CA setpoint writer reaches it (`_apply_comfort_band`, `_set_temperature_for_mode`, wake-up, bedtime, pre-cool,
 TOU pre-conditioning, restores, the post-fan verify repair, the setpoint retry, and the outer loop itself), so no
 caller carries a copy. `temperature` stays the comfort TARGET for everything that judges comfort (sanity check,

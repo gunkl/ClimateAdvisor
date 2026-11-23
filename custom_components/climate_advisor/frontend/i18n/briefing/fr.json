@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 Humidité\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "Depuis minuit, je vous ai demandé de fermer les fenêtres {count, plural, one {une fois} many {# fois} other {# fois}} parce que de l’air humide entrait.",
   "briefing.humidity.fan_held": "Depuis minuit, le ventilateur est resté à l’arrêt pendant {count, plural, one {un épisode humide} many {# épisodes humides} other {# épisodes humides}} : l’air extérieur était trop humide pour le faire entrer.",
+  "briefing.humidity.overcooled": "Depuis minuit, j'ai laissé la clim tourner plus longtemps {count, plural, one {une fois} other {# fois}} pour assécher l'air (surrefroidissement humide).",
   "briefing.humidity.reading": "{where, select, indoor {À l’intérieur} other {À l’extérieur}} : point de rosée {dew_point}{has_rh, select, yes { ({rh} % d’humidité relative)} other {}}.",
   "briefing.humidity.withheld": "L’air extérieur est trop humide pour le faire entrer en ce moment (point de rosée {dew_point}, {why, select, ceiling {au niveau ou au-dessus de votre limite de {limit}} other {plus humide que l’air de la maison}}), je ne suggère donc pas d’ouvrir les fenêtres.",
   "briefing.leaving.away_band": "Vous êtes actuellement absent. Je maintiens la plage d’économie d’énergie élargie ({band}) pendant votre absence, donc peu de choses devraient fonctionner. Le confort sera rétabli à votre retour.",

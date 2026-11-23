@@ -134,6 +134,13 @@ Occupant first: the "Promises missed" tile used to count every miss since instal
 
 ## P4 listed exceptions
 
+**Humid overcool cannot reverse an occupant change (Issue #1694).** Its gate lists "a manual override or any grace
+active" as an explicit exclusion (on top of `_manual_change_protected()` in the shared remote-offset gate), and a gate
+that closes zeroes the lowering without a write of its own, so an overcool step, release or restore is never a CA
+setpoint inside an occupant episode; `_p4_reverses` needs no exception for it. The one write after an occupant change,
+the plain target when an Off -> Cool toggle self-resolved with the thermostat still at CA's lowered value, happens only
+once the change is no longer protected (the episode has ended).
+
 Source: `invariant_watchdog.py` (`_COMMON_LISTED`, `_THERMOSTAT_LISTED`, `_FAN_OVERRIDE_LISTED`, `_p4_end_is_listed`).
 
 | Ending | Thermostat override | Fan override | Fan-off grace |

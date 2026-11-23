@@ -1,0 +1,148 @@
+{
+  "name": "humid_overcool_1694_blip_kept",
+  "description": "A cooling -> fan -> cooling blip shorter than 5 minutes is the same run: the overcool continues and steps at +30 min",
+  "source": "synthetic",
+  "issue": 1694,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md Sec 10): (a) effectiveness: releasing on the first non-cooling report writes 76 at 14:20 and re-engages at 14:23 (75, 76, 75 ...).",
+    "(b) docs-production: docs/08-COMPUTATION-REFERENCE.md 'Humid overcool (Issue #1694)' states this rule; production applies it through humid_overcool.decide_overcool and AutomationEngine._command_adjustments (the one setpoint path).",
+    "(c) occupant: no setpoint churn or Activity noise on a thermostat that pauses briefly; a regression would fill the log and weaken the drying."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Blip keeps the overcool",
+    "observed_behavior": "75, 74",
+    "expected_behavior": "75, 74"
+  },
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 76,
+    "setback_heat": 60,
+    "setback_cool": 82,
+    "humid_overcool_enabled": true,
+    "sleep_time": "22:30",
+    "wake_time": "06:30"
+  },
+  "events": [
+    {
+      "time": "2026-07-12T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64,
+      "note": "Muggy house: 77 F at 64 % RH, dew point 63.9 F (at or above the 60 F trigger)."
+    },
+    {
+      "time": "2026-07-12T14:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day: the cool band 68-76 F is armed (cool 76 F)."
+    },
+    {
+      "time": "2026-07-12T14:05:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:05:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "cooling"
+    },
+    {
+      "time": "2026-07-12T14:10:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:15:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:20:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:20:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "fan",
+      "note": "The thermostat blips to fan..."
+    },
+    {
+      "time": "2026-07-12T14:23:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "hvac_action": "cooling",
+      "note": "...and restarts cooling 3 minutes later (8 % of Ecobee run ends do)."
+    },
+    {
+      "time": "2026-07-12T14:25:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:35:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:40:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:45:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    },
+    {
+      "time": "2026-07-12T14:50:00",
+      "type": "temp_update",
+      "indoor_f": 77.0,
+      "outdoor_f": 88.0,
+      "humidity": 64
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T14:50:00",
+      "expect": "setpoint_writes",
+      "since": "2026-07-12T14:02:00",
+      "values": [
+        75.0,
+        74.0
+      ],
+      "reason": "No release on the 3-minute blip; the 30-minute step still lands at 14:35."
+    }
+  ]
+}

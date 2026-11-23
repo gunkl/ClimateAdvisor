@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "aquecimento",
   "dashboard.chart.event.classification_change": "reclassificação do dia",
   "dashboard.chart.event.hvac_action_change": "mudança de estado da AVAC",
+  "dashboard.chart.event.setpoint_change": "mudança do ponto de ajuste",
   "dashboard.chart.event.occupancy_change": "mudança de ocupação",
   "dashboard.chart.event.occupancy_setback": "temperatura de ausência aplicada",
   "dashboard.chart.event.override": "alteração manual",

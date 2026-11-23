@@ -68,6 +68,7 @@ from .const import (
     CONF_ENERGY_RATE,
     CONF_GITHUB_REPO,
     CONF_GITHUB_TOKEN,
+    CONF_HUMID_OVERCOOL_ENABLED,
     CONFIG_METADATA,
     DEFAULT_AI_ENABLED,
     DEFAULT_AI_INVESTIGATOR_ENABLED,
@@ -303,6 +304,20 @@ def _text_fields(field: str, value: Any, lang: str | None, *, code: bool = False
     if code:
         out[f"{field}_code"] = code_of(value)
     return out
+
+
+def _thermostat_never_reports(coordinator: Any) -> bool:
+    """The coordinator's "this thermostat never reports heating/cooling" notice is up (Issue #1694: humid overcool
+    then cannot act and its Status line says so). Stub-safe."""
+    if not (getattr(coordinator, "config", None) or {}).get(CONF_HUMID_OVERCOOL_ENABLED, False):
+        return False  # only the overcool line reads it
+    getter = getattr(coordinator, "thermostat_action_notice", None)
+    if not callable(getter):
+        return False
+    try:
+        return isinstance(getter(), dict)
+    except Exception:  # noqa: BLE001 - a status read must never break the endpoint
+        return False
 
 
 def humid_air_view(engine: Any, unit: str, lang: str | None = None) -> dict[str, Any] | None:
@@ -568,7 +583,9 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             _coordinator_healthy = bool(coordinator.last_update_success)
             # Issue #1194 (d): the remote-sensor outer loop, described once (comfort target vs the commanded setpoint,
             # the signed offset, the loop state, the sentence). Read live from the engine, never re-decided here.
-            _remote_offset = remote_offset_view_for(ae, unit, _lang)
+            _remote_offset = remote_offset_view_for(
+                ae, unit, _lang, no_hvac_action=_thermostat_never_reports(coordinator)
+            )
             _zones = zone_registry.list_zones(hass)
             _status_payload = {
                 "version": VERSION,

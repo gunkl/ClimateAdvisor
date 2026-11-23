@@ -60,6 +60,7 @@ from .const import (
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
     CONF_HEAT_LOCKOUT_OUTDOOR_TEMP,
+    CONF_HUMID_OVERCOOL_ENABLED,
     CONF_HVAC_FAN_RESTRICT_MODE,
     CONF_HVAC_SEASON,
     CONF_MANUAL_GRACE_NOTIFY,
@@ -91,6 +92,7 @@ from .const import (
     DEFAULT_COMFORT_FAMILY_RECENCY_WINDOW_MIN,
     DEFAULT_COMFORT_HEAT,
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
+    DEFAULT_HUMID_OVERCOOL_ENABLED,
     DEFAULT_HVAC_FAN_RESTRICT_MODE,
     DEFAULT_HVAC_SEASON,
     DEFAULT_MANUAL_GRACE_SECONDS,
@@ -132,6 +134,8 @@ from .const import (
     OCCUPANCY_GUEST,
     OCCUPANCY_HOME,
     OCCUPANCY_VACATION,
+    OVERCOOL_RELEASE_DP_F,
+    OVERCOOL_TRIGGER_DP_F,
     OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
     PEAK_DECLINE_MARGIN_F,
     REMOTE_OFFSET_EXIT_GRACE_S,
@@ -249,14 +253,29 @@ from .fan_toggle_rate_limit import (
     FanToggleRateLimitOutcome,
     deferral_record_is_stale,
 )
+from .humid_overcool import (
+    ACTION_ENGAGE,
+    ACTION_NONE,
+    ACTION_WOULD_ENGAGE,
+    ACTION_ZERO,
+    PHASE_ACTIVE,
+    PHASE_COASTING,
+    OvercoolInputs,
+    OvercoolState,
+    decide_overcool,
+    next_deadline_s,
+    overcool_headroom_f,
+)
 from .humidity_facts import (
     HUMID_AIR_REASON_CEILING,
     HVAC_FAN_RESTRICT_DP_RELEASE_F,
+    OVERCOOL_HUMID_LATCH,
     HumidAirVerdict,
     fmt_dp_log,
     humid_air_ceiling_from_config,
     humid_air_verdict_from_facts,
     hvac_fan_restrict_humid_from_facts,
+    latch_above,
 )
 from .hvac_action import is_hvac_compressor_active
 from .incident_payload import build_incident_payload, is_climate_validation_error
@@ -324,6 +343,7 @@ from .remote_offset import (
     binding_limit,
     cap_f,
     classify_loop_state,
+    combine_adjustments,
     decide_remote_offset,
     decide_remote_offset_gate,
     max_magnitude_f,
@@ -331,7 +351,7 @@ from .remote_offset import (
     startup_wait_s,
     step_f,
 )
-from .setpoint_combinations import vacation_edges
+from .setpoint_combinations import MIN_HEAT_COOL_GAP_F, vacation_edges
 from .setpoint_verify_decision import (
     ModeAlignmentOutcome,
     SetpointVerifyOutcome,
@@ -1854,6 +1874,19 @@ class AutomationEngine:
     # copy was never assigned in production, so every bedtime setback (applied or skipped) was written to nothing
     # since #151. A bare engine (tests, tools: inputs without ``today_record``) keeps its own.
     _today_record_own: Any | None = None
+
+    # Issue #1694 (#1507 H3): humid overcool. Class-level defaults so an engine built via object.__new__ (tests) reaches
+    # the one setpoint path with no overcool. In memory only: a restart writes the normal setpoint.
+    _overcool: OvercoolState = OvercoolState()
+    _overcool_applied_f: float = 0.0  # the lowering the thermostat was last told (after the clamp), positive F
+    _overcool_timer_cancel: Any | None = None
+    _overcool_check_running: bool = False
+    _overcool_echo: tuple[float, datetime] | None = None  # (commanded F, sent at) of an adjustment-only write
+    _overcool_write_sig: tuple[float, str, float] | None = None  # (target, mode, remote offset) of the last write
+    _overcool_closed_commanded_f: float | None = None  # commanded value when an occupant change closed the gate
+    _overcool_last_dp_f: float | None = None
+    _adjust_only_write: bool = False  # the last write changed only a command adjustment (same comfort target and mode)
+    _last_write_key: tuple[float, str, float] | None = None  # (target, mode, commanded) of the last write
 
     @property
     def _today_record(self) -> Any | None:
@@ -5210,7 +5243,21 @@ class AutomationEngine:
             current_f = to_fahrenheit(float(raw_setpoint), unit)
         except TypeError, ValueError:
             return True
+        current_f = self._overcool_adopt_setpoint(current_f, target_f, decision_mode)
         return abs(current_f - target_f) <= OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F
+
+    def _overcool_adopt_setpoint(self, current_f: float, target_f: float | None, mode: str | None) -> float:
+        """The live setpoint as override adoption should read it (Issue #1694, CHECK-D #7).
+
+        An occupant's Off -> Cool toggle during humid overcool brings the thermostat back at CA's own LOWERED value
+        (target - 2 F), which is more than the adoption tolerance from the band edge, so the toggle would be held there
+        by a grace for its whole length. That value is CA's command, not the occupant's choice: read it as the target.
+        Any other value (a setpoint the occupant chose) is returned unchanged. Inert unless an occupant change closed
+        an overcool (``_overcool_closed_commanded_f``)."""
+        closed = self._overcool_closed_commanded_f
+        if closed is None or target_f is None or mode != "cool" or abs(current_f - closed) > 0.3:
+            return current_f
+        return float(target_f)
 
     def _override_decision_mode_and_target(self, classification: DayClassification) -> tuple[str | None, float | None]:
         """What automation would arm right now, for override adoption (Issue #1073, S6).
@@ -7059,6 +7106,31 @@ class AutomationEngine:
         self._update_write_record(result=result)
         return result
 
+    def _command_adjustments(
+        self, target_f: float, mode: str, *, skip_setpoint_sanity_check: bool = False
+    ) -> tuple[tuple[str, float], ...]:
+        """The signed command adjustments for THIS write, through ONE clamp (Issue #1694 generalises #1194 a).
+
+        ``("remote", offset)`` (the remote-sensor outer loop, unchanged: its own cap and band-edge rule) then
+        ``("overcool", -lowering)`` (humid overcool, cool only). ``remote_offset.combine_adjustments`` clamps the sum
+        once: overcool never brings the commanded cool setpoint within ``MIN_HEAT_COOL_GAP_F`` of the floor of the band
+        being written, after the remote offset. With no overcool in force the result is the remote offset alone,
+        exactly as before.
+        """
+        remote = self._remote_offset_for_write(target_f, mode)
+        overcool = self._overcool_for_write(mode, skip_setpoint_sanity_check=skip_setpoint_sanity_check)
+        if not overcool:
+            return (("remote", remote),)
+        floor, ceiling = self._remote_band_edges()
+        return combine_adjustments(
+            mode,
+            target_f,
+            (("remote", remote), ("overcool", overcool)),
+            floor=floor,
+            ceiling=ceiling,
+            gap_f=MIN_HEAT_COOL_GAP_F,
+        )
+
     def _fit_to_thermostat_limits(self, service_temp: float, temperature_f: float) -> tuple[float, float]:
         """Fit one setpoint to the thermostat's advertised ``min_temp``/``max_temp`` (Issue #1367).
 
@@ -7158,8 +7230,11 @@ class AutomationEngine:
         if mode in ("heat", "cool"):
             self._remote_target_f = _target_f
             self._remote_target_mode = mode
-        _offset_f = self._remote_offset_for_write(_target_f, mode)
-        temperature = _target_f + _offset_f
+        # Issue #1694: the signed adjustments (remote offset, humid overcool) summed through one clamp.
+        _adjustments = self._command_adjustments(_target_f, mode, skip_setpoint_sanity_check=skip_setpoint_sanity_check)
+        _offset_f = _adjustments[0][1]  # the remote-sensor offset (the outer loop diffs on it)
+        _overcool_term_f = sum(v for k, v in _adjustments[1:])
+        temperature = _target_f + _offset_f + _overcool_term_f
         # Convert internal °F to user's unit before sending to HA climate entity; fitted to the thermostat's own
         # min_temp/max_temp (Issue #1367), so verify, echo memory and retry all see the value actually sent.
         service_temp, temperature = self._fit_to_thermostat_limits(from_fahrenheit(temperature, unit), temperature)
@@ -7468,14 +7543,16 @@ class AutomationEngine:
         self._rearm_timer("_setpoint_retry_cancel", 10, _schedule_check)
         self._schedule_mode_alignment_recheck(_my_seq, before_mode=_mode_before)
         _LOGGER.info(
-            "Set temperature to %s (mode=%s) — zone=%s %s role=%s",
+            "Set temperature to %s (mode=%s) — zone=%s %s role=%s%s",
             format_temp(temperature, unit),
             mode,
             self.climate_entity,
             reason,
             self.role,
+            f" overcool=-{self._td(abs(_overcool_term_f))}" if _overcool_term_f else "",
         )
         self._remote_offset_applied_f = abs(_offset_f)  # the thermostat now holds target + this (the loop diffs on it)
+        self._note_overcool_write(_target_f, mode, _offset_f, abs(_overcool_term_f), temperature, _now)
         self._remote_exit_at = None  # any writer's setpoint ends the exit's wait for "the next band" (Issue #1194 c)
         if _call.ok:
             self._remote_write_failed_at = None  # a write went through: the outer loop's failed-write back-off is over
@@ -7694,9 +7771,313 @@ class AutomationEngine:
         """
         applied = self._remote_offset_applied_f
         target = self._remote_target_f
+        if self._overcool_applied_f > 1e-6:  # Issue #1694: humid overcool lowers the setpoint the same way
+            applied = (applied or 0.0) + self._overcool_applied_f
         if not applied or applied <= 1e-6 or not isinstance(target, (int, float)) or isinstance(target, bool):
             return None
         return float(target)
+
+    # ------------------------------------------------------------------
+    # Issue #1694 (#1507 H3): humid overcool -- a second signed command adjustment on the one setpoint path
+    # ------------------------------------------------------------------
+    # The decision is the pure ``humid_overcool.decide_overcool``; the gate is the remote offset's own gate
+    # (``_remote_offset_gate_and_reason``) plus the overcool vetoes (``_overcool_gate_and_reason``); the lowering is
+    # applied only inside ``_set_temperature_impl`` (``_command_adjustments``), so every writer (the 30-minute cycle,
+    # the fan-off re-assert, retries, the remote loop) keeps it and none can undo it. ``temperature`` stays the comfort
+    # TARGET everywhere; the thermostat is told target - lowering. In memory only.
+
+    def _reset_overcool(self) -> None:
+        """No overcool: state, applied lowering, echo memory and deadline timer (a restart's clean slate)."""
+        self._overcool = OvercoolState()
+        self._overcool_applied_f = 0.0
+        self._overcool_echo = None
+        self._overcool_write_sig = None
+        self._overcool_closed_commanded_f = None
+        if self._overcool_timer_cancel:
+            self._overcool_timer_cancel()
+            self._overcool_timer_cancel = None
+
+    def _overcool_enabled(self) -> bool:
+        return bool((self.config or {}).get(CONF_HUMID_OVERCOOL_ENABLED, DEFAULT_HUMID_OVERCOOL_ENABLED))
+
+    def _overcool_for_write(self, mode: str, *, skip_setpoint_sanity_check: bool = False) -> float:
+        """Signed overcool term (internal F, <= 0) for THIS write; 0 unless a cool write while overcool is lowering.
+
+        A TOU bank write (``skip_setpoint_sanity_check``) never carries it. A gate that closed since the last check
+        zeroes it here, before the write (the closing owner's own write then lands plain).
+        """
+        st = self._overcool
+        if st.phase not in (PHASE_ACTIVE, PHASE_COASTING) or st.magnitude_f <= 1e-6:
+            return 0.0
+        if mode != "cool" or skip_setpoint_sanity_check:
+            return 0.0
+        gate, reason = self._overcool_gate_and_reason(dt_util.now())
+        if gate == "closed":
+            self._apply_overcool_decision_sync(gate, reason)
+            return 0.0
+        return -float(st.magnitude_f)
+
+    def _overcool_gate_and_reason(self, now: datetime) -> tuple[str, str | None]:
+        """``"open" | "frozen" | "closed"`` and why: the remote offset's ONE gate plus the overcool vetoes.
+
+        Reuses ``_remote_offset_gate_and_reason`` (occupant change, away/vacation, override, door/window pause, nat
+        vent / WHF, a window open past its debounce; FREEZE inside the debounce) and adds what only overcool needs:
+        a manual override or any grace (so it can never reverse an occupant change: P4), a cool write and a cool
+        thermostat, no TOU bank, no pre-cool hold, not the sleep window (D5).
+        """
+        gate, reason = self._remote_offset_gate_and_reason()
+        if gate is RemoteOffsetGate.CLOSED:
+            return "closed", reason
+        veto: str | None = None
+        live = self.hass.states.get(self.climate_entity) if getattr(self, "hass", None) is not None else None
+        if self._manual_override_active or self._grace_active:
+            veto = "grace"
+        elif self._remote_target_mode != "cool" or getattr(live, "state", None) != "cool":
+            veto = "mode"
+        elif self._tou_precondition_active(now):
+            veto = "tou_bank"
+        elif self._pre_cool_band_in_force_now() is not None:
+            veto = "pre_cool"
+        elif _in_sleep_window(now, self.config):
+            veto = "sleep_window"
+        if veto is not None:
+            return "closed", veto
+        if gate is RemoteOffsetGate.FREEZE:
+            return "frozen", reason
+        return "open", None
+
+    def _overcool_headroom(self) -> float:
+        """How far the gap rule lets overcool lower the current cool target (after the remote offset)."""
+        target = self._remote_target_f
+        if not isinstance(target, (int, float)) or isinstance(target, bool):
+            return 0.0
+        floor, _ceiling = self._remote_band_edges()
+        return overcool_headroom_f(float(target), floor, MIN_HEAT_COOL_GAP_F, self._remote_offset_applied_f or 0.0)
+
+    def _overcool_inputs(self, now: datetime, gate: str, reason: str | None) -> OvercoolInputs:
+        facts = self._facts(now)
+        dp = facts.indoor_dew_point_f
+        self._overcool_last_dp_f = dp
+        was_on = OVERCOOL_HUMID_LATCH in facts.humid_latches
+        humid = latch_above(dp, OVERCOOL_TRIGGER_DP_F, OVERCOOL_RELEASE_DP_F, was_on)
+        return OvercoolInputs(
+            now=now,
+            enabled=self._overcool_enabled(),
+            observe_only=self.dry_run is True,
+            gate=gate,
+            gate_reason=reason,
+            cooling=self._live_hvac_action() == "cooling",
+            humid=humid,
+            at_trigger=dp is not None and dp >= OVERCOOL_TRIGGER_DP_F,
+            headroom_f=self._overcool_headroom(),
+        )
+
+    def _apply_overcool_decision_sync(self, gate: str, reason: str | None) -> Any:
+        """Take one decision step and record it (state, log, Activity event); returns the decision. No write."""
+        now = dt_util.now()
+        before = self._overcool
+        decision = decide_overcool(before, self._overcool_inputs(now, gate, reason))
+        self._overcool = decision.state
+        if decision.action == ACTION_NONE:
+            return decision
+        if decision.action == ACTION_ZERO:
+            # An owner holds the thermostat now: what it shows is the owner's (the lowered value is no longer CA's).
+            if reason == "occupant_change" and self._overcool_applied_f > 1e-6:
+                # The occupant's Off -> Cool toggle brings back CA's lowered value: adoption reads it as CA's (#1694).
+                self._overcool_closed_commanded_f = self._pending_setpoint_single
+            self._overcool_applied_f = 0.0
+        dp = self._overcool_last_dp_f
+        target = self._remote_target_f
+        if decision.action == ACTION_WOULD_ENGAGE:
+            _LOGGER.info(
+                "[DRY RUN] Humid overcool would start: indoor_dew_point_f=%s target=%s lowering=%s role=%s",
+                fmt_dp_log(dp),
+                self._t(target) if target is not None else None,
+                self._td(1.0),
+                self.role,
+            )
+            return decision
+        _LOGGER.info(
+            "Humid overcool %s: reason=%s lowering=%s target=%s indoor_dew_point_f=%s gate=%s role=%s",
+            decision.action,
+            decision.reason,
+            self._td(decision.state.magnitude_f),
+            self._t(target) if target is not None else None,
+            fmt_dp_log(dp),
+            reason,
+            self.role,
+        )
+        if decision.event and self._emit_event_callback:
+            if decision.action == ACTION_ENGAGE:
+                payload: dict[str, Any] = {
+                    "lowering_f": decision.state.magnitude_f,
+                    "target": target,
+                    "indoor_dew_point": dp,
+                    "trigger": OVERCOOL_TRIGGER_DP_F,
+                }
+            else:
+                engaged = before.engaged_at
+                minutes = round(seconds_since(engaged, now=now) / 60.0, 1) if engaged is not None else None
+                payload = {
+                    "reason": decision.reason,
+                    "lowering_f": before.magnitude_f,
+                    "minutes": minutes,
+                    "indoor_dew_point": dp,
+                    "target": target,
+                }
+            if decision.event == "overcool_started":
+                self._emit_event_callback("overcool_started", payload)
+            else:
+                self._emit_event_callback("overcool_ended", payload)
+        return decision
+
+    async def overcool_check(self) -> None:
+        """One humid-overcool decision (Issue #1694): from the 5-minute dew-point tick, every hvac_action change and
+        the overcool's own deadline timer (step, cap, run end, coast end). Writes only the comfort target again
+        (the one setpoint path applies the new term), only to a thermostat already in cool."""
+        if self._overcool_check_running or _refuse_if_shut_down(self, "humid overcool check"):
+            return
+        if not self._overcool_enabled() and self._overcool.phase not in (PHASE_ACTIVE, PHASE_COASTING):
+            return
+        if self._temp_command_pending:
+            return  # another writer's setpoint is in flight: the next check decides on what it landed
+        self._overcool_check_running = True
+        try:
+            stranded: float | None = None
+            if not self._manual_change_protected():
+                # The occupant's change is over: nothing left to adopt. If it ended with the thermostat still at CA's
+                # lowered value (an Off -> Cool toggle that self-resolved), nobody else writes it back: one plain write.
+                stranded = self._overcool_closed_commanded_f
+                self._overcool_closed_commanded_f = None
+            gate, reason = self._overcool_gate_and_reason(dt_util.now())
+            decision = self._apply_overcool_decision_sync(gate, reason)
+            target = self._remote_target_f
+            live = self.hass.states.get(self.climate_entity)
+            live_sp = read_state_temp_f(live, "temperature", self._temp_unit)
+            restore_stranded = (
+                stranded is not None
+                and self._overcool_applied_f <= 1e-6
+                and live_sp is not None
+                and abs(live_sp - stranded) <= 0.3
+                and target is not None
+                and abs(live_sp - float(target)) > 0.3
+            )
+            if (
+                (decision.write or restore_stranded)
+                and target is not None
+                and self._remote_target_mode == "cool"
+                and getattr(live, "state", None) == "cool"
+                and not self._manual_change_protected()
+                and self.dry_run is not True
+            ):
+                await self._set_temperature(
+                    float(target),
+                    reason=_R(
+                        {ACTION_ENGAGE: "reason_humid_overcool_start", "step": "reason_humid_overcool_step"}.get(
+                            decision.action, "reason_humid_overcool_end"
+                        ),
+                        lowering=self._tdp(decision.state.magnitude_f),
+                    ),
+                    mode="cool",
+                    keep_pre_cool_hold=True,
+                )
+        finally:
+            self._overcool_check_running = False
+        self._arm_overcool_timer()
+
+    def _arm_overcool_timer(self) -> None:
+        """One timer at the overcool's next deadline (none due: the slot is cleared)."""
+        due = next_deadline_s(self._overcool, dt_util.now())
+        if due is None:
+            if self._overcool_timer_cancel:
+                self._overcool_timer_cancel()
+                self._overcool_timer_cancel = None
+            return
+
+        @callback
+        def _fire(_now: Any) -> None:
+            self._overcool_timer_cancel = None
+            self._spawn_whf_task(self.overcool_check())  # the engine's config-entry spawner (bare only without one)
+
+        self._rearm_timer("_overcool_timer_cancel", due, _fire)
+
+    def _note_overcool_write(
+        self, target_f: float, mode: str, offset_f: float, overcool_f: float, commanded_f: float, now: datetime
+    ) -> None:
+        """After a write: what the thermostat now holds, and whether ONLY the overcool term changed (the cycle
+        recorder keeps such a run whole, Issue #1694)."""
+        sig = (round(float(target_f), 3), str(mode), round(float(offset_f), 3))
+        prev = self._last_write_key
+        self._adjust_only_write = (
+            prev is not None and prev[0] == sig[0] and prev[1] == sig[1] and abs(prev[2] - float(commanded_f)) > 1e-6
+        )
+        self._last_write_key = (sig[0], sig[1], float(commanded_f))
+        changed = abs(overcool_f - self._overcool_applied_f) > 1e-6
+        if changed and self._overcool_write_sig == sig:
+            self._overcool_echo = (float(commanded_f), now)
+        self._overcool_write_sig = sig
+        self._overcool_applied_f = float(overcool_f)
+
+    def is_own_commanded_setpoint(self, setpoint_f: float | None) -> bool:
+        """True when ``setpoint_f`` (internal F) is the single setpoint CA last commanded, within 0.3 F, and that
+        write changed only a command adjustment (a humid-overcool step or restore, a bedroom-loop step: the comfort
+        target and mode unchanged). A new comfort target (a band change, an away/home restore) has its own chart row
+        and is not one (#1694)."""
+        commanded = self._pending_setpoint_single
+        if not self._adjust_only_write:
+            return False
+        if setpoint_f is None or not isinstance(commanded, (int, float)) or isinstance(commanded, bool):
+            return False
+        return abs(float(setpoint_f) - float(commanded)) <= 0.3
+
+    def overcool_adjustment_echo(self, setpoint_f: float | None, now: datetime | None = None) -> bool:
+        """True when ``setpoint_f`` is the thermostat echoing CA's own write that changed ONLY the overcool term
+        (comfort target and remote offset unchanged) within the last 15 minutes. The cycle recorder then does not
+        treat it as a setpoint change (each engage, step and restore would otherwise cut a #1512 cycle sample)."""
+        echo = self._overcool_echo
+        if echo is None or setpoint_f is None:
+            return False
+        commanded, at = echo
+        try:
+            fresh = seconds_since(at, now=now or dt_util.now()) <= 900
+        except TypeError:
+            return False
+        return fresh and abs(float(setpoint_f) - commanded) <= 0.3
+
+    def overcool_view(self) -> dict[str, Any] | None:
+        """The overcool for Status, chart, AI and diagnostics (Issue #1694); None when it lowers nothing and the
+        option is off. A pure read."""
+        st = self._overcool
+        lowering = self._overcool_applied_f
+        if lowering <= 1e-6 and not self._overcool_enabled():
+            return None
+        target = self._remote_target_f
+        return {
+            "enabled": self._overcool_enabled(),
+            "phase": st.phase,
+            "lowering_f": round(lowering, 2),
+            "active": lowering > 1e-6,
+            "comfort_target_f": target if lowering > 1e-6 else None,
+            "commanded_f": self._pending_setpoint_single if lowering > 1e-6 else None,
+            "engaged_at": st.engaged_at.isoformat() if st.engaged_at is not None else None,
+            "indoor_dew_point_f": self._overcool_last_dp_f,
+        }
+
+    def overcool_commanded_window(self, now: datetime | None = None) -> tuple[datetime, float] | None:
+        """``(until, commanded_f)`` while overcool lowers the setpoint: the latest moment it can still be in force
+        (the 60-minute cap, or the coast window after the run) and the commanded cool setpoint, for the chart's
+        predicted indoor curve (Chart Coverage rule). None otherwise."""
+        from .const import CYCLE_POST_OFF_WINDOW_S, OVERCOOL_RUN_CAP_S  # noqa: PLC0415
+
+        st = self._overcool
+        commanded = self._pending_setpoint_single
+        if self._overcool_applied_f <= 1e-6 or commanded is None:
+            return None
+        if st.phase == PHASE_ACTIVE and st.engaged_at is not None:
+            return st.engaged_at + timedelta(seconds=OVERCOOL_RUN_CAP_S + CYCLE_POST_OFF_WINDOW_S), float(commanded)
+        if st.phase == PHASE_COASTING and st.stopped_at is not None:
+            return st.stopped_at + timedelta(seconds=CYCLE_POST_OFF_WINDOW_S), float(commanded)
+        return None
 
     def remote_loop_comfort_view(self) -> RemoteLoopComfortView | None:
         """The loop for the comfort detectors (Issue #1678), or None when it is not acting on the room now.
@@ -16537,7 +16918,9 @@ class AutomationEngine:
                 raw_setpoint = state.attributes.get("temperature") if state else None
                 if raw_setpoint is not None:
                     unit = self._temp_unit
-                    current_setpoint_f = to_fahrenheit(float(raw_setpoint), unit)
+                    current_setpoint_f = self._overcool_adopt_setpoint(
+                        to_fahrenheit(float(raw_setpoint), unit), decision_target_f, decision_mode
+                    )
         except TypeError, ValueError, AttributeError:
             current_setpoint_f = None
             target_setpoint_f = None
@@ -22332,6 +22715,8 @@ class AutomationEngine:
           final decision.
         - _natural_vent_active is NOT persisted and resets to False on restart; the
           reconcile step re-evaluates whether nat-vent conditions still hold.
+        - Humid overcool (Issue #1694) is NOT persisted: the in-memory state is reset here, so the first write after
+          the restart (the startup-coalesce plan) is the plain comfort target.
 
         Issue #1006 — narrow exception: a ``fan_off`` manual grace (the user physically turned
         the fan off) with meaningful remaining duration is re-armed after the clean-slate reset
@@ -22350,6 +22735,7 @@ class AutomationEngine:
         `dashboard_resume`/`override_confirmed` are deliberately NOT covered (Issue #1046, not planned)
         — see `_maybe_restore_fan_off_grace()` docstring.
         """
+        self._reset_overcool()  # Issue #1694: never persisted; a restart starts with no overcool
         # _paused_by_door and _pre_pause_mode are intentionally NOT restored here.
         # __init__ already sets both to their clean defaults (False / None).
         # The door/window listener re-detects open sensors on startup.
@@ -22697,6 +23083,9 @@ class AutomationEngine:
         if self._setpoint_retry_cancel:
             self._setpoint_retry_cancel()
             self._setpoint_retry_cancel = None
+        if self._overcool_timer_cancel:  # Issue #1694
+            self._overcool_timer_cancel()
+            self._overcool_timer_cancel = None
         if self._mode_align_recheck_cancel:
             self._mode_align_recheck_cancel()
             self._mode_align_recheck_cancel = None

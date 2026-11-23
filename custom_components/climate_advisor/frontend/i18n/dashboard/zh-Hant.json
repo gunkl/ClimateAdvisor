@@ -910,6 +910,7 @@
   "dashboard.analysis.trend.warming": "升溫",
   "dashboard.chart.event.classification_change": "當日重新分類",
   "dashboard.chart.event.hvac_action_change": "空調系統狀態變更",
+  "dashboard.chart.event.setpoint_change": "設定溫度變更",
   "dashboard.chart.event.occupancy_change": "在家狀態變更",
   "dashboard.chart.event.occupancy_setback": "已套用離家溫度",
   "dashboard.chart.event.override": "手動變更",

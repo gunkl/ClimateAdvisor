@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 الرطوبة\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "منذ منتصف الليل طلبت منك إغلاق النوافذ {count, plural, zero {# مرة} one {مرة واحدة} two {مرتين} few {# مرات} many {# مرة} other {# مرة}} لأن هواءً رطبًا كان يدخل.",
   "briefing.humidity.fan_held": "منذ منتصف الليل بقيت المروحة متوقفة خلال {count, plural, zero {# فترة رطبة} one {فترة رطبة واحدة} two {فترتين رطبتين} few {# فترات رطبة} many {# فترة رطبة} other {# فترة رطبة}}: كان الهواء الخارجي رطبًا جدًا لإدخاله.",
+  "briefing.humidity.overcooled": "منذ منتصف الليل تركت المكيف يعمل مدة أطول {count, plural, one {مرة واحدة} other {# مرات}} لتجفيف الهواء (تبريد إضافي للرطوبة).",
   "briefing.humidity.reading": "{where, select, indoor {في الداخل} other {في الخارج}}: نقطة الندى {dew_point}{has_rh, select, yes { (رطوبة نسبية {rh}%)} other {}}.",
   "briefing.humidity.withheld": "الهواء الخارجي رطب جدًا لإدخاله الآن (نقطة الندى {dew_point}، {why, select, ceiling {عند حدّك {limit} أو أعلى} other {أرطب من هواء المنزل}})، لذا لا أقترح فتح النوافذ.",
   "briefing.leaving.away_band": "أنت خارج المنزل حاليًا. أحافظ على نطاق توفير الطاقة الأوسع ({band}) أثناء غيابك، لذا لن يعمل إلا القليل. ستُستعاد درجات الحرارة المريحة عند عودتك.",

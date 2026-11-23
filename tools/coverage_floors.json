@@ -54,6 +54,7 @@
     "feels_like.py": 97.2,
     "fix_history.py": 100.0,
     "forecast_archive.py": 99.1,
+    "humid_overcool.py": 100.0,
     "humidity_facts.py": 96.5,
     "humidity_sources.py": 96.3,
     "hvac_action.py": 100.0,

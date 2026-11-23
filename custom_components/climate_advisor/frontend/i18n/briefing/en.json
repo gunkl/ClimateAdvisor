@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 Humidity\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "Since midnight I asked you to close the windows {count, plural, one {once} other {# times}} because humid air was coming in.",
   "briefing.humidity.fan_held": "Since midnight the fan stayed off during {count, plural, one {one humid spell} other {# humid spells}}: the outdoor air was too humid to bring in.",
+  "briefing.humidity.overcooled": "Since midnight I let the AC run longer {count, plural, one {once} other {# times}} to dry the air (humid overcool).",
   "briefing.humidity.reading": "{where, select, indoor {Indoors} other {Outdoors}}: dew point {dew_point}{has_rh, select, yes { ({rh}% relative humidity)} other {}}.",
   "briefing.humidity.withheld": "The outdoor air is too humid to bring in right now (dew point {dew_point}, {why, select, ceiling {at or above your {limit} limit} other {wetter than the air in the house}}), so I'm not suggesting open windows.",
   "briefing.leaving.away_band": "You're currently away. I'm holding the wider energy-saving band ({band}) while you're out, so not much should run. Comfort will be restored when you return.",

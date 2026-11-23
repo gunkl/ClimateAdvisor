@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 湿度\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "湿った空気が入ってきていたため、深夜0時以降{count, plural, other {#回}}窓を閉めるようお願いしました。",
   "briefing.humidity.fan_held": "深夜0時以降、湿った時間帯{count, plural, other {#回}}の間はファンを止めたままにしました。外気が湿りすぎていたためです。",
+  "briefing.humidity.overcooled": "深夜0時から、空気を乾かすため冷房を{count, plural, other {#回}}長めに運転しました（除湿のための追加冷房）。",
   "briefing.humidity.reading": "{where, select, indoor {室内} other {屋外}}：露点 {dew_point}{has_rh, select, yes {（相対湿度 {rh}%）} other {}}。",
   "briefing.humidity.withheld": "外気は今、取り入れるには湿りすぎています（露点 {dew_point}、{why, select, ceiling {上限 {limit} 以上} other {家の中の空気より湿っている}}）。そのため、窓を開ける提案はしていません。",
   "briefing.leaving.away_band": "現在、外出中です。外出中は広めの省エネ範囲（{band}）を維持するため、ほとんど稼働しません。お帰りになると快適な温度に戻します。",

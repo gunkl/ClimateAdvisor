@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 Luftfeuchtigkeit\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "Seit Mitternacht habe ich dich {count, plural, one {einmal} other {# Mal}} gebeten, die Fenster zu schließen, weil feuchte Luft hereinkam.",
   "briefing.humidity.fan_held": "Seit Mitternacht blieb der Ventilator während {count, plural, one {einer feuchten Phase} other {# feuchter Phasen}} aus: Die Außenluft war zu feucht, um sie hereinzulassen.",
+  "briefing.humidity.overcooled": "Seit Mitternacht habe ich die Klimaanlage {count, plural, one {einmal} other {# Mal}} länger laufen lassen, um die Luft zu trocknen (Feuchte-Überkühlung).",
   "briefing.humidity.reading": "{where, select, indoor {Drinnen} other {Draußen}}: Taupunkt {dew_point}{has_rh, select, yes { ({rh} % relative Luftfeuchtigkeit)} other {}}.",
   "briefing.humidity.withheld": "Die Außenluft ist gerade zu feucht, um sie hereinzulassen (Taupunkt {dew_point}, {why, select, ceiling {auf oder über deiner Grenze von {limit}} other {feuchter als die Luft im Haus}}), deshalb schlage ich kein Fensteröffnen vor.",
   "briefing.leaving.away_band": "Du bist gerade abwesend. Ich halte den weiteren Energiesparbereich ({band}), solange du weg bist, daher sollte kaum etwas laufen. Wenn du zurückkommst, stelle ich den Komfort wieder her.",

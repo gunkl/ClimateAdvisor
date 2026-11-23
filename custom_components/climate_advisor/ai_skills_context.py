@@ -697,7 +697,8 @@ def _moisture_lines(coordinator: Any) -> list[str]:
         f"  outdoor_dew_point:   {_reading(shown.get('outdoor') or {})}",
         f"  humid_air_guard:     {guard_text}",
         f"  humid_decisions_today: close-window notices={int(counts.get('close_notices', 0))}"
-        f" fan starts held={int(counts.get('fan_starts_held', 0))}",
+        f" fan starts held={int(counts.get('fan_starts_held', 0))}"
+        f" overcooled runs={int(counts.get('overcool_runs', 0))}",
     ]
 
 
@@ -3661,6 +3662,48 @@ def _render_nat_vent_humid_skip(p: dict, unit: str) -> tuple[Cell, Cell]:
 
 
 @_msg_renderer
+def _render_overcool_started(p: dict, unit: str) -> tuple[Cell, Cell]:
+    """Issue #1694 (#1507 H3): humid overcool lowered the commanded cool setpoint for this AC run."""
+    label = _m("overcool_started_plain")
+    with contextlib.suppress(TypeError, ValueError):
+        lowering = _tdp(float(p.get("lowering_f") or 1.0), unit, 1)
+        if p.get("target") is not None and p.get("indoor_dew_point") is not None:
+            label = _m(
+                "overcool_started",
+                lowering=lowering,
+                target=_tp(float(p["target"]), unit, 1),
+                dew_point=_tp(float(p["indoor_dew_point"]), unit, 1),
+            )
+        else:
+            label = _m("overcool_started_lowering", lowering=lowering)
+    return label, ""
+
+
+_OVERCOOL_END_REASONS = ("dried", "cap", "run_ended")
+
+
+@_msg_renderer
+def _render_overcool_ended(p: dict, unit: str) -> tuple[Cell, Cell]:
+    """Issue #1694 (#1507 H3): humid overcool released (air dried, 60-minute cap, run ended, or another owner)."""
+    reason = str(p.get("reason") or "")
+    code = reason if reason in _OVERCOOL_END_REASONS else "other"
+    minutes = p.get("minutes")
+    try:
+        minutes_txt = f"{float(minutes):.0f}" if minutes is not None else None
+    except TypeError, ValueError:
+        minutes_txt = None
+    return (
+        _m(
+            "overcool_ended",
+            reason=code,
+            has_minutes=_yn(minutes_txt is not None),
+            minutes=minutes_txt or "",
+        ),
+        "",
+    )
+
+
+@_msg_renderer
 def _render_nat_vent_floor_imminent_skip(p: dict, unit: str) -> tuple[Cell, Cell]:
     ttf = p.get("time_to_floor_hr")
     label = _m("nat_vent_skip_floor_imminent")
@@ -4228,6 +4271,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_forecast_skip": _render_nat_vent_forecast_skip,
     "nat_vent_floor_imminent_skip": _render_nat_vent_floor_imminent_skip,
     "nat_vent_humid_skip": _render_nat_vent_humid_skip,
+    "overcool_started": _render_overcool_started,
+    "overcool_ended": _render_overcool_ended,
     "bedtime_setback_skipped": _render_bedtime_setback_skipped,
     "morning_wakeup_skipped": _render_morning_wakeup_skipped,
     "pre_cool_suppressed_nat_vent": _render_pre_cool_suppressed_nat_vent,

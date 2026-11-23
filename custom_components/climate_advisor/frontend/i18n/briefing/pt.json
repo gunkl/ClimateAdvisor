@@ -57,6 +57,7 @@
   "briefing.humidity": "💧 Humidade\n----------------------------------------\n{items}",
   "briefing.humidity.close_notices": "Desde a meia-noite pedi-lhe que fechasse as janelas {count, plural, one {uma vez} many {# vezes} other {# vezes}} porque estava a entrar ar húmido.",
   "briefing.humidity.fan_held": "Desde a meia-noite, a ventoinha ficou desligada durante {count, plural, one {um período húmido} many {# períodos húmidos} other {# períodos húmidos}}: o ar exterior estava demasiado húmido para entrar.",
+  "briefing.humidity.overcooled": "Desde a meia-noite deixei o ar funcionar mais tempo {count, plural, one {uma vez} other {# vezes}} para secar o ar (sobrearrefecimento por umidade).",
   "briefing.humidity.reading": "{where, select, indoor {Dentro} other {Fora}}: ponto de orvalho {dew_point}{has_rh, select, yes { ({rh}% de humidade relativa)} other {}}.",
   "briefing.humidity.withheld": "O ar exterior está demasiado húmido para entrar agora (ponto de orvalho {dew_point}, {why, select, ceiling {no seu limite de {limit} ou acima} other {mais húmido do que o ar da casa}}), por isso não sugiro abrir as janelas.",
   "briefing.leaving.away_band": "Neste momento está ausente. Estou a manter o intervalo de poupança de energia mais alargado ({band}) enquanto estiver fora, por isso quase nada deverá funcionar. O conforto será reposto quando regressar.",

@@ -917,5 +917,6 @@
   "dashboard.night.level.medium": "मध्यम",
   "dashboard.status.fan_speed_high": "तेज़",
   "dashboard.status.fan_speed_low": "कम",
-  "dashboard.status.fan_speed_medium": "मध्यम"
+  "dashboard.status.fan_speed_medium": "मध्यम",
+  "dashboard.chart.ds.band_advisory": "लक्ष्य दायरा ({family, select, cool {कूलिंग} other {हीटिंग}} सीमा केवल सलाह: {reason, select, equipment {उपकरण नहीं} outdoor_lockout {बाहरी लॉकआउट} season {मौसम सेटिंग} other {उपलब्ध नहीं}})"
 }

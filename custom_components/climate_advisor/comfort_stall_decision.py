@@ -18,7 +18,7 @@ announcement while keeping this clock running.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from enum import Enum
 from typing import NamedTuple
@@ -106,6 +106,7 @@ def decide_comfort_stall(
     startup_coalescing: bool,
     nat_vent_tolerated: bool,
     thermostat_swing_tolerated: bool = False,
+    defended: Callable[[str], bool] | None = None,
 ) -> StallDecision:
     """Decide whether the house is stalled outside the active comfort band.
 
@@ -117,6 +118,9 @@ def decide_comfort_stall(
     needed mode not offered by the thermostat, an in-tolerance nat-vent deviation, and a deviation
     only inside the thermostat's own learned swing in the matching mode (Issue #1258,
     ``excluded_by="thermostat_swing"``; nat-vent is reported first when both hold).
+    Issue #1544: ``defended`` (direction -> bool; None = every direction) excludes a direction the zone cannot run
+    now -- missing equipment, an outdoor lockout or the season, unless the safety release is running it
+    (``excluded_by="zone_not_defended"``).
     """
     excluded_by: str | None = None
     if indoor is None or comfort_heat is None or comfort_cool is None:
@@ -145,6 +149,9 @@ def decide_comfort_stall(
             direction = DIRECTION_COOL
         if direction is not None and not _supports(direction, hvac_modes):
             excluded_by = "mode_unsupported"
+            direction = None
+        elif direction is not None and defended is not None and not defended(direction):
+            excluded_by = "zone_not_defended"
             direction = None
 
     if excluded_by is not None:

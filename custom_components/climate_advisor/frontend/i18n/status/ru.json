@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "датчик перестал обновляться",
   "status.indoor_source.why.unavailable": "датчик недоступен",
   "status.next_action.close_doors_heater": "Закройте двери, чтобы помочь обогреву.",
+  "status.next_action.close_up_keep_warmth": "Закройте окна и двери, чтобы сохранить тепло.",
   "status.next_action.close_windows_by": "Закройте окна до {t}",
   "status.next_action.close_windows_heater": "Закройте окна, чтобы обогрев мог работать.",
   "status.next_action.close_windows_hold_heat": "Закройте окна, чтобы сохранить тепло — на улице прохладнее ({outdoor} против {indoor}).",

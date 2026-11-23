@@ -917,5 +917,6 @@
   "dashboard.night.level.medium": "متوسطة",
   "dashboard.status.fan_speed_high": "عالية",
   "dashboard.status.fan_speed_low": "منخفضة",
-  "dashboard.status.fan_speed_medium": "متوسطة"
+  "dashboard.status.fan_speed_medium": "متوسطة",
+  "dashboard.chart.ds.band_advisory": "النطاق المستهدف (حد {family, select, cool {التبريد} other {التدفئة}} إرشادي فقط: {reason, select, equipment {لا معدات} outdoor_lockout {قفل خارجي} season {إعداد الموسم} other {غير متاح}})"
 }

@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "sensor werkt niet meer bij",
   "status.indoor_source.why.unavailable": "sensor niet beschikbaar",
   "status.next_action.close_doors_heater": "Sluit de deuren om de verwarming te helpen.",
+  "status.next_action.close_up_keep_warmth": "Sluit ramen en deuren om de warmte binnen te houden.",
   "status.next_action.close_windows_by": "Sluit de ramen vóór {t}",
   "status.next_action.close_windows_heater": "Sluit de ramen zodat de verwarming kan werken.",
   "status.next_action.close_windows_hold_heat": "Sluit de ramen om de warmte vast te houden — buiten is het koeler ({outdoor} tegenover {indoor}).",

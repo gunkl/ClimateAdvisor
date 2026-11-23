@@ -155,6 +155,7 @@
     "ov.plan_title": "What Climate Advisor will do (circles) and what you are asked to do (diamonds), from the plan",
     "ov.events": "Events",
     "ds.band": "Target Band",
+    "ds.band_advisory": "Target Band ({family, select, cool {cooling} other {heating}} edge advisory: {reason, select, equipment {no equipment} outdoor_lockout {outdoor lockout} season {season setting} other {unavailable}})",
     "ds.plan_path": "Plan path",
     "strip.heating.label": "Heating",
     "strip.heating.short": "Heating",
@@ -1467,10 +1468,16 @@
     const bandUpper = [..._stepHeld(histBandUpper), ...futBandUpper].sort((a, b) => a.x - b.x);
     const bandLower = [..._stepHeld(histBandLower), ...futBandLower].sort((a, b) => a.x - b.x);
     if (bandUpper.length > 0 || bandLower.length > 0) {
+      // Issue #1544: the edge this zone cannot serve (no cooling equipment, a lockout, the season) is advice, not a
+      // promise: drawn sparser, and the band's name says which edge and why.
+      const adv = chartData.band_advisory || null;
+      const advUpper = !!(adv && adv.family === 'cool');
+      const advLower = !!(adv && adv.family === 'heat');
       datasets.push({ caId: 'ov:band', caPart: 'upper', label: _t('ds.band'), type: 'line', data: bandUpper, borderColor: _cssVar('--c-bandline'), borderWidth: 1,
-        borderDash: [3, 3], backgroundColor: _cssVar('--c-band'), fill: '+1', pointRadius: 0, tension: 0, yAxisID: 'y', hidden: !bandOn, order: 5 });
+        borderDash: advUpper ? [1, 6] : [3, 3], backgroundColor: _cssVar('--c-band'), fill: '+1', pointRadius: 0, tension: 0, yAxisID: 'y', hidden: !bandOn, order: 5 });
       datasets.push({ caId: 'ov:band', caPart: 'lower', label: '_target_band_lower', type: 'line', data: bandLower, borderColor: _cssVar('--c-bandline'), borderWidth: 1,
-        borderDash: [3, 3], backgroundColor: 'transparent', fill: false, pointRadius: 0, tension: 0, yAxisID: 'y', hidden: !bandOn, order: 6 });
+        borderDash: advLower ? [1, 6] : [3, 3], backgroundColor: 'transparent', fill: false, pointRadius: 0, tension: 0, yAxisID: 'y', hidden: !bandOn, order: 6 });
+      if (adv) datasets[datasets.length - 2].label = _t('ds.band_advisory', { family: adv.family, reason: adv.reason });
     }
 
     // The plan path (R3 timeline): where the house is predicted to go under the plan, from NOW on.

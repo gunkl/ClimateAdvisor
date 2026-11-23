@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "센서 업데이트가 멈춤",
   "status.indoor_source.why.unavailable": "센서 사용할 수 없음",
   "status.next_action.close_doors_heater": "난방 효율을 높이려면 문을 닫으세요.",
+  "status.next_action.close_up_keep_warmth": "온기를 지키도록 창문과 문을 닫으세요.",
   "status.next_action.close_windows_by": "{t}까지 창문을 닫으세요",
   "status.next_action.close_windows_heater": "난방을 켤 수 있도록 창문을 닫으세요.",
   "status.next_action.close_windows_hold_heat": "열을 유지하려면 창문을 닫으세요 — 바깥이 더 시원합니다 (실외 {outdoor}, 실내 {indoor}).",

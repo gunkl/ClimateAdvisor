@@ -21,6 +21,7 @@ from typing import Any
 from homeassistant.util import dt as dt_util
 
 from . import i18n
+from . import zone_capability as zc
 from .automation import (
     ComfortBand,
     _in_sleep_window,
@@ -191,6 +192,10 @@ class _BriefingFacts:
     # Issue #1692: the outdoor dew point while the humid-air guard withholds outdoor air (None: not blocking), so the
     # Windows row says why the windows stay closed.
     humid_dp: float | None = None
+    # Issue #1488: the families this zone serves (``AutomationEngine.zone_service()``); the side it cannot serve is
+    # advice, never a promise. ``raw_mode`` is the classifier's day mode before it became the mode the zone runs.
+    service: zc.ZoneService = zc.FULL_SERVICE
+    raw_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -501,6 +506,7 @@ def generate_briefing_msg(
     timeline: Any | None = None,
     current_hold: Any | None = None,
     humidity: BriefingHumidity | None = None,
+    zone_service: zc.ZoneService | None = None,
 ) -> i18n.Msg:
     """Build the daily climate briefing as ONE message (``briefing.full.<day type>``; ``briefing.tldr`` for
     ``verbosity="tldr_only"``). ``generate_briefing()`` renders it.
@@ -574,6 +580,11 @@ def generate_briefing_msg(
             setback..."/"I've dropped to X..." claims so they aren't asserted
             when the setback was never actually commanded. Default False for
             callers that don't pass it.
+        zone_service: Issue #1488 -- the families this zone serves now (``AutomationEngine.zone_service()``:
+            equipment, outdoor lockouts and the season). None = both (unchanged). A heat-only zone (or one whose
+            cooling is locked out) gets no AC, pre-cool or "I'll handle the AC transition" promise: the day mode is
+            the one the zone runs (``ZoneService.shown_mode``) and the unserved side becomes window, blind and
+            ventilation advice with its reason; a cool-only zone gets the mirror ("close up, the sun is your heat").
 
     Returns:
         The briefing message; ``i18n.render(msg, lang)`` is the text for email or notification.
@@ -584,11 +595,21 @@ def generate_briefing_msg(
         # Issue #1692: the humid-air guard withholds outdoor air as the briefing is written, so the day's plan is not
         # a window plan (the same verdict the fan starts, the windows gate and the Next Action card read). A copy:
         # the shared classification keeps the classifier's answer for the automation.
-        c = copy.copy(classification)
+        c = copy.copy(c)
         c.windows_recommended = False
         c.forecast_windows_recommended = False
         c.window_opportunity_morning = False
         c.window_opportunity_evening = False
+    service = zone_service if isinstance(zone_service, zc.ZoneService) else zc.FULL_SERVICE
+    raw_mode = c.hvac_mode
+    if not service.full:
+        # Issue #1488: the day mode as this zone runs it (a heat-only zone holds heat at the floor on a hot day).
+        # A shallow copy, never dataclasses.replace(): DayClassification re-derives its recommendations (hvac_mode
+        # included) in __post_init__, which would undo the change.
+        c = copy.copy(c)
+        c.hvac_mode = service.shown_mode(c.hvac_mode) or "off"
+        if not service.heat:
+            overnight_heat_engaged = False  # no heater ran in a zone that cannot heat
 
     _LOGGER.debug(
         "Generating briefing — day_type=%s, trend=%s, comfort_heat=%.0f\u00b0F, comfort_cool=%.0f\u00b0F, verbosity=%s",
@@ -715,6 +736,10 @@ def generate_briefing_msg(
         facts = replace(facts, current_hold=current_hold)
     if humidity is not None and humidity.blocking is not None and humidity.outdoor_dp_f is not None:
         facts = replace(facts, humid_dp=humidity.outdoor_dp_f)  # Issue #1692: the Windows row says why
+    if not service.full:
+        facts = replace(facts, service=service, raw_mode=raw_mode)
+        if not service.cool:
+            facts = replace(facts, pre_cool_target=None, hot_pre_cool_target=None)
     tldr = _tldr_msg(c, config, temp_unit=temp_unit, facts=facts)
 
     if verbosity == "tldr_only":
@@ -727,7 +752,11 @@ def generate_briefing_msg(
 
     # Conversational body
     body: i18n.Msg | None = None
-    if c.day_type == DAY_TYPE_HOT:
+    if c.day_type == DAY_TYPE_HOT and not service.cool and not facts.unoccupied:
+        body = _hot_advisory_msg(c, facts, fan_mode=fan_mode, temp_unit=temp_unit)
+    elif c.day_type in (DAY_TYPE_COOL, DAY_TYPE_COLD) and not service.heat and not facts.unoccupied:
+        body = _cold_advisory_msg(c, facts, temp_unit=temp_unit)
+    elif c.day_type == DAY_TYPE_HOT:
         body = _hot_day_msg(c, facts, fan_mode=fan_mode, temp_unit=temp_unit)
     elif c.day_type == DAY_TYPE_WARM:
         body = _warm_day_msg(
@@ -861,6 +890,48 @@ def _band_msg(floor: float, ceiling: float, temp_unit: str) -> i18n.Msg:
     )
 
 
+def _held_band_msg(facts: _BriefingFacts, floor: float, ceiling: float, temp_unit: str) -> i18n.Msg:
+    """Issue #1488: the band a single-family zone actually holds -- a heat-only zone defends only the floor ("at least
+    68°F"), a cool-only zone only the ceiling; both families: the plain band."""
+    svc = facts.service
+    if svc.heat and not svc.cool:
+        return i18n.Msg("briefing.band_heat_only", floor=i18n.Temp(floor, temp_unit))
+    if svc.cool and not svc.heat:
+        return i18n.Msg("briefing.band_cool_only", ceiling=i18n.Temp(ceiling, temp_unit))
+    return _band_msg(floor, ceiling, temp_unit)
+
+
+def _why_msg(facts: _BriefingFacts, family: str) -> i18n.Msg:
+    """Issue #1488: why this zone does not serve ``family`` (no equipment / the outdoor lockout / the season)."""
+    reason = facts.service.reason(family) or zc.REASON_EQUIPMENT
+    key = "briefing.advisory.no_cooling" if family == zc.FAMILY_COOL else "briefing.advisory.no_heating"
+    return i18n.Msg(key, reason=reason)
+
+
+def _day_family_unserved(facts: _BriefingFacts) -> bool:
+    """Issue #1488: the classifier's day called for a family (heat / cool) this zone does not serve."""
+    raw = facts.raw_mode
+    return not facts.service.full and raw in (zc.FAMILY_HEAT, zc.FAMILY_COOL) and not facts.service.serves(raw)
+
+
+def _advisory_row(facts: _BriefingFacts, day_mode: str | None, band: ComfortBand, temp_unit: str) -> i18n.Msg:
+    """Issue #1488: the TLDR HVAC Mode row when the day called for a family this zone does not serve
+    (``_day_family_unserved``): what the zone holds instead, and why."""
+    if day_mode == zc.FAMILY_HEAT:
+        return i18n.Msg(
+            "briefing.tldr.hvac_heat_advisory",
+            target=i18n.Temp(band.floor, temp_unit),
+            reason=facts.service.reason(zc.FAMILY_COOL) or zc.REASON_EQUIPMENT,
+        )
+    if day_mode == zc.FAMILY_COOL:
+        return i18n.Msg(
+            "briefing.tldr.hvac_cool_advisory",
+            target=i18n.Temp(band.ceiling, temp_unit),
+            reason=facts.service.reason(zc.FAMILY_HEAT) or zc.REASON_EQUIPMENT,
+        )
+    return i18n.Msg("briefing.tldr.hvac_off_advisory")
+
+
 def _band_text(floor: float, ceiling: float, temp_unit: str) -> str:
     """'68-74°F' -- the armed comfort band, quoted from the band the thermostat actually holds (English)."""
     return i18n.render_en(_band_msg(floor, ceiling, temp_unit))
@@ -951,6 +1022,9 @@ def _tldr_msg(
                 "briefing.tldr.hvac_vacation_band" if occupancy_mode == "vacation" else "briefing.tldr.hvac_away_band",
                 band=_band_msg(_band.floor, _band.ceiling, temp_unit),
             )
+    elif _day_family_unserved(facts):
+        # Issue #1488: the day called for the family this zone cannot serve; the row names what is held and why.
+        hvac_row = _advisory_row(facts, _day_mode, _band, temp_unit)
     elif _day_mode == "cool":
         hvac_row = i18n.Msg("briefing.tldr.hvac_cool", target=i18n.Temp(_band.ceiling, temp_unit))
     elif _day_mode == "heat":
@@ -1136,6 +1210,56 @@ def _hot_day_msg(
     return _slots("briefing.hot.plan", opener=opener, close=close_p, blinds=blinds_p, reopen=reopen_p, fan=fan_p)
 
 
+def _hot_advisory_msg(
+    c,
+    facts: _BriefingFacts,
+    fan_mode: str = FAN_MODE_DISABLED,
+    temp_unit: str = FAHRENHEIT,
+) -> i18n.Msg:
+    """Issue #1488: the hot-day plan for a zone that cannot cool now (no cooling equipment, a cool lockout, the
+    Heat-only season). Occupant view: nothing here will cool the house, so the plan is advice -- close up while it is
+    hot outside, keep the blinds drawn, open up to let the heat out once outdoor air is cooler -- with no AC, pre-cool
+    or "I'll handle the AC transition" promise. Same window facts (and the same ``briefing.hot.plan`` layout) as
+    ``_hot_day_msg``."""
+    threshold = i18n.Temp(facts.economizer_threshold, temp_unit)
+    close = facts.close
+    has_morning = facts.hot_morning and close is not None
+    has_evening = facts.hot_evening and facts.hot_evening_open is not None
+    opener = i18n.Msg(
+        "briefing.advisory.hot_lead", high=i18n.Temp(c.today_high, temp_unit), why=_why_msg(facts, zc.FAMILY_COOL)
+    )
+    close_p = reopen_p = None
+    if has_morning:
+        close_p = i18n.Msg(
+            "briefing.advisory.hot_close",
+            threshold=threshold,
+            already="yes" if close.already else "no",
+            time=_clock(close.at),
+        )
+    if has_evening:
+        reopen_p = i18n.Msg("briefing.advisory.reopen", time=_clock(facts.hot_evening_open))
+    blinds_p = i18n.Msg("briefing.advisory.blinds")
+    fan_p = i18n.Msg("briefing.hot.fan") if fan_mode != FAN_MODE_DISABLED and (has_morning or has_evening) else None
+    return _slots("briefing.hot.plan", opener=opener, close=close_p, blinds=blinds_p, reopen=reopen_p, fan=fan_p)
+
+
+def _cold_advisory_msg(c, facts: _BriefingFacts, temp_unit: str = FAHRENHEIT) -> i18n.Msg:
+    """Issue #1488 (mirror): the cool / cold-day plan for a zone that cannot heat now (cool-only equipment, a heat
+    lockout, the Cool-only season). Nothing here will heat the house, so the plan is "close up, the sun is your heat",
+    with no heater, pre-heat or bedtime set-back promise."""
+    return _slots(
+        "briefing.cold.plan",
+        lead=i18n.Msg(
+            "briefing.advisory.cold_lead",
+            day="cold" if c.day_type == DAY_TYPE_COLD else "cool",
+            high=i18n.Temp(c.today_high, temp_unit),
+            why=_why_msg(facts, zc.FAMILY_HEAT),
+        ),
+        colder=None,
+        bedtime=None,
+    )
+
+
 def _warm_day_msg(
     c,
     facts: _BriefingFacts,
@@ -1180,7 +1304,7 @@ def _warm_day_msg(
     away = facts.unoccupied
     # Issue #1211: the band the thermostat actually holds today, quoted from the armed edges.
     _held_cool = facts.awake_cool
-    band = _band_msg(facts.awake_heat, _held_cool, temp_unit)
+    band = _held_band_msg(facts, facts.awake_heat, _held_cool, temp_unit)
     # Issue #1093: the AC-handoff sentences quote the ceiling the thermostat is armed with (Prefer
     # savings widens it), read from awake_comfort_edges() -- never comfort_cool + margin here.
     hold = i18n.Temp(_held_cool, temp_unit)
@@ -1238,6 +1362,9 @@ def _warm_day_msg(
                     time=_clock(_close.at),
                     reason=cutoff_reason_msg(_effective_reason),
                 )
+        elif not facts.service.cool:
+            # Issue #1488: the same morning-air line without "without the AC" (there is no AC here).
+            main = i18n.Msg("briefing.advisory.windows_open_morning")
         else:
             main = i18n.Msg("briefing.warm.windows_open_morning")
     elif away:
@@ -1261,7 +1388,11 @@ def _warm_day_msg(
     # This section now only states the forecast and ties the AC to windows being
     # closed; _fresh_air_section owns the debounce/pause mechanics, so it's said once.
     ac: i18n.Msg | None
-    if away:
+    if not facts.service.cool and not away:
+        # Issue #1488: no cooling here (no equipment, a lockout or the season): no AC promise, the advice instead.
+        ac = i18n.Msg("briefing.advisory.warm_no_cooling", why=_why_msg(facts, zc.FAMILY_COOL), ceiling=hold)
+        _ceiling_breach = None  # nothing switches on at the ceiling, so the reopen line cancels no AC
+    elif away:
         # Nobody is home: the AC-handoff sentences quote the awake ceiling, which is not what the thermostat holds
         # while away (the away section states the setback band).
         ac = None
@@ -1344,7 +1475,7 @@ def _mild_day_msg(
     # Issue #1091: display-only armed floor (Prefer savings widens it).
     _shown_heat = facts.awake_heat
     floor = i18n.Temp(_shown_heat, temp_unit)
-    band = _band_msg(_shown_heat, facts.awake_cool, temp_unit)
+    band = _held_band_msg(facts, _shown_heat, facts.awake_cool, temp_unit)
     near = None
     if not windows_advice:
         if away:
@@ -1391,7 +1522,15 @@ def _mild_day_msg(
                 _mild_cutoff_reason,
             )
             _effective_reason = "outdoor_rise"
-        if _already and _effective_reason == "outdoor_rise":
+        if not facts.service.heat:
+            # Issue #1488 (mirror): no heater comes back on in a zone that cannot heat; keep the warmth in instead.
+            close_p = i18n.Msg(
+                "briefing.advisory.mild_close",
+                already="yes" if _already else "no",
+                time=_clock(_close.at),
+                why=_why_msg(facts, zc.FAMILY_HEAT),
+            )
+        elif _already and _effective_reason == "outdoor_rise":
             close_p = i18n.Msg("briefing.mild.close_now", floor=floor)
         else:
             close_p = i18n.Msg(
@@ -1569,6 +1708,9 @@ def _fresh_air_msg(
             away=away,
             target=i18n.Temp(comfort_cool, temp_unit),
         )
+    if not facts.service.heat and not facts.service.cool:
+        # Issue #1488 (mirror): neither family can run here now, so there is no heat or AC to pause.
+        return Msg("briefing.advisory.fresh_nothing_runs")
     if c.hvac_mode == "cool":
         return Msg("briefing.fresh.cool", minutes=minutes, away=away, target=i18n.Temp(comfort_cool, temp_unit))
     if c.hvac_mode == "heat":
@@ -1620,13 +1762,18 @@ def _tonight_msg(
     )
     high = i18n.Temp(c.tomorrow_high, temp_unit)
     if c.trend_direction == "warming" and c.trend_magnitude >= 5:
-        first = i18n.Msg("briefing.tonight.warming_away" if facts.unoccupied else "briefing.tonight.warming", high=high)
+        # Issue #1488 (mirror): "set back more aggressively, less heating needed" only where there is heating.
+        quiet = facts.unoccupied or not facts.service.heat
+        first = i18n.Msg("briefing.tonight.warming_away" if quiet else "briefing.tonight.warming", high=high)
     elif c.trend_direction == "cooling" and c.trend_magnitude >= 5:
-        first = i18n.Msg("briefing.tonight.cooling", high=high)
+        first = i18n.Msg(
+            "briefing.tonight.cooling" if facts.service.heat else "briefing.advisory.tonight_cooling", high=high
+        )
     else:
         first = i18n.Msg("briefing.tonight.similar", high=high)
     adaptive = None
-    if adaptive_thermal_active and c.hvac_mode in ("heat", "cool") and not facts.unoccupied:
+    # Issue #1488 (mirror): the line names heating performance and pre-heat timing, so only where heating is served.
+    if adaptive_thermal_active and c.hvac_mode in ("heat", "cool") and not facts.unoccupied and facts.service.heat:
         adaptive = i18n.Msg("briefing.tonight.adaptive")
     return _slots("briefing.tonight.plan", first=first, adaptive=adaptive)
 

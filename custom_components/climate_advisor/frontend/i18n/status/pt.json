@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "o sensor deixou de atualizar",
   "status.indoor_source.why.unavailable": "sensor indisponível",
   "status.next_action.close_doors_heater": "Feche as portas para ajudar o aquecimento.",
+  "status.next_action.close_up_keep_warmth": "Feche janelas e portas para guardar o calor.",
   "status.next_action.close_windows_by": "Feche as janelas até às {t}",
   "status.next_action.close_windows_heater": "Feche as janelas para ativar o aquecimento.",
   "status.next_action.close_windows_hold_heat": "Feche as janelas para manter o calor — lá fora está mais fresco ({outdoor} contra {indoor}).",

@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "सेंसर ने अपडेट होना बंद कर दिया",
   "status.indoor_source.why.unavailable": "सेंसर उपलब्ध नहीं",
   "status.next_action.close_doors_heater": "हीटिंग की मदद के लिए दरवाज़े बंद करें।",
+  "status.next_action.close_up_keep_warmth": "गर्माहट बचाने के लिए खिड़कियाँ और दरवाज़े बंद करें।",
   "status.next_action.close_windows_by": "{t} तक खिड़कियाँ बंद करें",
   "status.next_action.close_windows_heater": "हीटिंग चालू हो सके, इसके लिए खिड़कियाँ बंद करें।",
   "status.next_action.close_windows_hold_heat": "गर्मी बनाए रखने के लिए खिड़कियाँ बंद करें — बाहर ज़्यादा ठंडा है (बाहर {outdoor}, अंदर {indoor})।",

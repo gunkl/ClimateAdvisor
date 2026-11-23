@@ -917,5 +917,6 @@
   "dashboard.night.level.medium": "середня",
   "dashboard.status.fan_speed_high": "високу",
   "dashboard.status.fan_speed_low": "низьку",
-  "dashboard.status.fan_speed_medium": "середню"
+  "dashboard.status.fan_speed_medium": "середню",
+  "dashboard.chart.ds.band_advisory": "Цільовий діапазон (межа {family, select, cool {охолодження} other {обігріву}} лише порада: {reason, select, equipment {немає обладнання} outdoor_lockout {зовнішнє блокування} season {налаштування сезону} other {недоступно}})"
 }

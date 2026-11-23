@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "sensör güncellenmeyi durdurdu",
   "status.indoor_source.why.unavailable": "sensör kullanılamıyor",
   "status.next_action.close_doors_heater": "Isıtmaya yardımcı olmak için kapıları kapatın.",
+  "status.next_action.close_up_keep_warmth": "Sıcaklığı içeride tutmak için pencereleri ve kapıları kapatın.",
   "status.next_action.close_windows_by": "Pencereleri {t} saatine kadar kapatın",
   "status.next_action.close_windows_heater": "Isıtmanın çalışabilmesi için pencereleri kapatın.",
   "status.next_action.close_windows_hold_heat": "Isıyı korumak için pencereleri kapatın — dışarısı daha serin (dış {outdoor}, iç {indoor}).",

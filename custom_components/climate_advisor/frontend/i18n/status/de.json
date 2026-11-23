@@ -105,6 +105,7 @@
   "status.indoor_source.why.stale": "Sensor aktualisiert nicht mehr",
   "status.indoor_source.why.unavailable": "Sensor nicht verfügbar",
   "status.next_action.close_doors_heater": "Schließe die Türen, um die Heizung zu unterstützen.",
+  "status.next_action.close_up_keep_warmth": "Fenster und Türen schließen, damit die Wärme drinnen bleibt.",
   "status.next_action.close_windows_by": "Schließe die Fenster bis {t}",
   "status.next_action.close_windows_heater": "Schließe die Fenster, damit die Heizung arbeiten kann.",
   "status.next_action.close_windows_hold_heat": "Schließe die Fenster, um die Wärme zu halten — draußen ist es kühler ({outdoor} gegenüber {indoor}).",

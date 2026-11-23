@@ -46,6 +46,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from . import cycle_model, i18n, log_capture, prediction_engines, v4_shadow, window_span
+from . import zone_capability as zc
 from .ai_settings_sync import is_ai_configured, provider_of
 from .automation import (
     NAT_VENT_START_PREDICTION,
@@ -4814,6 +4815,87 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None
         return value if isinstance(value, dict) else None
 
+    def _shown_pre_cool_status(self) -> Any:
+        """Issue #1544: the pre-cool Status line, without a "scheduled" / "rescheduled" promise while the zone cannot
+        cool now (a lockout or the season engaged after the trigger was scheduled; the trigger then skips)."""
+        status = getattr(self, "_pre_cool_status", None)
+        if code_of(status, "") in ("scheduled", "rescheduled") and not _zone_service_of(self).cool:
+            return None
+        return status
+
+    def _band_advisory(self) -> dict[str, str] | None:
+        """Issue #1544: ``{"family", "reason"}`` of the edge the zone does not serve now (cool first), or None."""
+        unserved = _zone_service_of(self).unserved_reason()
+        if unserved is None:
+            return None
+        return {"family": unserved[0], "reason": unserved[1]}
+
+    def day_zone_service(self, now: datetime | None = None) -> zc.ZoneService:
+        """Issue #1544 (review): the zone service for DAY-LEVEL surfaces (the briefing, the day mode it shows, the
+        daily record's ``hvac_mode_recommended``).
+
+        Occupant view: in a desert summer with a 60 °F cool lockout, the 06:30 briefing (dawn 57 °F, high 98 °F) must
+        not say "no cooling today" while the AC runs all afternoon once the lockout releases. An OUTDOOR lockout is
+        projected over the rest of today's hourly forecast with the same hysteresis the engine steps
+        (``step_cool_lockout`` / ``step_heat_lockout``); if the forecast releases it today the family counts as served
+        for the day. Missing equipment and the season setting are not time-varying and stay as they are; with no
+        forecast the momentary answer stands.
+        """
+        service = _zone_service_of(self)
+        if service.full:
+            return service
+        engine = getattr(self, "automation_engine", None)
+        thresholds_fn = getattr(engine, "_zone_lockout_thresholds_f", None)
+        if thresholds_fn is None:
+            return service
+        try:
+            cool_thr, heat_thr = thresholds_fn()
+        except Exception:  # noqa: BLE001 - a display read: keep the momentary answer
+            return service
+        now = now if now is not None else dt_util.now()
+        today = dt_util.as_local(now).date()
+        hours = [
+            float(t)
+            for d, t in _parse_forecast_entries(getattr(self, "_hourly_forecast_temps", None))
+            if isinstance(t, (int, float)) and _aware_le(now, d) and dt_util.as_local(d).date() == today
+        ]
+        served = {"heat": service.heat, "cool": service.cool}
+        for family, threshold, step in (
+            ("cool", cool_thr, zc.step_cool_lockout),
+            ("heat", heat_thr, zc.step_heat_lockout),
+        ):
+            if served[family] or service.reason(family) != zc.REASON_OUTDOOR_LOCKOUT or threshold is None:
+                continue
+            engaged = True
+            for temp in hours:
+                engaged = step(engaged, temp, threshold)
+                if not engaged:
+                    served[family] = True
+                    break
+        if served["heat"] == service.heat and served["cool"] == service.cool:
+            return service
+        return dataclasses.replace(
+            service,
+            heat=served["heat"],
+            cool=served["cool"],
+            heat_reason=None if served["heat"] else service.heat_reason,
+            cool_reason=None if served["cool"] else service.cool_reason,
+        )
+
+    def zone_service(self) -> zc.ZoneService:
+        """Issue #1544: the families the plan, briefing, promises and judges may count on (the engine's
+        ``zone_service()``). Both when there is no engine or it cannot answer: every surface then behaves as before."""
+        engine = getattr(self, "automation_engine", None)
+        fn = getattr(engine, "zone_service", None)
+        if fn is None:
+            return zc.FULL_SERVICE
+        try:
+            value = fn()
+        except Exception:  # noqa: BLE001 - a display read must never break the update cycle
+            _LOGGER.debug("Zone service unavailable", exc_info=True)
+            return zc.FULL_SERVICE
+        return value if isinstance(value, zc.ZoneService) else zc.FULL_SERVICE
+
     def _track_indoor_comfort(self, indoor: float | None) -> None:
         """Record the indoor sample and the Comfort Score minutes for this cycle (indoor only, no weather; #1337)."""
         now_str = dt_util.now().isoformat()
@@ -5456,6 +5538,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         classification=self._current_classification,
                         band_schedule=self._target_band_schedule,
                         tou_precondition_window=self._tou_precondition_window_tuple(),
+                        zone_service=_zone_service_of(self),
                     )
                 )
             else:
@@ -6019,7 +6102,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FORECAST_LOW: c.today_low if c else None,
             ATTR_FORECAST_HIGH_TOMORROW: c.tomorrow_high if c else None,
             ATTR_FORECAST_LOW_TOMORROW: c.tomorrow_low if c else None,
-            "pre_cool_status": self._pre_cool_status,
+            "pre_cool_status": self._shown_pre_cool_status(),
             # Issue #1699: the Status line while an outdoor lockout or the season setting takes a side away.
             "zone_lockout_status": self._zone_lockout_status(),
             # Issue #361: WHF command-only mode status fields
@@ -8046,6 +8129,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 band_schedule=band_schedule,
                 tou_precondition_window=tou_window,
                 tomorrow_window=tomorrow_w,
+                zone_service=_zone_service_of(self),
             )
             pts = []
             for entry in out:
@@ -8127,9 +8211,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         day_modes[now.date()] = c.hvac_mode
         for _pd in plan_days[1:]:
             day_modes.setdefault(_pd["date"], _pd["hvac_mode"])
+        # Issue #1542: the plan simulates and promises only the families this zone serves now (equipment, lockouts
+        # and season through the zone capability resolver); operation_timeline.zone_masked() applies it.
+        service = _zone_service_of(self)
         return TimelineSnapshot(
             now=now,
             zone=self._entry_id,
+            can_heat=service.heat,
+            can_cool=service.cool,
+            released_now=tuple(f for f in ("heat", "cool") if service.released(f)),
             unit=self.config.get("temp_unit", "fahrenheit"),
             wake_time=_parse_time(self.config.get("wake_time", "06:30")),
             sleep_time=_parse_time(self.config.get("sleep_time", "22:30")),
@@ -8280,8 +8370,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             current.setdefault(str(model_dict.get("primary")), snap.indoor_primary)
         held = self._timeline_latch.timeline
         path = [(p.ts, p.temp_f) for p in (held.path if held is not None else ()) if p.sensor == "_ca"]
-        caps = self.automation_engine._get_thermostat_capabilities()
-        unknown = not (caps.supports_heat or caps.supports_cool)
+        # Issue #1544: the night plan runs only the families the zone serves (the timeline snapshot's own answer).
         model_thermal = snap.thermal_model or {}
         sleep_entity = self.config.get("sleep_indoor_temp_entity")
         inp = v4_shadow.night_inputs(
@@ -8298,8 +8387,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             target_sensor=sleep_entity or None,
             evidence=night_replay.evidence_from_record(record),
             validation=night_strategy.NightValidation.from_dict(record) if record else None,
-            can_heat=unknown or caps.supports_heat,
-            can_cool=unknown or caps.supports_cool,
+            can_heat=snap.can_heat,
+            can_cool=snap.can_cool,
             swing_heat_f=model_thermal.get("swing_heat_f"),
             swing_cool_f=model_thermal.get("swing_cool_f"),
             # Issue #1477 owner decision: the emulated bedroom loop uses the measured swing, like the live loop
@@ -9371,6 +9460,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 classification=self._current_classification,
                 band_schedule=self._target_band_schedule,
                 tou_precondition_window=self._tou_precondition_window_tuple(),
+                zone_service=_zone_service_of(self),
             )
         )
 
@@ -10215,12 +10305,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         bedtime_setback_heat: float | None = None
         bedtime_setback_cool: float | None = None
+        # Issue #1488: the briefing describes only what this zone serves (equipment, lockouts, season), and its bedtime
+        # set-back is sized on the side the zone actually holds (a heat-only zone on a hot day: the sleep floor).
+        service = ClimateAdvisorCoordinator.day_zone_service(self)
         if classification is not None:
-            hvac_mode = classification.hvac_mode
+            hvac_mode = service.shown_mode(classification.hvac_mode) or classification.hvac_mode
+            _shown_c = classification
+            if hvac_mode != classification.hvac_mode:
+                _shown_c = _with_hvac_mode(classification, hvac_mode)
             if hvac_mode == "heat":
-                bedtime_setback_heat = compute_bedtime_setback(self.config, thermal_model, classification)
+                bedtime_setback_heat = compute_bedtime_setback(self.config, thermal_model, _shown_c)
             elif hvac_mode == "cool":
-                bedtime_setback_cool = compute_bedtime_setback(self.config, thermal_model, classification)
+                bedtime_setback_cool = compute_bedtime_setback(self.config, thermal_model, _shown_c)
 
         _LOGGER.debug(
             "Bedtime setback: heat=%s cool=%s",
@@ -10276,6 +10372,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             current_hold=self.current_hold(),
             # Issue #1696: indoor / outdoor dew point and the decisions the humid-air guard changed today.
             humidity=self._briefing_humidity(),
+            zone_service=service,
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 
@@ -10309,7 +10406,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             window_close_time=(
                 classification.window_close_time.isoformat() if classification.window_close_time else None
             ),
-            hvac_mode_recommended=classification.hvac_mode,
+            # Issue #1544: the mode the zone runs today (the Analysis "HVAC mode" row): never cool on a heat-only zone.
+            hvac_mode_recommended=(
+                ClimateAdvisorCoordinator.day_zone_service(self).shown_mode(classification.hvac_mode)
+                or classification.hvac_mode
+            ),
             hvac_runtime_minutes=_prev.hvac_runtime_minutes if _prev else 0.0,
             hvac_heat_runtime_minutes=_prev.hvac_heat_runtime_minutes if _prev else 0.0,
             hvac_cool_runtime_minutes=_prev.hvac_cool_runtime_minutes if _prev else 0.0,
@@ -10461,6 +10562,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         band_schedule=self._target_band_schedule,
                         classification=classification,
                         tou_precondition_window=self._tou_precondition_window_tuple(),
+                        zone_service=_zone_service_of(self),
                     )
                 )
             else:
@@ -11187,6 +11289,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         resolution = getattr(self, "_tou_phase_resolution", None)
         if resolution is None or resolution.schedule_id is None:
             return None
+        if not self._tou_bank_family_allowed(resolution.mode):
+            # Issue #1544: the bank is suppressed in a family the zone cannot use now (phase 1), so the chart band,
+            # the predicted curve and the plan never draw or simulate it: the schedule band holds.
+            return None
         return (resolution.precondition_start, resolution.schedule_start, resolution.target, resolution.mode)
 
     def _compute_pre_cool_trigger_time(self) -> datetime | None:
@@ -11261,6 +11367,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1378: eligibility is judged for the trigger's own night (after midnight that night wakes into
         # TODAY, not the classification's tomorrow), the same way the scheduler and the handler judge it.
         _pc_trigger_time = self._compute_pre_cool_trigger_time() if self._current_classification else None
+        if _pc_trigger_time is not None and not _zone_service_of(self).cool:
+            _pc_trigger_time = None  # Issue #1544: no pre-cool dip drawn in a zone that cannot cool now
         if _pc_trigger_time is not None:
             _pc_modifier = self._pre_cool_modifier_for_night(_pc_trigger_time)
             if _pc_modifier is not None:
@@ -11845,6 +11953,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #1378: the night it was decided for is over (it fired before this morning's wake); decide the
             # next one now, while today's classification still sees that night's day as "tomorrow".
             self._pre_cool_trigger_scheduled = False
+        if not _zone_service_of(self).cool:
+            # Issue #1544: no overnight pre-cool is planned, shown or promised in a zone that cannot cool now (no
+            # cooling equipment, a cool lockout or the Heat-only season). Not marked scheduled: the next cycle asks
+            # again, so a lockout that releases this evening still gets tonight's pre-cool.
+            return
         trigger_time = self._compute_pre_cool_trigger_time()
         if trigger_time is None:
             return
@@ -11925,6 +12038,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         elif _result_code == "applied":
             self._pre_cool_status = CodedText("active", i18n.Msg("status.pre_cool_status.active", **_result_params))
+        elif _result_code == "skipped_cool_unavailable":
+            # Issue #1544: the zone could not cool when the trigger fired (a lockout or the season engaged after it
+            # was scheduled): the "Pre-cool scheduled" line must not stay on Status for a pre-cool that never runs.
+            self._pre_cool_status = None
         await self.async_refresh()
 
     def _maybe_reschedule_pre_cool_on_nat_vent_exit(self) -> None:
@@ -14778,6 +14895,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # (``house_is_sealed``), so the whf_sealed promise can never disagree with it -- including for a
             # MISSING sensor, which gets the same 60 s from start-up instead of counting closed at once.
             contacts = not house_is_sealed(self._whf_sensor_readings()[0])
+        service = _zone_service_of(self)
         return _PromiseReading(
             ts=now,
             hvac_mode=mode,
@@ -14793,6 +14911,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             contacts_open=contacts,
             automation_enabled=bool(self._automation_enabled),
             occupancy=self._promise_occupancy(),
+            # Issue #1544: P7 judges the DEFENDED view (a side the safety release runs now is judged).
+            serves_heat=service.defends("heat"),
+            serves_cool=service.defends("cool"),
         )
 
     def _promise_occupancy(self) -> str | None:
@@ -18143,6 +18264,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return _decide("keep_windows_blinds_closed", i18n.Msg("status.next_action.keep_windows_blinds_closed"))
         elif c.day_type == DAY_TYPE_COLD:
             if windows_physically_open:
+                if not _zone_service_of(self).heat:
+                    # Issue #1544 (mirror): no heater here (cool-only, a heat lockout, the season): keep the warmth in.
+                    return _decide("close_up_keep_warmth", i18n.Msg("status.next_action.close_up_keep_warmth"))
                 return _decide("close_doors_heater", i18n.Msg("status.next_action.close_doors_heater"))
             return _decide("keep_doors_closed", i18n.Msg("status.next_action.keep_doors_closed"))
 
@@ -18206,6 +18330,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         if heating_needed:
             if windows_physically_open:
+                if not _zone_service_of(self).heat:
+                    # Issue #1544 (mirror): there is no heater to enable; closing up keeps what warmth the house has.
+                    return _decide("close_up_keep_warmth", i18n.Msg("status.next_action.close_up_keep_warmth"))
                 return _decide("close_windows_heater", i18n.Msg("status.next_action.close_windows_heater"))
             if outdoor_temp is not None and direction_ok and not timeline_mode:
                 return _decide(
@@ -18521,6 +18648,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             startup_coalescing=bool(self._startup_coalesce_active),
             nat_vent_tolerated=nat_vent_tolerated,
             thermostat_swing_tolerated=swing_tolerated,
+            # Issue #1544: a direction the zone does not defend now (no equipment, a lockout or the season, not
+            # released by the safety rule) is outside what the zone can do: no "house is cold, nothing running" alert.
+            defended=_zone_service_of(self).defends,
         )
         self._stall_direction = decision.direction
         self._stall_since = decision.since
@@ -18859,8 +18989,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         THE one gate for the incident scan, the ``comfort_violations_minutes`` accumulation and the stall alert:
         nat-vent cycling tolerance (Issue #411) OR the thermostat's own swing (Issue #1258) OR the remote-sensor
-        loop's cycle/correction OR the wake-step recovery (Issue #1678).
+        loop's cycle/correction OR the wake-step recovery (Issue #1678) OR an edge the zone does not serve (#1544).
         """
+        # Issue #1544: past an edge this zone does not serve (above the ceiling with no cooling, below the floor with
+        # no heating: missing equipment, an outdoor lockout or the season). That edge is advisory: the breach is outside
+        # what the equipment (or the lockout) allows, never a Climate Advisor failure -- no incident, no Comfort Score
+        # minutes, no stall alert.
+        # Judged on the DEFENDED view: a side the safety release is running now is judged like any other.
+        service = _zone_service_of(self)
+        if (indoor > comfort_cool and not service.defends("cool")) or (
+            indoor < comfort_heat and not service.defends("heat")
+        ):
+            return True
         return self._is_nat_vent_tolerated_deviation(
             indoor, comfort_heat, comfort_cool
         ) or self._is_expected_control_deviation(indoor, comfort_heat, comfort_cool)
@@ -19224,7 +19364,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Card Ontology this is the one card it belongs on. Same compact "short label —
         # duration (ends HH:MM)" shape _format_grace_remaining() already established.
         _tou = getattr(self, "_tou_phase_resolution", None)
-        if _tou is not None and _tou.phase == TOUPhase.PRECONDITIONING:
+        # Issue #1544: a bank the zone cannot run (a lockout, the season, missing equipment) is suppressed (phase 1),
+        # so Status never says "pre-cooling" / "pre-heating" for it; the band in force is what the branches below say.
+        if (
+            _tou is not None
+            and _tou.phase == TOUPhase.PRECONDITIONING
+            and self._tou_bank_family_allowed(getattr(_tou, "mode", None))
+        ):
             # Issue #1404: the same sentence every surface quotes (current_hold()): what the house is pre-cooled /
             # pre-heated to, until when, and the band it goes back to. A bank that something defers (an unconfirmed
             # change, the whole-house fan) is not claimed: the branches below say what is in force. When the hold
@@ -20004,6 +20150,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.info("Next-automation (timeline): %s at %s", _label_text(_next_desc), _next_time)
             return (_label_text(_next_desc), _next_time)
 
+        # Issue #1544 (degraded path): name only the families the zone serves -- the day mode as the zone runs it,
+        # no pre-cool or "AC holds the ceiling" without cooling (the timeline path above is masked the same way).
+        _svc = _zone_service_of(self)
+        if not _svc.full:
+            c = _with_hvac_mode(c, _svc.shown_mode(c.hvac_mode) or c.hvac_mode)
+
         # Build list of upcoming scheduled events as (datetime, description).
         # Using full datetimes (not time objects) so cross-midnight events like
         # pre-cool (e.g. 2:30 AM tomorrow) compare correctly against now.
@@ -20061,7 +20213,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Pre-cool is scheduled for early tomorrow morning — its trigger_dt crosses
         # midnight, so only full-datetime comparison handles it correctly.
-        if self._pre_cool_trigger_dt and self._pre_cool_trigger_dt > now and self._pre_cool_target is not None:
+        if (
+            _svc.cool
+            and self._pre_cool_trigger_dt
+            and self._pre_cool_trigger_dt > now
+            and self._pre_cool_target is not None
+        ):
             unit = self.config.get("temp_unit", "fahrenheit")
             pc_desc = i18n.Msg("status.next_automation.pre_cool_ceiling", target=i18n.Temp(self._pre_cool_target, unit))
             candidates.append((self._pre_cool_trigger_dt, pc_desc))
@@ -20086,7 +20243,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # in this plan (the AC actually turns on) and is kept.
         _warm_events = getattr(self, "_nat_vent_plan", None)
         if (
-            c.windows_recommended
+            _svc.cool
+            and c.windows_recommended
             and _warm_events
             and _warm_events["ceiling_breach_time"]
             and _warm_events["ceiling_breach_time"] > now
@@ -20130,6 +20288,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _tou_next = getattr(self, "_tou_phase_resolution", None)
         if (
             _tou_next is not None
+            and _svc.serves(getattr(_tou_next, "mode", None))
             and _tou_next.precondition_start is not None
             and _tou_next.precondition_start > now
             and _tou_next.target is not None
@@ -20539,6 +20698,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 classification=self._current_classification,
                 band_schedule=_raw_band,
                 tomorrow_window=self._tomorrow_window_plan(),
+                zone_service=_zone_service_of(self),
             )
             predicted_indoor = [{"ts": p["ts"], "temp": _conv(p["temp"])} for p in _raw_predicted_indoor]
             _fallback_inputs = (_extended_forecast, now, _raw_band)
@@ -20623,6 +20783,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         classification=self._current_classification,
                         band_schedule=_fallback_inputs[2],
                         tomorrow_window=self._tomorrow_window_plan(),
+                        zone_service=_zone_service_of(self),
                     )
                 ]
             except Exception:  # noqa: BLE001 - optional line
@@ -20678,6 +20839,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _ae._natural_vent_active if _ae else False,
                 house_stepper=self.control_house_stepper() if _control_path is not None else None,
             )
+            # Issue #1544: the chart never shows the zone running a family it does not serve (an AC hour on a
+            # heat-only zone, the ceiling guard's cool escalation through a cool lockout): that hour is drawn off.
+            # The current hour shows what runs now: a side the safety release is running is drawn running.
+            _chart_svc = _zone_service_of(self)
+            if not (_chart_svc.full and _chart_svc.defends_both):
+                _now_hour_end = now + timedelta(hours=1)
+
+                def _shown_regime(ts: str, r: dict) -> dict:
+                    at = dt_util.parse_datetime(ts) if isinstance(ts, str) else None
+                    current = at is not None and _aware_le(at, _now_hour_end)
+                    mode = r.get("hvac_mode")
+                    ok = _chart_svc.defends(mode) if current else _chart_svc.serves(mode)
+                    return r if ok else {**r, "hvac_mode": "off"}
+
+                _regime_by_ts = {ts: _shown_regime(ts, r) for ts, r in _regime_by_ts.items()}
 
         # Issue #1436: the window and nat-vent flags per hour are the PLAN's (the operation timeline's window periods
         # and nat-vent sessions, the same spans the chart's faded strips draw), never the regime walk's: the walk knows
@@ -20813,7 +20989,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "historical_setpoint": [
                 {"ts": e["ts"], "setpoint": _conv(e["setpoint"])} for e in _extract_historical_setpoint(log_entries)
             ],
-            "defense_lines": [] if is_historical else _compute_defense_lines(_conv_band),
+            "defense_lines": [] if is_historical else _compute_defense_lines(_conv_band, _zone_service_of(self)),
+            # Issue #1544: the band edge the zone does not serve is advisory (drawn so, with its reason), never a
+            # promise: {"family": "cool", "reason": "equipment"}; None when both edges are served.
+            "band_advisory": None if is_historical else self._band_advisory(),
             "predicted_activity": _predicted_activity,
             "effective_target_history": _effective_target_history,
             "effective_target_forecast": _effective_target_forecast,
@@ -21967,6 +22146,29 @@ def _tou_bank_key(hold: Any) -> tuple | None:
     return (bank.schedule_id, bank.ends.isoformat(), round(bank.target, 1), bank.mode)
 
 
+def _aware_le(a: datetime, b: datetime) -> bool:
+    """``a <= b`` for a mix of naive and aware datetimes (a naive one is read as local time)."""
+    try:
+        return a <= b
+    except TypeError:
+        return dt_util.as_local(a) <= dt_util.as_local(b)
+
+
+def _with_hvac_mode(c: DayClassification, mode: str) -> DayClassification:
+    """Issue #1544: ``c`` with its day mode replaced, for display. A shallow copy, never ``dataclasses.replace()``:
+    DayClassification re-derives its recommendations (hvac_mode included) in ``__post_init__``."""
+    out = copy.copy(c)
+    out.hvac_mode = mode
+    return out
+
+
+def _zone_service_of(coord: Any) -> zc.ZoneService:
+    """Issue #1544: ``ClimateAdvisorCoordinator.zone_service`` for ``coord``, read through the class so a partially
+    built coordinator (tests bind single methods onto stubs) still gets a real answer: both families unless its
+    engine answers."""
+    return ClimateAdvisorCoordinator.zone_service(coord)
+
+
 def _compute_target_band_schedule(
     hourly_timestamps: list,
     config: dict,
@@ -22235,8 +22437,13 @@ def _build_predicted_indoor_future(
     band_schedule: list[dict] | None = None,
     tou_precondition_window: tuple[datetime, datetime, float, str] | None = None,
     tomorrow_window: tuple[bool, Any, Any] | None = None,
+    zone_service: zc.ZoneService | None = None,
 ) -> list[dict]:
     """Build future predicted indoor temps from the automation plan.
+
+    ``zone_service`` (Issue #1544): the families the zone serves. A day mode the zone cannot run (cool on a heat-only
+    zone, heat on a cool-only one, or a side a lockout / the season takes away) is simulated as passive drift, the
+    nearest-edge heating override needs heat, and the overnight pre-cool needs cool. None = both (unchanged).
 
     Window-open hours (k_vent_window substitution) follow ``window_span.planned_window_spans``, the one rule v4 uses
     (Issue #1391): today's planned span on today's date and, when known, ``tomorrow_window`` (recommended, open, close)
@@ -22309,6 +22516,7 @@ def _build_predicted_indoor_future(
     # _compute_day_hvac_modes() so the chart's forward regime prediction can reuse the
     # exact same per-day classification instead of a second, divergent copy) ---
     day_modes = _compute_day_hvac_modes(hourly_forecast, now, classification)
+    _service = zone_service if zone_service is not None else zc.FULL_SERVICE
     if not day_modes:
         _LOGGER.warning(
             "_build_predicted_indoor_future: no valid entries in %d-entry forecast — "
@@ -22417,6 +22625,8 @@ def _build_predicted_indoor_future(
             if classification is not None
             else None
         )
+        if _ode_pc_modifier is not None and not _service.cool:
+            _ode_pc_modifier = None  # Issue #1544: no overnight pre-cool in a zone that cannot cool now
         if _ode_pc_modifier is not None:
             from .const import (
                 PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
@@ -22477,6 +22687,8 @@ def _build_predicted_indoor_future(
             continue
         outdoor = entry.get("temperature")
         mode = day_modes.get(local_ts.date(), "off")
+        if not _service.serves(mode):
+            mode = "off"  # Issue #1544: nothing runs the family this zone cannot serve; the house drifts
 
         # Look up pre-computed band entry for this timestamp
         _band = _band_lookup.get(local_ts.isoformat(), {"lower": comfort_heat, "upper": comfort_cool})
@@ -22527,6 +22739,7 @@ def _build_predicted_indoor_future(
                 and _arm_decision.breach
                 and _arm_decision.target_family == "heating"
                 and mode != "heat"
+                and _service.heat
             ):
                 _LOGGER.debug(
                     "_build_predicted_indoor_future: hour=%s nearest-edge arming overrides day mode %s -> heat "
@@ -23318,14 +23531,20 @@ def _extract_historical_target_band(log_entries: list[dict]) -> list[dict]:
     return result
 
 
-def _compute_defense_lines(target_band: list[dict]) -> list[dict]:
-    """Return [{ts, heat, cool}] from target_band — always both bounds, never null.
+def _compute_defense_lines(target_band: list[dict], zone_service: zc.ZoneService | None = None) -> list[dict]:
+    """Return [{ts, heat, cool}] from target_band — both bounds for a zone that serves both families.
 
     Unlike _derive_predicted_setpoint (single bound per hvac_mode), this always
     exposes both the heat-defense threshold (lower) and cool-defense threshold (upper)
     so the frontend can render them as always-present automation intent lines.
+    Issue #1544: a family the zone does not serve defends nothing, so its line is None (the band edge stays, drawn as
+    advisory from ``band_advisory``).
     """
-    return [{"ts": e["ts"], "heat": e.get("lower"), "cool": e.get("upper")} for e in target_band]
+    svc = zone_service if zone_service is not None else zc.FULL_SERVICE
+    return [
+        {"ts": e["ts"], "heat": e.get("lower") if svc.heat else None, "cool": e.get("upper") if svc.cool else None}
+        for e in target_band
+    ]
 
 
 def _walk_forward_regime(

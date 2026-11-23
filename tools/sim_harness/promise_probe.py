@@ -517,7 +517,21 @@ class FakeHassPromiseSource:
             contacts_open=contacts_open,
             automation_enabled=self._automation_enabled(),
             occupancy=self._occupancy(),
+            # Issue #1544: as production's reading (``_promise_reading_now``): the families the zone serves.
+            serves_heat=self._serves("heat"),
+            serves_cool=self._serves("cool"),
         )
+
+    def _serves(self, family: str) -> bool | None:
+        """Whether the engine's zone can run ``family`` now (``zone_service().defends()``, the judging view production's
+        reading uses: a side the safety release runs is judged), None if unknown."""
+        fn = getattr(self._s.engine, "zone_service", None)
+        if fn is None:
+            return None
+        try:
+            return bool(fn().defends(family))
+        except Exception:  # noqa: BLE001 - a probe never breaks a run
+            return None
 
     def _occupancy(self) -> str | None:
         """The engine's occupancy mode, as production's reading takes it (``_promise_occupancy``, #1411)."""

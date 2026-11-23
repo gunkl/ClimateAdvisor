@@ -25,7 +25,7 @@ The automation logic table and all threshold constants in this document are expr
 | What happens when the thermostat reads several degrees high after the furnace trips its high limit (Issue #1676)? | A 2.5 °F jump within 5 min of a reading, within 10 min of heating, starts a recalibration episode: WARNING, an ignorable Repairs notice, the room read from the sleep or dedicated sensor until the reading is back within 1 °F for 5 min (max 60 min), learning paused. Option `thermostat_recalibration_guard`. | [Bug E — thermostat recalibration](08-COMPUTATION-REFERENCE.md#bug-e--thermostat-recalibration-after-a-furnace-high-limit-trip-issue-1676) |
 | Which log line says Climate Advisor switched the sensor it reads the room temperature from (thermostat, its finer sensor, dedicated or sleep sensor)? | One INFO line per real switch per zone: `Zone "<title>": room temperature now from "<name>" (<id>, <role>, <°F>) instead of "<name>" (<id>, <role>, <°F>): <reason>`, plus an `indoor_source_changed` Activity row (Issue #1230 R1c, 0.9.3). Silent during startup coalescing; one `room temperature using ...` line after it. Owner: `coordinator._note_indoor_source()`; the resolver logs DEBUG only. | [Bug C — Indoor source changes](08-COMPUTATION-REFERENCE.md#bug-c--sleep-window-bedroom-sensor-override-issue-895) |
 | Which log line says Climate Advisor switched the humidity source a Status chart line reads (room, bedroom, outdoor)? | One INFO line per real change per role per zone: `Zone "<title>": <room\|bedroom\|outdoor> humidity now from <new> instead of <old>: <reason>`, each source written `"<friendly name>" (<id>, <kind>, <RH>%)` or `no humidity source`, plus a `humidity_source_changed` Activity row (Issue #1455, 0.9.11). Reasons: `the chosen sensor is unavailable`, `back to your chosen sensor`, `no humidity sensor found on the device`, `weather service (no outdoor humidity sensor)`, `humidity sensor found on the device`. Silent during startup coalescing and on repeats; one `<role> humidity using ...` line after it. Same writer as the room-temperature line (`coordinator._announce_source()`). Chart only: no Repairs card. | [Chart Log Spec](chart-log-spec.md#humidity-source-changes-issue-1455) |
-| What dew point does Climate Advisor carry for decisions, and what makes it unknown (Issue #1690)? | `EngineFacts.indoor_dew_point_f` / `outdoor_dew_point_f` (+ the source used): the chart's humidity source paired with the same device's temperature (read as the temperature readers read it), Magnus (`feels_like.dew_point_f`), median of 15 min of 5-min samples. Unknown on no source, stale (indoor 120 min, outdoor 6 h), non-% unit, no same-device temperature, thermostat recalibrating, or a reconnect glitch (0 % / 32 °F, a lone 0 % RH). Sleep window: bedroom, else the room. Read by the humid-air guard on fan starts (Issue #1691). | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
+| What dew point does Climate Advisor carry for decisions, and what makes it unknown (Issue #1690)? | `EngineFacts.indoor_dew_point_f` / `outdoor_dew_point_f` (+ the source used): the chart's humidity source paired with the same device's temperature (read as the temperature readers read it), Magnus (`feels_like.dew_point_f`), median of 15 min of 5-min samples. Unknown on no source, stale (indoor 120 min, outdoor 6 h), non-% unit, no same-device temperature (indoor; outdoor falls back to the weather entity's dew point, else its temperature + humidity, Issue #1709), thermostat recalibrating, or a reconnect glitch (0 % / 32 °F, a lone 0 % RH). Sleep window: bedroom, else the room. Read by the humid-air guard on fan starts (Issue #1691). | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
 | Why did the fan not start on a humid night (Issue #1691)? | The humid-air guard: outdoor dew point at or above `humid_air_guard_ceiling_f` (65 °F), or at least 55 °F and 2 °F above the house's (1 °F hysteresis). Every fan start asks it (5 nat-vent start profiles incl. soft start, economizer, cycling-on, whole-house-fan min-runtime); the Next Automation prediction does not. One `nat_vent_humid_skip` row per humid spell, INFO `Fan start skipped: humid outdoor air ...`, a Status line on the outdoor card. | [Humid-air guard on fan starts](08-COMPUTATION-REFERENCE.md#humid-air-guard-on-fan-starts-issue-1691) |
 | With `hvac_fan_restrict_mode` Heat only, why did the blower run (or not) right after cooling (Issue #1693)? | The "cooled within the last 2 h" clause holds only while the house is humid: indoor dew point at or above `HVAC_FAN_RESTRICT_DP_F` (55 °F), released at `HVAC_FAN_RESTRICT_DP_RELEASE_F` (54 °F), latch `hvac_fan_restrict_humid` in `humidity_facts.LATCH_SPECS` (5-minute tick, read from `EngineFacts`). Unknown indoor dew point = the 2 h rule as before. "Currently in cool mode", `both` (default), the whole-house fan and the Cool only ("heated within 2 h") restriction ignore humidity. INFO `Feature suppressed: HVAC fan not activated — ... humid indoors (indoor_dew_point_f=X)` or `HVAC fan restriction lifted: ... dry indoors`. | [hvac_fan_restrict_mode](08-COMPUTATION-REFERENCE.md#hvac_fan_restrict_mode--heatcoolboth-restriction-issue-835) |
 | Can the outdoor sensor's reconnect value (0 % / 32 °F) reach an outdoor temperature decision (Issue #1689)? | No: `_read_outdoor_sensor` rejects it (`paired_glitch`: 0 % same-device humidity with exactly 32.0 °F, or a first reading of exactly 32.0 °F within 30 s after `unavailable` / `unknown`) as `implausible`; the weather service answers until the sensor's next reading or the 5-minute refresh. Any other first reading is used at once. | [Dew-point facts](08-COMPUTATION-REFERENCE.md#dew-point-facts-issue-1690) |
@@ -4284,7 +4284,8 @@ overcool ([below](#humid-overcool-issue-1694)); unknown always means today's beh
     `current_humidity` attribute with the climate's own temperature. Temperatures are read exactly as the temperature
     readers read them (the configured unit, `read_sensor_state_f` / `read_attribute_temp_f`), so the dew point never
     pairs with a different number from the one the decisions act on; only the weather entity is read in its own
-    `temperature_unit` (as the forecast is). No same-device temperature -> `no_temperature`.
+    `temperature_unit` (as the forecast is). No same-device temperature -> `no_temperature` (indoor; outdoor see
+    the weather fallback below).
   - **Unit.** A humidity sensor whose unit is not `%` (or has none) -> `wrong_unit`.
   - **Freshness** (`temperature.is_sensor_stale`, on the humidity and on its temperature): indoor
     `HUMIDITY_INDOOR_FRESHNESS_MINUTES` (= `REMOTE_OFFSET_FRESHNESS_MINUTES`, 120 min); outdoor
@@ -4307,6 +4308,20 @@ overcool ([below](#humid-overcool-issue-1694)); unknown always means today's beh
   bedroom, falling back to the day room when the bedroom has none (dew point is house-wide: the bedroom reads 2-5 %
   RH higher only because it is cooler). Outdoor: the outdoor sensor's humidity, else the weather entity's `dew_point`
   (its own `temperature_unit`), else its `temperature` with its `humidity`.
+- **Outdoor weather fallback (Issue #1709).** Occupant view: with a humidity-only outdoor sensor (no temperature on
+  its device) the outdoor dew point used to be unknown, so the humid-night guard never acted. Now, for the OUTDOOR
+  role only, a humidity sensor whose same-device temperature is missing (`no_temperature`), unreadable
+  (`unavailable`, `entity_missing`, `non_numeric`, ...) or stale falls back to the weather entity through the same
+  reader path used when no outdoor humidity sensor is configured (its `dew_point`, else its `temperature` +
+  `humidity`; the stale, plausibility and glitch checks apply to the weather values). The fact's source then names
+  the weather (`weather.x#humidity`, paired `weather.x#dew_point` / `#temperature`); `DewPoint.fallback_from` /
+  `fallback_reason` keep the sensor and why. A stale humidity reading, a wrong unit or an implausible / glitching
+  sensor temperature do NOT fall back (unknown as before); a weather entity that is unusable too leaves the sensor's
+  reason. Indoor stays strict (same device only). Logged once per change by `_note_outdoor_dew_point_source` (the
+  5-minute sample, `_source_changed` / `_announce_source`): `Zone "<z>": outdoor dew point using weather service
+  weather.x#dew_point (dew_point_f=68.00): outdoor humidity sensor <id> has no usable temperature (<reason>)`, and a
+  `now from ... instead of ...` line when the sensor pair answers again; installs that never fall back log nothing.
+  The chart keeps the sensor's raw humidity. Tests: `tests/test_outdoor_dp_weather_fallback_1709.py`.
 - **Smoothing.** The coordinator's 5-minute tick (`_sample_humidity_facts`, the only writer) stores one sample per
   signal in `DewPointHistory`; the fact is the median of the last `HUMIDITY_MEDIAN_WINDOW_MINUTES` (15 min) of samples
   plus the reading at the decision. The window belongs to one humidity source: a sample or reading from another
@@ -4331,6 +4346,9 @@ overcool ([below](#humid-overcool-issue-1694)); unknown always means today's beh
 | unknown | known | yes | no | today's rule | off |
 | known | unknown | no | no | yes | yes |
 | unknown | unknown | no | no | today's rule | off |
+
+The outdoor dew point is unknown only when the outdoor humidity source AND (since Issue #1709) the weather entity
+are both unusable: a humidity-only outdoor sensor reads the weather's dew point instead.
 
 **Outdoor temperature reconnect glitch (Issue #1689).** `coordinator._read_outdoor_sensor` (the single reader of the
 dedicated outdoor sensor) applies `paired_glitch` to every reading: the humidity on the outdoor sensor's own device

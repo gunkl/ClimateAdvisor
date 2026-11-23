@@ -7313,6 +7313,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif reading.reason != "glitch":
                 history.clear(signal)
             dew_points[signal] = decision_dew_point(reading, history, signal, now).dp_f
+            if signal == SIGNAL_OUTDOOR:
+                self._note_outdoor_dew_point_source(reading)
             _LOGGER.debug(
                 "Dew point sample: signal=%s dp_f=%s reason=%s humidity=%s temperature=%s",
                 signal,
@@ -7333,6 +7335,50 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             note = getattr(engine, "note_humid_spell_over", None)
             if callable(note):
                 note()
+
+    def _note_outdoor_dew_point_source(self, reading: DewPoint) -> None:
+        """Announce, once per change, that the outdoor dew point comes from the weather service because the outdoor
+        humidity sensor has no usable temperature, and when it is back on the sensor (Issue #1709).
+
+        Occupant view: with a humidity-only outdoor sensor the humid-night guard (fan starts, window advice) reads the
+        weather service's dew point; the log says so instead of the guard quietly using another source. Same
+        mechanism as the humidity sources (``_source_changed`` / ``_announce_source``): one INFO line per real
+        change, nothing for a repeat or during the startup coalesce. Installs that never fall back log nothing. Values
+        at native resolution. Event loop only (the 5-minute sample). Never raises.
+        """
+        try:
+            if not reading.known:
+                return
+            key = "dew_point:outdoor"
+            fell_back = reading.fallback_from is not None
+            using = reading.temp_source if fell_back else reading.humidity_source
+            if not fell_back and key not in self._sources_announced_map():
+                return
+            if not self._source_changed(key, using):
+                return
+            if fell_back:
+                to_text = f"weather service {reading.temp_source} (dew_point_f={fmt_dp_log(reading.dp_f)})"
+                why = (
+                    f"outdoor humidity sensor {reading.fallback_from} has no usable temperature "
+                    f"({reading.fallback_reason})"
+                )
+            else:
+                to_text = (
+                    f"{reading.humidity_source} with {reading.temp_source} (dew_point_f={fmt_dp_log(reading.dp_f)})"
+                )
+                why = "the outdoor humidity sensor's temperature is usable again"
+            previous = self._sources_announced_map().get(key)
+            self._announce_source(
+                key,
+                using,
+                subject="outdoor dew point",
+                to_text=to_text,
+                from_text=str(previous),
+                reason=why,
+                using_note=why,
+            )
+        except Exception:  # noqa: BLE001 - log text must never fail the sample
+            _LOGGER.debug("dew point: could not announce the outdoor dew-point source", exc_info=True)
 
     def _humidity_source_kind(self, role: str, source: str | None, chosen: str | None) -> str | None:
         """Code of the kind of a humidity source (Issue #1455): ``chosen``, ``weather_service``, ``thermostat`` or

@@ -31,7 +31,10 @@ Reasons a dew point is unknown (``DewPoint.reason``). Seven from the indoor/outd
 ``implausible`` (temperature outside the plausible range, or no dew point for the pair) and ``stale``; plus four of
 its own: ``wrong_unit`` (a humidity sensor whose unit is not %), ``no_temperature`` (no temperature on the
 humidity's device), ``recalibrating`` (the paired temperature is the thermostat's while it reads falsely high after a
-heating shutdown, Issue #1676) and ``glitch`` (``paired_glitch``, or 0 % RH).
+heating shutdown, Issue #1676) and ``glitch`` (``paired_glitch``, or 0 % RH). Outdoor only (Issue #1709): a humidity
+sensor whose same-device temperature is missing, unreadable or stale does not make the dew point unknown; the weather
+entity answers instead (``DewPoint.fallback_from`` / ``fallback_reason`` say so), exactly as when no outdoor humidity
+sensor is configured.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ import math
 import statistics
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -167,6 +170,9 @@ class DewPoint:
     humidity_source: str | None = None
     temp_source: str | None = None
     reason: str | None = None
+    # Issue #1709: the outdoor humidity sensor this reading fell back from (its temperature was not usable), and why.
+    fallback_from: str | None = None
+    fallback_reason: str | None = None
 
     @property
     def known(self) -> bool:
@@ -229,6 +235,9 @@ def read_dew_point(
     are the entities reading falsely while the thermostat recalibrates (its own and its device's): pairing with one
     is ``recalibrating``. Staleness uses ``temperature.is_sensor_stale`` on both the humidity and the temperature,
     with the shared exemption (``configured_sources``: entity -> the source the occupant configured for it).
+    Outdoor role only (Issue #1709): a humidity sensor without a usable same-device temperature (none, unreadable or
+    stale) falls back to ``fallback_entity`` (the weather entity) through this same reader, so the weather values get
+    every check they get when no outdoor humidity sensor is configured; unknown only when the weather is unusable too.
     """
     try:
         rh, source, via = resolve_humidity_paired(
@@ -276,16 +285,45 @@ def read_dew_point(
             unit_attr = (getattr(h_state, "attributes", None) or {}).get("unit_of_measurement")
             if unit_attr != "%":
                 return _unknown("wrong_unit", rh=rh, source=source)
+
+            def _no_usable_temperature(missing: DewPoint) -> DewPoint:
+                """Issue #1709: an OUTDOOR humidity sensor without a usable same-device temperature falls back to
+                the weather entity's own dew point (else its own temperature + humidity): the very path used when no
+                outdoor humidity sensor is configured, with its checks. Indoor stays strict (same device only)."""
+                if not outdoor or not fallback_entity:
+                    return missing
+                weather = read_dew_point(
+                    hass,
+                    role,
+                    chosen=None,
+                    source_entities=(),
+                    fallback_entity=fallback_entity,
+                    discover=discover,
+                    discover_temp=discover_temp,
+                    unit=unit,
+                    stale_hours=stale_hours,
+                    now=now,
+                    reconnect=reconnect,
+                    configured_sources=configured_sources,
+                )
+                if not weather.known and weather.reason != REASON_GLITCH:
+                    return missing
+                return replace(weather, fallback_from=source, fallback_reason=missing.reason)
+
             candidates: tuple[str, ...] = (via,) if via else tuple(discover_temp(source))
             if not candidates:
-                return _unknown("no_temperature", rh=rh, source=source)
+                return _no_usable_temperature(_unknown("no_temperature", rh=rh, source=source))
             temp_entity = candidates[0]
             temp_f, t_reason, temp_state = _read_temp(hass, temp_entity, unit)
             temp_source = temp_entity
             if t_reason is not None or temp_f is None:
-                return _unknown(t_reason or "no_temperature", rh=rh, source=source, temp=temp_source)
+                return _no_usable_temperature(
+                    _unknown(t_reason or "no_temperature", rh=rh, source=source, temp=temp_source)
+                )
             if _stale(h_state, stale_hours, now, h_entity, configured_sources):
                 return _unknown(REASON_STALE, rh=rh, source=source, temp=temp_source)
+            if _stale(temp_state, stale_hours, now, temp_entity, configured_sources):
+                return _no_usable_temperature(_unknown(REASON_STALE, rh=rh, source=source, temp=temp_source))
         if _stale(temp_state, stale_hours, now, temp_entity, configured_sources):
             return _unknown(REASON_STALE, rh=rh, source=source, temp=temp_source)
         if temp_entity in set(false_entities):

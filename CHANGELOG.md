@@ -11,6 +11,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ### Changed
 - #1694: with Humid Overcool on, the chart log gains a row each time the thermostat reports an overcool step (`setpoint_change`), so learning sees every commanded step at the moment it landed. With the option off the chart log, the logs and every setpoint are unchanged.
 
+### Fixed
+- Fix #1709 (humidity, part of #1507): if your outdoor humidity comes from a sensor that reports humidity only (no temperature on the same device), the humid-night guard now works for you. Before, Climate Advisor could not work out the outdoor dew point from that sensor, so on a muggy night the whole-house fan or blower could still start and the windows could still be suggested. Now, when the outdoor humidity sensor has no usable temperature of its own (none, unavailable or not updated for 6 hours), the outdoor dew point comes from your weather service (its dew point, else its own temperature and humidity), exactly as when no outdoor humidity sensor is set up, and the log says once which source it uses and when the sensor takes over again. The Status chart still shows your sensor's own humidity. Indoor humidity is unchanged: an indoor sensor still needs a temperature on the same device.
+
 ## [0.9.79] — 2026-11-23
 
 ### Fixed

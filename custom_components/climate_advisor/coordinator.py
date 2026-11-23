@@ -12308,14 +12308,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             or self._is_recent_hvac_command()
         )
 
-    def _supersede_thermostat_override(self, old_mode: str, new_mode: str) -> None:
-        """Fix D (#282): the occupant switched to a different mode during an override -- supersede it, re-detect."""
+    def _supersede_thermostat_override(
+        self,
+        old_mode: str,
+        new_mode: str,
+        *,
+        source: str = "normal",
+        old_setpoint_f: float | None = None,
+        new_setpoint_f: float | None = None,
+    ) -> None:
+        """Fix D (#282): the occupant changed the thermostat during an override -- supersede it, re-detect.
+
+        A different mode (#201/#1216), or a new setpoint in the override's own mode (``source="setpoint"``, Issue
+        #1712): either way it is the occupant's newest action and gets its own confirmation and its own hold.
+        """
         ae = self.automation_engine
-        _LOGGER.info(
-            "New mode change during active override grace: %s → was overriding %s — restarting",
-            new_mode,
-            ae._manual_override_mode,
-        )
+        if source == "setpoint":
+            _LOGGER.info(
+                "New setpoint during active override grace: %s -> %s F (mode=%s) — restarting (Issue #1712)",
+                old_setpoint_f,
+                new_setpoint_f,
+                new_mode,
+            )
+        else:
+            _LOGGER.info(
+                "New mode change during active override grace: %s → was overriding %s — restarting",
+                new_mode,
+                ae._manual_override_mode,
+            )
         # Issue #664: this is the real production trigger for OVERRIDE_SUPERSEDED,
         # not OVERRIDE_CANCELLED — clear_manual_override() here never calls
         # _cancel_grace_timers() (Issue #282's "Fix D" deliberately leaves the
@@ -12336,9 +12356,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         decide_sync(
             self,
             ae.handle_manual_override,
+            source=source,
             old_mode=old_mode,
             new_mode=new_mode,
             classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
+            old_setpoint_f=old_setpoint_f,
+            new_setpoint_f=new_setpoint_f,
         )
 
     def _ca_fan_command_in_flight(self) -> bool:
@@ -13830,6 +13853,48 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # block is skipped -- the rest of the handler (fan_mode detection, runtime tracking) still has
                 # to run for the same event, so this is a guarded skip, not a function return.
                 _LOGGER.info("Setpoint change skipped: non-numeric reading, no override registered")
+            elif _mode_override_detected:
+                pass  # the mode block already registered this event's change: one event, one override
+            elif ae._manual_override_active and new_state.state == ae._manual_override_mode:
+                # Issue #1712: a new setpoint in the held override's own mode is the occupant's newest action. It
+                # used to be dropped here, so the FIRST hold's expiry put the plan back over it. Supersede the held
+                # override exactly like a second mode change (Fix D, #201/#1216): its grace keeps running until the
+                # new change is confirmed and gets its own full hold.
+                self._supersede_thermostat_override(
+                    old_state.state,
+                    new_state.state,
+                    source="setpoint",
+                    old_setpoint_f=old_setpoint_f,
+                    new_setpoint_f=new_setpoint_f,
+                )
+            elif (
+                ae._override_confirm_pending
+                and not ae._manual_override_active
+                and (ae._override_confirm_source == "setpoint" or new_state.state != ae._override_confirm_mode)
+            ):
+                # Issue #1712 (pending side): a setpoint change inside the confirmation window is the newest change;
+                # record it and restart the window from it as a setpoint change. That covers a second setpoint, and a
+                # pending mode change the occupant has since switched back from (it would self-resolve and take the
+                # new setpoint with it). A pending MODE change still showing confirms against the live thermostat,
+                # setpoint included, so it is left to run.
+                _LOGGER.info(
+                    "Setpoint changed again while pending confirmation: %s -> %s (mode=%s) — restarting (Issue #1712)",
+                    old_temp,
+                    new_temp,
+                    new_state.state,
+                )
+                decide_sync(
+                    self,
+                    ae.handle_manual_override,
+                    source="setpoint",
+                    old_mode=old_state.state,
+                    new_mode=new_state.state,
+                    classification_mode=(
+                        self._current_classification.hvac_mode if self._current_classification else None
+                    ),
+                    old_setpoint_f=old_setpoint_f,
+                    new_setpoint_f=new_setpoint_f,
+                )
             elif (
                 not ae._manual_override_active
                 and not ae._override_confirm_pending

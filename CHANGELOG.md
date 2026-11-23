@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.81] — 2026-11-23
+
+### Fixed
+- Fix #1712: if you change the thermostat's temperature while Climate Advisor is already holding an earlier change of yours (for example you set 69 °F, then later 67 °F or 70 °F), your newest temperature now gets its own full hold. Before, it was ignored: the Activity log didn't show it, and when the earlier hold ran out Climate Advisor put the schedule back over it, sometimes minutes after you set it. A change made inside the 10-minute confirmation is now recorded too and confirms from your newest setting.
+
 ## [0.9.80] — 2026-11-23
 
 ### Added

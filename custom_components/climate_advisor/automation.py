@@ -4790,7 +4790,16 @@ class AutomationEngine:
         should_deactivate = _cycle_off_transition.cycle_should_deactivate
         wait_sec = _cycle_off_transition.cycle_delay_seconds
 
-        if should_deactivate:
+        if should_deactivate and (self.economizer_session_active or self._natural_vent_active):
+            # Issue #1705 (mirror): window cooling or natural ventilation has taken this blower over during the run.
+            # The cycle ends, but the fan is theirs now: stopping it would cut their free cooling.
+            self._fan_min_runtime_active = False
+            _LOGGER.info(
+                "Min-runtime cycle ended: fan left running, taken over by %s role=%s",
+                "economizer" if self.economizer_session_active else "nat-vent",
+                self.role,
+            )
+        elif should_deactivate:
             self._fan_min_runtime_active = False
             if await self._deactivate_fan(reason="min_runtime_cycle_complete") is FanCommandResult.DRY_RUN:
                 # Issue #1304: observe-only sent no stop, so the cycle's run is still going.
@@ -13485,14 +13494,16 @@ class AutomationEngine:
                 self._today_record.setback_skipped_reason = "no_classification"
             # No sleep target available — deactivate fan/economizer unless nat-vent/WHF owns it.
             if _gate != ScheduledBandGate.DEFER_NAT_VENT:
+                # Issue #1705: window cooling's own teardown first (its fan stop, comfort restore and log). Stopping
+                # the fan first would end the session through _deactivate_fan()'s hook and skip all of that.
+                if self.economizer_session_active:
+                    await self._deactivate_economizer(outdoor_temp=0)
                 if self._fan_active and not _fan_was_overridden:
                     _no_class_result = await self._deactivate_fan(reason=_R("reason_bedtime_no_classification"))
                     # Issue #931: was an unconditional clear — now routed through the
                     # shared sole writer so a rate-limited/deferred command doesn't
                     # strand the fan running with the retry mechanism disarmed.
                     self._end_nat_vent_session(_no_class_result)
-                if self.economizer_session_active:
-                    await self._deactivate_economizer(outdoor_temp=0)
             return
 
         _sleep_band = select_comfort_band(
@@ -13514,14 +13525,15 @@ class AutomationEngine:
         if _gate == ScheduledBandGate.DEFER_NAT_VENT:
             _LOGGER.info("Bedtime: nat-vent/WHF session active — leaving fan alone")
         else:
+            # Issue #1705: window cooling's own teardown first (see the no-classification branch above).
+            if self.economizer_session_active:
+                await self._deactivate_economizer(outdoor_temp=0)
             if self._fan_active and not _fan_was_overridden:
                 _not_active_result = await self._deactivate_fan(reason=_R("reason_bedtime_nv_not_active"))
                 # Issue #931: was an unconditional clear — now routed through the
                 # shared sole writer so a rate-limited/deferred command doesn't
                 # strand the fan running with the retry mechanism disarmed.
                 self._end_nat_vent_session(_not_active_result)
-            if self.economizer_session_active:
-                await self._deactivate_economizer(outdoor_temp=0)
 
         if (
             _gate == ScheduledBandGate.DEFER_NAT_VENT

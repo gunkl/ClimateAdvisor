@@ -13,6 +13,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 
 ### Fixed
 - Fix #1709 (humidity, part of #1507): if your outdoor humidity comes from a sensor that reports humidity only (no temperature on the same device), the humid-night guard now works for you. Before, Climate Advisor could not work out the outdoor dew point from that sensor, so on a muggy night the whole-house fan or blower could still start and the windows could still be suggested. Now, when the outdoor humidity sensor has no usable temperature of its own (none, unavailable or not updated for 6 hours), the outdoor dew point comes from your weather service (its dew point, else its own temperature and humidity), exactly as when no outdoor humidity sensor is set up, and the log says once which source it uses and when the sensor takes over again. The Status chart still shows your sensor's own humidity. Indoor humidity is unchanged: an indoor sensor still needs a temperature on the same device.
+- Fix #1705 (mirror): a minimum-runtime circulation run ending no longer switches off the blower when window cooling or natural ventilation has taken it over; the blower keeps running for them.
+- Fix #1705: at bedtime while window cooling is running, Climate Advisor again wraps window cooling up properly (blower off, your comfort setting put back on the thermostat, "Economizer deactivated" in the log) instead of only switching the blower off.
 
 ## [0.9.79] — 2026-11-23
 

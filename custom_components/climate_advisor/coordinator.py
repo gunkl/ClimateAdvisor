@@ -391,7 +391,6 @@ from .humidity_facts import (
     decision_dew_point,
     fmt_dp_log,
     humid_air_ceiling_from_config,
-    humid_air_verdict_from_facts,
     paired_glitch,
     read_dew_point,
     step_humid_latches,
@@ -1266,7 +1265,7 @@ def _restore_briefing_text(text: str, wire: Any) -> str:
             key = wire.get("key")
             params = wire.get("params")
             if isinstance(key, str) and key.startswith("briefing.full.") and isinstance(params, dict):
-                wire = {**wire, "params": {**_BRIEFING_FULL_SLOTS_ADDED, **params}}  # a pre-0.9.74 briefing
+                wire = {**wire, "params": {**_BRIEFING_FULL_SLOTS_ADDED, **params}}  # a briefing stored before 0.9.76
             return BriefingText(text, i18n.Msg.from_wire(wire))
         except KeyError, TypeError, ValueError, i18n.I18nError:
             _LOGGER.warning("Stored briefing message could not be read; showing the stored English text")
@@ -3096,7 +3095,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_day_type = briefing.get("briefing_day_type")
         self._briefing_today_high = briefing.get("briefing_today_high")
         self._briefing_windows_recommended = briefing.get("briefing_windows_recommended")
-        # Issue #1692: missing (a state saved before 0.9.74) = written while not blocking
+        # Issue #1692: missing (a state saved before 0.9.76) = written while not blocking
         self._briefing_humid_blocking = bool(briefing.get("briefing_humid_blocking", False))
         _restored_nat_vent_cutoff = briefing.get("briefing_nat_vent_cutoff")
         try:
@@ -4479,15 +4478,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             at = now or dt_util.now()
             ae = getattr(self, "automation_engine", None)
-            if callable(getattr(ae, "humid_air_verdict", None)):
-                # Issue #1691's engine read (this coordinator's facts passed in): the very verdict the fan starts ask
-                verdict = decide_sync(self, ae.humid_air_verdict, at, facts_at=at)
-                if isinstance(verdict, HumidAirVerdict):  # a stand-in engine (tests) answers something else
-                    return verdict
-            # no engine yet (startup, partially built coordinators): the same predicate on the same facts
-            return humid_air_verdict_from_facts(
-                self.engine_facts(at), humid_air_ceiling_from_config(getattr(self, "config", None))
-            )
+            if not callable(getattr(ae, "humid_air_verdict", None)):
+                return None
+            # The one rule: Issue #1691's engine read, with this coordinator's facts passed in (the engine method is
+            # ``humid_air_verdict_from_facts`` + ``humid_air_ceiling_from_config``; no second copy here). A test
+            # stand-in engine that answers something else reads as "not blocking".
+            verdict = decide_sync(self, ae.humid_air_verdict, at, facts_at=at)
+            return verdict if isinstance(verdict, HumidAirVerdict) else None
         except Exception:  # noqa: BLE001 - advice never fails on the humidity read; unknown = today's behaviour
             _LOGGER.debug("humid-air verdict unavailable", exc_info=True)
             return None
@@ -10146,7 +10143,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # latch has 1 °F hysteresis and is read on this 30-minute cycle, so it does not flap).
         _baked_humid = getattr(self, "_briefing_humid_blocking", None)
         live_humid = self._humid_blocks() is not None
-        humid_flipped = bool(_baked_humid) != live_humid  # missing (a pre-0.9.74 state) = not blocking
+        humid_flipped = bool(_baked_humid) != live_humid  # missing (a state saved before 0.9.76) = not blocking
 
         if not (
             day_type_changed

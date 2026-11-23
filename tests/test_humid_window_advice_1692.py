@@ -546,7 +546,20 @@ def _gate_stub(indoor_dp: float | None, outdoor_dp: float | None, **config: Any)
     coord.engine_facts = lambda now: EngineFacts(
         as_of=now, indoor_dew_point_f=indoor_dp, outdoor_dew_point_f=outdoor_dp
     )
+    coord.hass = None
+    coord.automation_engine = _rule_engine(coord)
     return coord
+
+
+def _rule_engine(coord: Any) -> Any:
+    """A real ``AutomationEngine`` carrying only what its ``humid_air_verdict`` reads (the config and the facts the
+    coordinator passes in), so the stub-based tests run the production rule, not a copy (REVIEW-W2B-D L2)."""
+    from custom_components.climate_advisor.automation import AutomationEngine
+
+    engine = object.__new__(AutomationEngine)
+    engine.config = coord.config
+    engine._inputs = SimpleNamespace(build_facts=coord.engine_facts)
+    return engine
 
 
 class TestWindowsGate:
@@ -575,11 +588,9 @@ class TestWindowsGate:
 
     def test_direction_rule_says_no_on_humid_air(self):
         coord = _gate_stub(55.0, 66.9)
-        coord.automation_engine = None
         coord._learned_swings = lambda: (1.0, 1.0)
         assert coord._outdoor_direction_ok(70.0, 76.0, 68.0, 75.0) is False
         dry = _gate_stub(55.0, 45.0)
-        dry.automation_engine = None
         dry._learned_swings = lambda: (1.0, 1.0)
         assert dry._outdoor_direction_ok(70.0, 76.0, 68.0, 75.0) is True
 
@@ -771,6 +782,7 @@ class TestEdges:
         coord._humid_notice_episode = False
         coord._humid_notice_last_at = None
         coord.automation_engine = SimpleNamespace(
+            humid_air_verdict=coord.automation_engine.humid_air_verdict,  # the production rule
             _get_thermostat_capabilities=lambda: SimpleNamespace(supports_heat=caps[0], supports_cool=caps[1]),
             _paused_by_door=pre_pause is not None,
             _pre_pause_mode=pre_pause,
@@ -793,7 +805,11 @@ class TestEdges:
         coord._occupancy_mode = "home"
         coord._humid_notice_episode = False
         coord._humid_notice_last_at = None
-        coord.automation_engine = SimpleNamespace(_natural_vent_active=True, _close_windows_advised=True)
+        coord.automation_engine = SimpleNamespace(
+            humid_air_verdict=coord.automation_engine.humid_air_verdict,
+            _natural_vent_active=True,
+            _close_windows_advised=True,
+        )
         coord._emit_event = MagicMock()
         coord._notify_in_background = MagicMock()
         coord._tick_humid_windows_notice(datetime(2026, 7, 15, 20, 0, tzinfo=UTC))
@@ -980,6 +996,26 @@ class TestNoFanStartPromisedIntoHumidAir:
             _air(session, "18:00", DRY, hold_min=20)  # the latch releases: the promise comes back on the next plan
             _go(session, "18:21", day)
             assert _starts(session)
+
+    def test_a_running_fan_session_keeps_its_stop_step_while_humid(self):
+        """L4 (D4 half): a session already running when the guard engages is not ended by humidity, so the plan still
+        says when Climate Advisor stops the fan; only new starts are withheld (``promise_start`` vs ``running``)."""
+        import dataclasses
+
+        from custom_components.climate_advisor.operation_timeline import build_timeline
+        from tests.test_operation_timeline import _evening_cooling
+
+        running = _evening_cooling(windows_physically_open=True, nat_vent_active=True)
+        for humid in (False, True):
+            tl = build_timeline(dataclasses.replace(running, humid_air_blocks=humid))
+            assert any(c.kind == "open_now" and c.accepted for c in tl.candidates)
+            assert [s for s in tl.steps if s.kind == "nat_vent_stop"], f"stop step lost (humid={humid})"
+        # a planned (not yet running) evening period: the humid plan promises neither the start nor its stop
+        planned = _evening_cooling()
+        dry = build_timeline(planned)
+        wet = build_timeline(dataclasses.replace(planned, humid_air_blocks=True))
+        assert [s for s in dry.steps if s.kind == "nat_vent_start"]
+        assert not [s for s in wet.steps if s.kind in ("nat_vent_start", "nat_vent_stop")]
 
     def test_night_strategy_gives_no_fan_or_window_advice_while_humid(self, monkeypatch):
         from tests.test_night_strategy import END, START, STUB, _timeline

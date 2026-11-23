@@ -2864,14 +2864,14 @@ def _render_thermostat_recalibration_ended(p: dict, unit: str) -> tuple[Cell, Ce
 @_msg_renderer
 def _render_humid_windows_close_notice(p: dict, unit: str) -> tuple[Cell, Cell]:
     """Issue #1692: humid outdoor air with the windows open; the occupant was asked to close them (advice only)."""
-    dp = p.get("outdoor_dp_f")
+    dp = p.get("outdoor_dew_point")  # Issue #1691's field names (internal °F)
     shown: Any = _tp(dp, unit, 1) if isinstance(dp, (int, float)) else _m("unknown_paren")
     label = _m("humid_windows_close_notice", dew_point=shown)
     parts: list[Cell] = []
-    if p.get("reason") == "ceiling" and isinstance(p.get("ceiling_f"), (int, float)):
-        parts.append(_m("fact_humid_ceiling", limit=_tp(p.get("ceiling_f"), unit, 1)))
-    elif p.get("reason") == "wetter_than_house" and isinstance(p.get("indoor_dp_f"), (int, float)):
-        parts.append(_m("fact_humid_wetter", indoor=_tp(p.get("indoor_dp_f"), unit, 1)))
+    if p.get("reason") == "ceiling" and isinstance(p.get("ceiling"), (int, float)):
+        parts.append(_m("fact_humid_ceiling", limit=_tp(p.get("ceiling"), unit, 1)))
+    elif p.get("reason") == "wetter_than_house" and isinstance(p.get("indoor_dew_point"), (int, float)):
+        parts.append(_m("fact_humid_wetter", indoor=_tp(p.get("indoor_dew_point"), unit, 1)))
     return label, _join(parts)
 
 

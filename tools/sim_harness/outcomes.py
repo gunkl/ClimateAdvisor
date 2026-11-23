@@ -183,11 +183,12 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # Issue #1690 (plan #1507 H0): event types RESERVED for the later #1507 lanes, registered now so the lanes
         # cannot collide on names (humidity_facts.RESERVED_EVENT_TYPES; nothing emits them yet). Rule-8 justification:
         # the previous semantics were not wrong for any event that exists; this only decides, ahead of time, how the
-        # new types are read: unmapped, the same class as their siblings (nat_vent_humid_skip left this list when
-        # Issue #1691 started emitting it: it is mapped in _map_event_to_outcome; humid_windows_close_notice left it
-        # when Issue #1692 did: its own unmapped registration below). overcool_started / overcool_ended announce a commanded-setpoint adjustment whose effect is asserted through the action_log and
-        # live engine state. Could this let a real failure pass silently? No: no existing scenario can see these
-        # types, and a lane that needs one as a decision outcome must move it to a mapping with its own rule-8 note.
+        # new types are read: unmapped, the same class as their siblings. nat_vent_humid_skip left this list when
+        # Issue #1691 started emitting it (mapped in _map_event_to_outcome); humid_windows_close_notice left it when
+        # Issue #1692 did (its own unmapped registration below). overcool_started / overcool_ended announce a
+        # commanded-setpoint adjustment whose effect is asserted through the action_log and live engine state. Could
+        # this let a real failure pass silently? No: no existing scenario can see these types, and a lane that needs one
+        # as a decision outcome must move it to a mapping with its own rule-8 note.
         "overcool_started",
         "overcool_ended",
         # Issue #1692 (plan #1507 H1): humid_windows_close_notice is now EMITTED (the coordinator's 5-minute tick, once

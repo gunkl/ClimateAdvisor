@@ -1563,9 +1563,10 @@ def close_windows_advice_deferred(occupancy_mode: str | None) -> bool:
 
     While away / on vacation the setpoint is the setback and closing the windows only re-arms it, so "close the
     windows and it will cool the house" is neither useful nor true. One rule for the blower close-windows advice
-    (``_advise_close_windows_if_too_warm``) and the humid-air close notice (``coordinator._tick_humid_windows_notice``).
+    (``_advise_close_windows_if_too_warm``) and the humid-air close notice (``coordinator._tick_humid_windows_notice``),
+    and it is the occupancy-setback rule itself (``should_defer_to_occupancy_setback``).
     """
-    return occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+    return should_defer_to_occupancy_setback(str(occupancy_mode or ""))
 
 
 def _fan_device_label(config: dict) -> str:
@@ -19183,7 +19184,7 @@ class AutomationEngine:
             # Issue #1225 item 2: while away the setpoint is the setback, not the occupied comfort ceiling, and
             # closing the windows only re-arms that setback -- "close the windows and it will cool the house" is
             # neither useful nor true. Not marked advised: the occupant may come home during the same session.
-            # Issue #1692: ``_close_windows_advised`` is also set by the humid-air close notice (one push per episode).
+            # Issue #1692: ``_close_windows_advised`` is also set by the humid-air close notice (one push per session).
             return
         indoor = self._get_indoor_temp_f()
         comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))

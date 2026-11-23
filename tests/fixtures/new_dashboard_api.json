@@ -112,9 +112,6 @@
   "nat_vent_on_threshold": null,
   "nat_vent_off_threshold": null,
   "pre_cool_status": null,
-  "humid_air_status": null,
-  "humid_air_status_msg": null,
-  "humid_air_status_code": null,
   "coordinator_healthy": true,
   "zone_count": 2,
   "zones": [

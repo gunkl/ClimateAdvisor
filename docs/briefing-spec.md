@@ -202,7 +202,7 @@ blocks, and today's decisions it changed (fan / nat-vent starts held, `nat_vent_
 close-the-windows notices). Rendered as the `briefing.humidity` section after the fresh-air section (omitted when no
 dew point is known and nothing changed). While the guard blocks as the briefing is written, the day's plan is not a
 window plan: the body and the Windows row are built from a copy of the classification with the window flags off and
-the row reads `Windows: Closed — humid outside (dew point X)` (also for a running period the live veto holds as
+the row reads `Windows: Closed for now — humid outside (dew point X); I'll update the plan if it dries out` (also for a running period the live veto holds as
 `humid`). The shown text regenerates when the guard engages or releases (`_briefing_humid_blocking`, one of the
 `_maybe_regenerate_briefing_for_drift` triggers, saved in `briefing_state`; missing = not blocking). The morning push is
 not re-sent, so the humid row says "for now; I'll update the plan if it dries out". A briefing stored by 0.9.73 is

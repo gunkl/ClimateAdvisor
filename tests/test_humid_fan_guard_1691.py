@@ -420,21 +420,25 @@ class TestReviewFixes:
             assert engine._humid_skip_reported is False  # no latch on: the spell is over
 
     def test_status_line_only_when_a_fan_could_start(self):
-        """A4/B5, W2A-C N1: no Status line on a fan-less install; with a fan it shows on any day type (heat days
-        included: ventilation is asked then too); neutral wording."""
+        """A4/B5, W2A-C N1: the "fan not started" part only when a fan could start; with a fan it shows on any day
+        type (heat days included: ventilation is asked then too); neutral wording. Issue #1692 (B2, one line for the
+        guard): the same line also says the window advice is withheld, so a fan-less install gets the line without the
+        fan part."""
         from custom_components.climate_advisor.api import humid_air_view
         from custom_components.climate_advisor.const import FAN_MODE_DISABLED
 
         engine, _ = _engine(indoor_dp=56.0, outdoor_dp=67.0)
         view = humid_air_view(engine, "fahrenheit")
-        assert view["text"].startswith("Fan not started: humid outside") and "AC" not in view["text"]
-        assert "window" not in view["text"].lower()
+        assert view["text"].startswith("Fan not started, no open-window advice: humid outside") and view["fan"] is True
+        assert "AC" not in view["text"]
         engine._current_classification = SimpleNamespace(hvac_mode="heat")
         assert humid_air_view(engine, "fahrenheit") is not None
         engine._current_classification = SimpleNamespace(hvac_mode="cool")
         assert humid_air_view(engine, "fahrenheit") is not None
         fanless, _ = _engine(FAN_MODE_DISABLED, indoor_dp=56.0, outdoor_dp=67.0)
-        assert humid_air_view(fanless, "fahrenheit") is None
+        line = humid_air_view(fanless, "fahrenheit")
+        assert line["fan"] is False and line["text"].startswith("No open-window advice: humid outside")
+        assert "Fan" not in line["text"]
 
     def test_next_automation_promises_no_fan_start_while_humid(self):
         """B4: the natural-ventilation prediction scan is skipped while the live verdict blocks."""

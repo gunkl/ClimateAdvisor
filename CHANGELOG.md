@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.84] — 2026-11-23
+
+### Fixed
+- Fix #1718: with automation switched off, if the whole-house fan runs on a closed-up house again after you briefly opened a window while the heat was also on, Climate Advisor now tells you again. Before, that second time went unannounced and the fan could run for hours on the sealed house (about 4 hours on a 9-29 °F night in the simulated case that found it). With automation on, nothing changes: Climate Advisor still stops the fan within seconds.
+- Fix #1720: after Climate Advisor has told you once (automation off) that the whole-house fan and the heat or AC are running together, switching automation on and off again no longer silences that notice the next time it happens.
+
 ## [0.9.83] — 2026-11-23
 
 ### Fixed

@@ -570,6 +570,30 @@ class TestObserveOnly:
         pushes = [c for c in _notifications(engine) if c.args[1] != "send_email"]
         assert len(pushes) == 2
 
+    def test_the_episode_re_arms_when_a_window_opens_while_the_heat_also_runs_beside_the_fan(self, clock):
+        """Issue #1718: a window opened while the heat runs beside the fan is the rule-2 backstop, not 'sealed'.
+
+        Before the fix the backstop branch returned before the sealed re-arm, so the second sealed episode (the
+        window closed again) was treated as already notified and the fan ran on the sealed house untold.
+        """
+        engine, world, events = self._observe_engine()
+        state = engine.hass.states.get("climate.thermostat")
+        state.state = "heat"
+        state.attributes = {"fan_modes": ["auto", "on"], "hvac_action": "heating"}
+        state.last_changed = clock.now() - timedelta(seconds=600)
+        world["overlap_for_s"] = 600.0
+        _run(engine)  # sealed with the heat on: rule 1 wins, sealed notice
+        world["sensors"] = (OPEN,)
+        _run(engine)  # window open, heat beside the fan: the rule-2 backstop notice
+        world["sensors"] = (CLOSED,)
+        _run(engine)  # sealed again: a new episode, told again
+        assert [t for t, _ in events] == [
+            "whf_sealed_observe_notified",
+            "whf_rule2_observe_notified",
+            "whf_sealed_observe_notified",
+        ]
+        assert not _fan_off(engine)
+
     def test_no_notice_when_a_window_is_open(self, clock):
         engine, world, events = self._observe_engine()
         world["sensors"] = (OPEN,)
@@ -663,6 +687,21 @@ class TestRule2StateBackstop:
         pushes = [c for c in _notifications(engine) if c.args[1] != "send_email"]
         assert len(pushes) == 1
         assert [t for t, _ in events] == ["whf_rule2_observe_notified"]
+
+    def test_switching_automation_on_re_arms_the_observe_only_overlap_notice(self, clock):
+        """Issue #1720 (mirror of #1718): automation on re-armed the sealed notice but not the rule-2 notice, so
+        after an observe-only overlap notice, a re-enable and a later observe-only overlap, nobody was told."""
+        engine, world, events = self._overlap_engine(clock, mode_age_s=30.0)
+        engine.dry_run = True
+        _run(engine)
+        engine.dry_run = False  # the occupant switches automation on: the enforcer acts
+        _run(engine)
+        engine.dry_run = True  # ...and off again while the fan and the heat still run together
+        _run(engine)
+        assert [t for t, _ in events if t == "whf_rule2_observe_notified"] == [
+            "whf_rule2_observe_notified",
+            "whf_rule2_observe_notified",
+        ]
 
 
 class TestOnlyAWholeHouseFanPressIsAnOccupantWhfAction:

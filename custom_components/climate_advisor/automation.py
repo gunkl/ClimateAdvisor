@@ -19163,6 +19163,11 @@ class AutomationEngine:
         await self._advise_close_windows_if_too_warm()
         return _hold
 
+    def note_close_windows_advised(self) -> None:
+        """Issue #1692: the humid-air close notice went out during this ventilation session, so the session's blower
+        close-windows advice does not push again (one close-the-windows push per session; re-armed per session)."""
+        self._close_windows_advised = True
+
     async def _advise_close_windows_if_too_warm(self) -> None:
         """Tell the occupant to close the windows when blower ventilation is not enough (Issue #1142 D7).
 

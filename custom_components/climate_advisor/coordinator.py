@@ -4570,7 +4570,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._humid_notice_episode = True
             self._humid_notice_last_at = now
             if session:
-                ae._close_windows_advised = True  # the running session's blower advice will not push again
+                ae.note_close_windows_advised()  # the running session's blower advice will not push again
             unit = self.config.get("temp_unit", "fahrenheit")
             cools = self._humid_notice_cools()
             _LOGGER.info(

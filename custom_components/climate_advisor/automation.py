@@ -7942,7 +7942,7 @@ class AutomationEngine:
             humid=humid,
             at_trigger=at_trigger,
             headroom_f=self._overcool_headroom(),
-            dew_point_known=dp is not None,
+            dew_point_f=dp,
         )
 
     def _apply_overcool_decision_sync(self, gate: str, reason: str | None) -> Any:

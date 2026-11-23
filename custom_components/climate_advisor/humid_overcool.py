@@ -35,6 +35,7 @@ from datetime import datetime
 from .const import (
     CYCLE_POST_OFF_WINDOW_S,
     OVERCOOL_MAX_F,
+    OVERCOOL_RELEASE_DP_F,
     OVERCOOL_RUN_CAP_S,
     OVERCOOL_RUN_END_GRACE_S,
     OVERCOOL_STEP_AFTER_S,
@@ -98,9 +99,11 @@ class OvercoolInputs:
     humid: bool  # the overcool latch is on (indoor dew point >= 60 °F, held above 58 °F)
     at_trigger: bool  # the decision dew point is at or above the trigger now (for the second step)
     headroom_f: float  # how far the gap rule lets overcool lower the commanded setpoint for the current target
-    # The decision dew point is known (review FINAL-A A-4): an unknown one releases the latch (``humid`` False) but is
-    # not "the house dried", so the spell budget is renewed only on a known dew point at or below the release.
-    dew_point_known: bool = True
+    # The decision dew point (°F, None = unknown). The spell budget is renewed only when it is KNOWN and at or below
+    # the release (``OVERCOOL_RELEASE_DP_F``, 58 °F): "the house dried". An unknown one releases the latch (``humid``
+    # False) but is not dry, nor is a reading back at 58-60 °F after a dropout (the latch stays off until 60 °F)
+    # (reviews FINAL-A A-4, FINAL-C N1).
+    dew_point_f: float | None = None
 
 
 @dataclass(frozen=True)
@@ -172,7 +175,7 @@ def decide_overcool(state: OvercoolState, inp: OvercoolInputs) -> OvercoolDecisi
     )
     ended = _run_ended(tracked, inp.now)
     lowering = tracked.phase in (PHASE_ACTIVE, PHASE_COASTING)
-    dried = not inp.humid and inp.dew_point_known  # an unknown dew point is not a dry house: the spell goes on
+    dried = inp.dew_point_f is not None and inp.dew_point_f <= OVERCOOL_RELEASE_DP_F + _EPS  # the spell is over
     if dried and not lowering and (tracked.spell_used_s or tracked.lowered_since is not None):
         tracked = replace(tracked, spell_used_s=0.0, lowered_since=None)  # the humid spell is over: a fresh budget
     if inp.gate == "closed":

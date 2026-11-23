@@ -54,6 +54,8 @@ def _inp(now=T0, **kw):
         "headroom_f": 4.0,
     }
     args.update(kw)
+    # The decision dew point the latch came from, unless the test names one: 62 F humid, 57 F dried.
+    args.setdefault("dew_point_f", 62.0 if args["humid"] else 57.0)
     return ho.OvercoolInputs(**args)
 
 
@@ -119,17 +121,34 @@ class TestDecision:
         used still count. Only a known dew point at or below 58 F renews the budget."""
         used = 40 * 60.0
         st = _active(spell_used_s=used - 10 * 60.0)  # 30 min from earlier runs + 10 min of this stretch
-        lost = ho.decide_overcool(st, _inp(now=T0 + timedelta(minutes=10), humid=False, dew_point_known=False))
+        lost = ho.decide_overcool(st, _inp(now=T0 + timedelta(minutes=10), humid=False, dew_point_f=None))
         assert lost.action == ho.ACTION_RELEASE and lost.state.magnitude_f == 0.0
         assert lost.state.spell_used_s == pytest.approx(used)
         idle = ho.OvercoolState(spell_used_s=used, lowered_since=T0)
-        still_unknown = ho.decide_overcool(idle, _inp(humid=False, dew_point_known=False, cooling=False))
+        still_unknown = ho.decide_overcool(idle, _inp(humid=False, dew_point_f=None, cooling=False))
         assert still_unknown.state.spell_used_s == pytest.approx(used)
         assert still_unknown.state.lowered_since == T0
         # The control: a known dry dew point (latch released at 58 F) ends the spell and renews the budget.
         dried = ho.decide_overcool(st, _inp(now=T0 + timedelta(minutes=10), humid=False))
         assert dried.state.spell_used_s == 0.0
         assert ho.decide_overcool(idle, _inp(humid=False, cooling=False)).state.spell_used_s == 0.0
+
+    def test_dropout_then_back_below_the_trigger_keeps_the_spell_budget(self):
+        """Review FINAL-C N1: unknown -> 59 F -> 60 F in one muggy spell. The dropout releases the latch and it stays
+        off at 59 F (it re-arms at 60 F), but the house never dried to 58 F: the used minutes still count, so the
+        re-engage at 60 F has only what is left of the 60 minutes."""
+        used = 50 * 60.0
+        idle = ho.OvercoolState(spell_used_s=used)
+        lost = ho.decide_overcool(idle, _inp(humid=False, dew_point_f=None, cooling=False))
+        back = ho.decide_overcool(lost.state, _inp(humid=False, dew_point_f=59.0, cooling=False))
+        assert back.state.spell_used_s == pytest.approx(used)
+        again = ho.decide_overcool(back.state, _inp(dew_point_f=60.0, now=T0 + timedelta(minutes=5)))
+        assert again.action == ho.ACTION_ENGAGE and again.state.spell_used_s == pytest.approx(used)
+        assert ho.next_deadline_s(again.state, T0 + timedelta(minutes=5)) == pytest.approx(10 * 60)
+        # Control: a known dew point at or below the 58 F release is the house drying: a fresh budget.
+        dried = ho.decide_overcool(idle, _inp(humid=False, dew_point_f=57.9, cooling=False))
+        assert dried.state.spell_used_s == 0.0
+        assert ho.decide_overcool(idle, _inp(humid=False, dew_point_f=58.0, cooling=False)).state.spell_used_s == 0.0
 
     def test_blip_shorter_than_the_grace_keeps_the_run(self):
         st = _active()

@@ -21670,10 +21670,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         no-op: by then cleanup() has wiped the engine's grace state, and saving again
         would overwrite the fan-off grace the first save kept (N4).
 
-        Order: latch this coordinator, latch the engine (so nothing commands during the
-        awaited saves), HA's base shutdown (no further refreshes), saves, release every
-        timer/listener, engine cleanup. The release and cleanup run in a ``finally``, so a
-        save that raises cannot leave timers or listeners behind.
+        Order: put the plain setpoint back if CA's command adjustment is on the thermostat
+        (``_release_command_adjustments``; not on a Home Assistant stop, review FINAL-B F1), latch
+        this coordinator, latch the engine (so nothing commands during the awaited saves), HA's
+        base shutdown (no further refreshes), saves, release every timer/listener, engine cleanup.
+        The release and cleanup run in a ``finally``, so a save that raises cannot leave timers or
+        listeners behind.
 
         Partial-initialisation safety holds once ``__init__`` has completed (e.g. HA shuts
         the coordinator down after async_restore_state/async_setup failed). A failure

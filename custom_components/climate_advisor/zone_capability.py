@@ -273,7 +273,7 @@ def resolve_zone_capability(
     ``*_released_before`` is each family's recorded safety-release state. ``use_recorded_release`` answers with it as
     is (every reader except the selector); otherwise the release steps through :func:`next_safety_release`.
     """
-    common = {"season": normalize_season(season), "indoor_f": indoor_f, "floor_f": floor_f, "ceiling_f": ceiling_f}
+    season = normalize_season(season)
     return ZoneCapability(
         heat=resolve_family(
             FAMILY_HEAT,
@@ -284,7 +284,10 @@ def resolve_zone_capability(
             released_before=heat_released_before,
             relock_allowed=relock_allowed,
             safety_released=heat_released_before if use_recorded_release else None,
-            **common,
+            season=season,
+            indoor_f=indoor_f,
+            floor_f=floor_f,
+            ceiling_f=ceiling_f,
         ),
         cool=resolve_family(
             FAMILY_COOL,
@@ -295,7 +298,10 @@ def resolve_zone_capability(
             released_before=cool_released_before,
             relock_allowed=relock_allowed,
             safety_released=cool_released_before if use_recorded_release else None,
-            **common,
+            season=season,
+            indoor_f=indoor_f,
+            floor_f=floor_f,
+            ceiling_f=ceiling_f,
         ),
     )
 

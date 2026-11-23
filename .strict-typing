@@ -67,3 +67,4 @@ custom_components.climate_advisor.thermal_lead_time
 custom_components.climate_advisor.thermostat_recal
 custom_components.climate_advisor.time_utils
 custom_components.climate_advisor.whf_safety_decision
+custom_components.climate_advisor.zone_capability

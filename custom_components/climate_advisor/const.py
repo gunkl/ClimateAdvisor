@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.75"
+VERSION = "0.9.76"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -429,6 +429,9 @@ CONF_HUMID_AIR_GUARD_CEILING_F = "humid_air_guard_ceiling_f"
 DEFAULT_HUMID_AIR_GUARD_CEILING_F = 65.0
 MIN_HUMID_AIR_GUARD_CEILING_F = 55.0
 MAX_HUMID_AIR_GUARD_CEILING_F = 70.0
+# Issue #1692: the "humid outside, close the windows" notice goes out once per humid-with-windows-open episode, and a
+# new episode (windows reopened, or the guard engaging again) waits at least this long after the last notice.
+HUMID_WINDOWS_NOTICE_MIN_INTERVAL_MINUTES = 60
 
 # Degrees below today's observed outdoor peak required before soft-start considers the
 # day "declining" — mirrors NAT_VENT_HYSTERESIS_F's role as a noise-margin buffer.

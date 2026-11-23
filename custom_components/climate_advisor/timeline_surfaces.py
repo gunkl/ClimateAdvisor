@@ -160,6 +160,9 @@ class CardLive:
     heat_side_veto: bool  # outdoor cooler than indoor: air going the wrong way for a house the heat is holding
     armed_heat: float
     armed_cool: float
+    # Issue #1692: the outdoor dew point (internal F) while the humid-air guard blocks; None = not blocking. Humid air
+    # never helps the house: the open step is held and an open window is told to close, worded as "humid outside".
+    humid_dp_f: float | None = None
 
 
 DIRECTION_VETO = "direction_veto"  # ``meta["hold_kind"]`` of a window step the live direction rule vetoes
@@ -172,6 +175,8 @@ def is_direction_vetoed(step: TimelineStep) -> bool:
 
 def _live_open_ok(step: TimelineStep, live: CardLive) -> bool:
     """Whether the live direction rule lets the occupant open the windows for this (already-started) open step."""
+    if live.humid_dp_f is not None:
+        return False  # Issue #1692: humid outdoor air never helps, whatever its temperature
     o, i = live.outdoor, live.indoor
     if o is None or i is None:
         return True  # unknown readings never veto
@@ -203,13 +208,17 @@ def apply_direction_veto(tl: Timeline, now: datetime, live: CardLive) -> Timelin
     ):
         return tl
     o, i = live.outdoor, live.indoor
-    assert o is not None
-    assert i is not None
     try:
-        if live.heat_side_veto:
+        if live.humid_dp_f is not None:
+            key = "held.direction_veto.humid"
+            msg = sentence_msg(key, live.unit, dew_point=live.humid_dp_f)
+        elif live.heat_side_veto:
+            assert o is not None
             key = "held.direction_veto.heat"
             msg = sentence_msg(key, live.unit, outdoor=o, floor=live.armed_heat)
         else:
+            assert o is not None
+            assert i is not None
             key = "held.direction_veto.warm"
             msg = sentence_msg(key, live.unit, outdoor=o, indoor=i)
     except MissingFact:  # unreachable (readings are known above); a surface never fails on a wording
@@ -253,6 +262,8 @@ def window_card_msg(tl: Timeline, now: datetime, live: CardLive) -> tuple[i18n.M
             return i18n.Msg("timeline.card.open_cooler", **params), step
         return i18n.Msg("timeline.card.open_unknown"), step
     # a close step
+    if live.windows_open and live.humid_dp_f is not None:  # Issue #1692: humid air is coming in
+        return i18n.Msg("timeline.card.close_humid", dew_point=i18n.Temp(live.humid_dp_f, unit)), step
     if live.windows_open and known and not live.direction_ok:
         assert o is not None
         assert i is not None
@@ -455,7 +466,8 @@ class TimelineWindows:
 
     periods: tuple[tuple[datetime | None, datetime], ...]
     # The period the live direction rule vetoes right now (its open step is held): the briefing says "closed for now"
-    # instead of "close by", and does not promise the open. None, "heat" or "warm" (which sentence the step carries).
+    # instead of "close by", and does not promise the open. None, "heat", "warm" or "humid" (Issue #1692): which
+    # sentence the step carries.
     vetoed: str | None = None
 
 
@@ -464,7 +476,8 @@ def timeline_windows(tl: Timeline, day: Any) -> TimelineWindows:
     vetoed: str | None = None
     for o, c in window_periods(tl, day):
         if o is not None and is_direction_vetoed(o):
-            vetoed = "heat" if o.meta.get("hold") == "held.direction_veto.heat" else "warm"
+            hold = o.meta.get("hold")
+            vetoed = {"held.direction_veto.heat": "heat", "held.direction_veto.humid": "humid"}.get(str(hold), "warm")
             continue
         live.append((o.ts if o else None, c.ts))
     return TimelineWindows(tuple(live), vetoed)

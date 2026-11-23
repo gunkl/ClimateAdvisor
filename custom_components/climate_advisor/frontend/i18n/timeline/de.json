@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Fenster schließen bis {t}",
   "timeline.card.close_hold_heat": "Schließe die Fenster, um die Wärme zu halten: Draußen ist es kühler ({outdoor} gegenüber {indoor}).",
+  "timeline.card.close_humid": "Schließ die Fenster — draußen ist es feucht (Taupunkt {dew_point}).",
   "timeline.card.close_not_helping": "Schließe die Fenster: Die Außenluft hilft gerade nicht ({outdoor} gegenüber {indoor}).",
   "timeline.card.open_at": "Fenster öffnen: {t}",
   "timeline.card.open_briefly": "Öffne die Fenster kurz: Draußen ist es wärmer ({outdoor} gegenüber {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA sendet das Tagesbriefing.",
   "timeline.step.ceiling_guard.default": "{t}: CA schaltet die Klimaanlage ein, um die Obergrenze von {ceiling} zu halten.",
   "timeline.step.held.direction_veto.heat": "Lass die Fenster geschlossen, um die Wärme zu halten: Die Außenluft ({outdoor}) würde das Haus unter die Untergrenze von {floor} abkühlen.",
+  "timeline.step.held.direction_veto.humid": "Lass die Fenster vorerst zu — draußen ist es feucht (Taupunkt {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Lass die Fenster vorerst geschlossen: Draußen ({outdoor}) ist es noch nicht kühler als drinnen ({indoor}).",
   "timeline.step.held.pause": "{base} Das gilt, sobald die Tür oder das Fenster geschlossen wird.",
   "timeline.step.held.suffix": "{base} Das gilt, sobald CA den Zeitplan um {until} wieder aufnimmt.",

@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Chiudere le finestre entro {t}",
   "timeline.card.close_hold_heat": "Chiudere le finestre per trattenere il caldo: fuori fa più fresco ({outdoor} contro {indoor}).",
+  "timeline.card.close_humid": "Chiudere le finestre — fuori è umido (punto di rugiada {dew_point}).",
   "timeline.card.close_not_helping": "Chiudere le finestre: ora l’esterno non aiuta ({outdoor} contro {indoor}).",
   "timeline.card.open_at": "Aprire le finestre: {t}",
   "timeline.card.open_briefly": "Aprire brevemente le finestre: fuori fa più caldo ({outdoor} contro {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA invia il riepilogo giornaliero.",
   "timeline.step.ceiling_guard.default": "{t}: CA accende il condizionatore per restare entro il limite massimo di {ceiling}.",
   "timeline.step.held.direction_veto.heat": "Tenere le finestre chiuse per trattenere il caldo: l’esterno ({outdoor}) raffredderebbe la casa sotto il limite minimo di {floor}.",
+  "timeline.step.held.direction_veto.humid": "Tenere chiuse le finestre per ora — fuori è umido (punto di rugiada {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Per ora tenere le finestre chiuse: l’esterno ({outdoor}) non è ancora più fresco dell’interno ({indoor}).",
   "timeline.step.held.pause": "{base} Vale quando la porta o la finestra si chiude.",
   "timeline.step.held.suffix": "{base} Vale quando CA riprende la programmazione alle {until}.",

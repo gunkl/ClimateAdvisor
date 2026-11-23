@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Sluit de ramen vóór {t}",
   "timeline.card.close_hold_heat": "Sluit de ramen om de warmte vast te houden — buiten is het kouder ({outdoor} vs {indoor}).",
+  "timeline.card.close_humid": "Sluit de ramen — het is vochtig buiten (dauwpunt {dew_point}).",
   "timeline.card.close_not_helping": "Sluit de ramen — buiten helpt nu niet meer ({outdoor} vs {indoor}).",
   "timeline.card.open_at": "Zet de ramen open om {t}",
   "timeline.card.open_briefly": "Zet de ramen even open — buiten is het warmer ({outdoor} vs {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA verstuurt de dagelijkse briefing.",
   "timeline.step.ceiling_guard.default": "{t}: CA zet de airco aan om de bovengrens van {ceiling} te bewaken.",
   "timeline.step.held.direction_veto.heat": "Houd de ramen dicht om de warmte vast te houden — buiten ({outdoor}) zou het huis afkoelen tot onder de ondergrens van {floor}.",
+  "timeline.step.held.direction_veto.humid": "Houd de ramen voorlopig dicht — het is vochtig buiten (dauwpunt {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Houd de ramen voorlopig dicht — buiten ({outdoor}) is het nog niet koeler dan binnen ({indoor}).",
   "timeline.step.held.pause": "{base} Dit geldt zodra de deur of het raam dicht gaat.",
   "timeline.step.held.suffix": "{base} Dit geldt zodra CA het schema hervat om {until}.",

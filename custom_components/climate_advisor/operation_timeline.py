@@ -471,6 +471,15 @@ SENTENCES: dict[str, Sentence] = dict(
             "applied by timeline_surfaces.apply_direction_veto on every read; never stored in the latched plan",
         ),
         _s(
+            "held.direction_veto.humid",
+            "Keep windows closed for now — it's humid outside (dew point {dew_point}).",
+            {"dew_point": "temp"},
+            "the humid-air guard's verdict on the live dew points (Issue #1692, R3b surface layer)",
+            "a window period is running, the windows are shut, and the outdoor air is too humid to bring in "
+            "(dew point at or above the ceiling, or wetter than the house)",
+            "applied by timeline_surfaces.apply_direction_veto on every read; never stored in the latched plan",
+        ),
+        _s(
             "held.pause",
             "{base} It applies when the door or window closes.",
             {"base": "text"},
@@ -770,6 +779,9 @@ class TimelineSnapshot:
     grace_end: datetime | None = None
     paused_by_door: bool = False
     nat_vent_active: bool = False
+    # Issue #1692 (REVIEW-W2A-C N2): the live humid-air verdict blocks fan starts and window advice. No new nat-vent
+    # session is promised (no CA fan-start step for a window period); a running session's stop step is kept (D4).
+    humid_air_blocks: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -2142,7 +2154,12 @@ def build_timeline(
                 target_f=cseg.ceiling,
                 mode="cool",
             )
-    if fan and snap.nat_vent_predicted_start is not None and snap.nat_vent_predicted_start > now:
+    if (
+        fan
+        and not snap.humid_air_blocks
+        and snap.nat_vent_predicted_start is not None
+        and snap.nat_vent_predicted_start > now
+    ):
         add(
             snap.nat_vent_predicted_start,
             StepKind.NAT_VENT_START,
@@ -2182,8 +2199,10 @@ def build_timeline(
             conf,
             {"t": cand.end, "edge": edge_val, "reason": cand.end_reason},
         )
-        if fan and (oid or (cand.kind == "open_now" and snap.nat_vent_active)):
-            if oid:
+        running = cand.kind == "open_now" and snap.nat_vent_active
+        promise_start = bool(oid) and not snap.humid_air_blocks  # Issue #1692: no fan start promised into humid air
+        if fan and (promise_start or running):
+            if promise_start:
                 add(
                     cand.start,
                     StepKind.NAT_VENT_START,

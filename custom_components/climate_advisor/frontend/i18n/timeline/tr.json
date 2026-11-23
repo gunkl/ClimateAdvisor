@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Pencereleri {t} saatine kadar kapatın",
   "timeline.card.close_hold_heat": "Isıyı korumak için pencereleri kapatın — dışarısı daha serin ({outdoor} vs {indoor}).",
+  "timeline.card.close_humid": "Pencereleri kapatın — dışarısı nemli (çiğ noktası {dew_point}).",
   "timeline.card.close_not_helping": "Pencereleri kapatın — dışarıdaki hava artık yardımcı olmuyor ({outdoor} vs {indoor}).",
   "timeline.card.open_at": "Pencereleri {t} saatinde açın",
   "timeline.card.open_briefly": "Pencereleri kısa süre açın — dışarısı daha sıcak ({outdoor} vs {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA günlük özeti gönderiyor.",
   "timeline.step.ceiling_guard.default": "{t}: CA, {ceiling} üst sınırını korumak için klimayı açıyor.",
   "timeline.step.held.direction_veto.heat": "Isıyı korumak için pencereleri kapalı tutun — dışarısı ({outdoor}) evi {floor} alt sınırının altına soğutur.",
+  "timeline.step.held.direction_veto.humid": "Şimdilik pencereleri kapalı tutun — dışarısı nemli (çiğ noktası {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Şimdilik pencereleri kapalı tutun — dışarısı ({outdoor}) henüz içeriden ({indoor}) daha serin değil.",
   "timeline.step.held.pause": "{base} Bu, kapı veya pencere kapanınca geçerli olur.",
   "timeline.step.held.suffix": "{base} Bu, CA {until} saatinde zamanlamayı sürdürünce geçerli olur.",

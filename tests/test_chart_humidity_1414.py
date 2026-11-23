@@ -650,8 +650,10 @@ def test_in_the_coordinator_only_the_chart_paths_touch_it():
     # Issue #1690, the decision dew point: its pure reader (``_read_dew_point``, through ``humidity_facts``), the
     # smoothed fact (``_dew_point_fact``) that ``engine_facts`` carries, the 5-minute sample that keeps the median and
     # the latches (``_sample_humidity_facts``) and the #1689 outdoor reconnect check (``_outdoor_reading_glitched``,
-    # which reads the same device's humidity only to spot the 0 % / 32 F glitch). Adding a function here is a
-    # deliberate decision: say why in this comment.
+    # which reads the same device's humidity only to spot the 0 % / 32 F glitch). Issue #1696 adds
+    # ``humidity_display``: the briefing / AI context / Status show the SAME smoothed fact the decisions read (with
+    # the relative humidity of that reading), so a display can never disagree with a decision; it decides nothing.
+    # Adding a function here is a deliberate decision: say why in this comment.
     humidity_names = _HUMIDITY_NAMES | _HUMIDITY_STRINGS | {"read_humidity_state", "read_dew_point", "_read_dew_point"}
     assert users(humidity_names | {"_humidity_role_inputs", "_dew_point_fact"}) == {
         "_read_chart_humidity",
@@ -662,6 +664,7 @@ def test_in_the_coordinator_only_the_chart_paths_touch_it():
         "_sample_humidity_facts",
         "_outdoor_reading_glitched",
         "engine_facts",
+        "humidity_display",
     }
     # The decision facts carry a dew point, never a raw RH: engine_facts names only the smoothed dew-point fact.
     engine_facts = next(fn for fn in fns if fn.name == "engine_facts")

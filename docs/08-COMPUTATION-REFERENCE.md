@@ -4241,7 +4241,8 @@ Tests: `tests/test_thermostat_recal_1676.py` (state machine, resolver, coordinat
 (76 °F at 60 % is a 61 °F dew point, at 35 % a 46 °F one). Before any rule may act on it (the #1507 waves 2-3: humid
 fan-start guard, window advice, humid overcool), Climate Advisor carries the house's and the outside air's dew point
 in the decision facts. Since Issue #1691 the humid-air guard on fan starts reads them
-([below](#humid-air-guard-on-fan-starts-issue-1691)); unknown always means today's behaviour.
+([below](#humid-air-guard-on-fan-starts-issue-1691)), and since Issue #1692 the window advice
+([below](#humid-air-window-advice-issue-1692)); unknown always means today's behaviour.
 
 - **One resolver, two outputs.** `humidity_sources.resolve_humidity_paired` picks the humidity source exactly as the
   chart does ([Chart Log Spec](chart-log-spec.md#humidity-and-feels-like-fields-issue-1414)) and also says through
@@ -4345,7 +4346,7 @@ Tests: `tests/test_humid_air_guard_1691.py`.
 the economizer does not switch its fan on, a session whose fan cycled off does not get it back, and a whole-house
 fan's min-runtime cycle waits; with the windows open HVAC stays paused for them (household rule 3). A house with no
 fan is unaffected (no fan, no air pulled in: it keeps its economizer AC run). This lane does not withdraw window
-advice (Issue #1692 does, through the same predicate). A dry night is unchanged; unknown humidity or the option Off is today's behaviour. A running
+advice ([Issue #1692](#humid-air-window-advice-issue-1692) does, through the same predicate). A dry night is unchanged; unknown humidity or the option Off is today's behaviour. A running
 session is never ended by humidity (D4, start-only).
 
 | Fan start | Where the guard sits | On humid air |
@@ -4378,6 +4379,60 @@ session is never ended by humidity (D4, start-only).
 
 Tests: `tests/test_humid_fan_guard_1691.py`; Tier-A scenarios `tools/simulations/pending/humid_air_1691_*.json`
 (awaiting owner review for promotion to golden).
+### Humid-air window advice (Issue #1692)
+
+**Occupant view:** on a muggy evening Climate Advisor no longer tells you to open the windows: muggy outdoor air makes
+the house stickier, and short AC runs barely dry it again. With a window already open you get one push, "Humid outside
+(dew point 67°F): close the windows and the AC will take over." A dry evening, the guard switched Off, or unknown
+humidity (no sensor, stale, glitch) is the behaviour before #1692.
+
+Every surface reads the ONE verdict the fan starts read, `coordinator._humid_air_verdict()` =
+`AutomationEngine.humid_air_verdict(now)` (#1691, with the coordinator's facts passed in; the one rule, `humid_air_verdict_from_facts` + `humid_air_ceiling_from_config`) (the latches of the 5-minute
+tick, stepped with the decision's own dew points), so the fan and the advice can never disagree:
+
+| Surface | Humid (guard blocks) | Code |
+|---|---|---|
+| Windows gate (`windows_recommended`) | cleared, after the temperature reasons (INFO `Window advice withdrawn: humid outside reason=... outdoor_dp=... indoor_dp=... ceiling=...`); only ever clears, the next classification (30-minute cycle) restores it once the latch releases | `_apply_outdoor_windows_gate` |
+| Planned window period | ends with the advice (`_schedule_planned_window_exit_check`): a window left open then pauses HVAC through the existing pause-only reconcile (rule 3). Intended: a humid night is not a window night | `consume_planned_window_exit_edge` |
+| Learning (window compliance) and the chart | the day's `DailyRecord` "windows recommended" flag and the chart row's `windows_recommended` read the gated flag: the record's flag latches "recommended at any point today", so a day the guard withdraws all day is not a window day (no compliance credit or miss), a day it withdraws for part of the day still is; the chart row is not green for advice while it blocks. Intended (owner plan #1507 H1) | `_ensure_today_record`, chart rows |
+| Live direction rule | `_outdoor_direction_ok` answers False (humid air never helps, whatever its temperature) | coordinator |
+| Next Action card | no branch may invite opening: any card that advises opening (`timeline_surfaces.advises_opening`) becomes `keep_closed_humid` "Keep windows closed for now — it's humid outside (dew point X). I'll update the plan if it dries out." (the card follows the live verdict, so it invites opening again within one tick of the release); a window physically open gets `close_windows_humid` "Close the windows — it's humid outside (dew point X)." (after the occupancy / time-of-use guards) | `_compute_next_action` |
+| Plan list / briefing window step | the running open step is held (`held.direction_veto.humid`, `CardLive.humid_dp_f`); an open window's close step says `timeline.card.close_humid`; `timeline_windows(...).vetoed == "humid"` | `timeline_surfaces.apply_direction_veto` |
+| Night strategy | tonight's options that open windows (windows, fan) are withheld on the LIVE latch (`night_strategy.withhold_outdoor_air`, on every read: the timeline amend and the REST view); closed and the blower stay and the pick is re-made. Tonight's future hours have no humidity forecast: deferred with the other forecast layers | `_timeline_night_apply`, `night_strategy_payload` |
+| Briefing | written while the guard blocks: the day's plan is not a window plan (a copy of the classification with the window flags off), the Windows row says "Closed for now — humid outside (dew point X); I'll update the plan if it dries out". The SHOWN text regenerates when the guard engages or releases (`_briefing_humid_blocking`, saved in `briefing_state`; a state from before 0.9.76 reads as "not blocking"); the morning push itself is never re-sent. A briefing stored before 0.9.76 is restored with the new humidity slot empty (`_BRIEFING_FULL_SLOTS_ADDED`) | `briefing.generate_briefing_msg` |
+| Status line | the ONE humid-air line of #1691, `humid_air_guard` (`api.humid_air_view`, live from `AutomationEngine.humid_air_verdict()`; element `#status-humid-air` on the new and the classic dashboard). While the guard blocks it says the window advice is withheld; with a fan for ventilation it also says the fan was not started: "Fan not started, no open-window advice: humid outside (dew point X, at or above the ceiling Y)", fan-less "No open-window advice: humid outside (...)" (`status.humid_air.blocking_ceiling` / `_wetter`, `fan` select; payload `fan`) | `api.humid_air_view` |
+| Operation timeline | `TimelineSnapshot.humid_air_blocks` (the live latch): no CA nat-vent start step is promised for a window period, and no predicted start; a running session's stop step stays (D4). The night strategy's fan / window advice is withheld with its options (`withhold_outdoor_air`), so with the CA start step gone it never tells the occupant to run the fan or open up instead (REVIEW-W2A-C N2) | `operation_timeline.build_timeline`, `_timeline_snapshot` |
+| Close-the-windows notice | windows open past their delay while the guard blocks: one push (`door_window_pause` preference, no email) and one `humid_windows_close_notice` Activity row per episode. A new episode waits 60 min (`HUMID_WINDOWS_NOTICE_MIN_INTERVAL_MINUTES`) after the last notice; one held back by that interval is sent when it runs out if the window is still open (one reminder an hour later). The spacing is in memory: a restart can send one more. Wording: "... close the windows and the AC will take over." only when the thermostat can cool and the mode it returns to (live, else the one the pause or the fan session interrupted, else the active edge of the comfort band the engine arms once the windows close: a blower session holds the thermostat Off with no recorded mode, and on a cooling day that band's ceiling is active) is cool / heat_cool (`ac_takes_over` in the row); otherwise "... close the windows to keep the moisture out." Not while away / vacation (`automation.close_windows_advice_deferred`, shared with the blower close-windows advice). Sent also while Climate Advisor's own fan / nat-vent session is still running (a running session is kept, #1691 D4): humid air is the reason to close, and closing stops the fan (sealed-house stop) and lets the thermostat resume. One close-the-windows push per ventilation session: this notice and the blower advice share `_close_windows_advised`, whichever goes first stands for both | `_tick_humid_windows_notice` (5-minute tick, after the dew-point sample) |
+
+Dew points are shown in the user's unit (`i18n.Temp`); the notice's payload uses #1691's field names (`outdoor_dew_point`, `indoor_dew_point`, `ceiling`, internal °F). Log lines format dew points with `humidity_facts.fmt_dp_log`.
+
+Tests: `tests/test_humid_window_advice_1692.py` (coordinator-mode sessions: the planned period ends and resumes, the
+card, the notice with its dedup and Celsius twin; the gate on both clauses and every missing-input row; the plan step,
+the night strategy, the Status line in both units).
+
+### Moisture in the briefing and the AI context (Issue #1696)
+
+**Occupant view:** the morning briefing says how moist the house and the outside air are, and names what the
+humid-air guard changed today, so a closed-up muggy day is explained rather than silent.
+
+- `coordinator.humidity_display()` (display only, the 1414 pin lists it): per signal the decision dew point
+  (`_dew_point_fact`, the smoothed fact `engine_facts` carries) with the relative humidity of the same reading, and the
+  verdict. `humid_decisions_today()` counts today's `nat_vent_humid_skip` (fan / nat-vent starts held; emitted by the
+  #1691 fan-start guard, so the briefing line appears once that lane ships) and `humid_windows_close_notice` events since local midnight (#1691 emits one `nat_vent_humid_skip` per humid spell, so
+  the briefing says "humid spells"). The guard view also says whether the day's planned window period was withdrawn
+  (`window_plan_withdrawn`: the classifier planned windows and the gate cleared them), and the AI line names the ended
+  period only then.
+- Briefing (`BriefingHumidity`, section `briefing.humidity` after the fresh-air section): "Indoors / Outdoors: dew
+  point X (Y% relative humidity)", "The outdoor air is too humid to bring in right now (...), so I'm not suggesting
+  open windows", "Since midnight the fan stayed off during N humid spells ...", "Since midnight I asked you to close the windows N
+  times ...". No dew
+  point known and nothing changed: no section.
+- AI context (`CURRENT STATE`): `indoor_dew_point`, `outdoor_dew_point` (with RH), `humid_air_guard` (off / clear /
+  blocking with what it withdrew) and `humid_decisions_today` (close-window notices, fan starts held), in the user's
+  unit. The Activity row for the notice is `_render_humid_windows_close_notice`; the `nat_vent_humid_skip` renderer
+  ships with #1691 (the dead-renderer guard refuses a renderer for a type nothing emits).
+
+Tests: `tests/test_humid_window_advice_1692.py::TestBriefing`, `::TestAIContext`.
 
 ### Indoor sensor failure reasons and announcements (Issue #1033)
 

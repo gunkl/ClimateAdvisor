@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Feche as janelas antes de {t}",
   "timeline.card.close_hold_heat": "Feche as janelas para manter o calor: lá fora está mais fresco ({outdoor} contra {indoor}).",
+  "timeline.card.close_humid": "Feche as janelas — está húmido lá fora (ponto de orvalho {dew_point}).",
   "timeline.card.close_not_helping": "Feche as janelas: agora o exterior não ajuda ({outdoor} contra {indoor}).",
   "timeline.card.open_at": "Abra as janelas: {t}",
   "timeline.card.open_briefly": "Abra as janelas por pouco tempo: lá fora está mais quente ({outdoor} contra {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: o CA envia o resumo diário.",
   "timeline.step.ceiling_guard.default": "{t}: o CA liga o ar condicionado para respeitar o limite máximo de {ceiling}.",
   "timeline.step.held.direction_veto.heat": "Mantenha as janelas fechadas para conservar o calor: o exterior ({outdoor}) arrefeceria a casa abaixo do limite inferior de {floor}.",
+  "timeline.step.held.direction_veto.humid": "Mantenha as janelas fechadas por agora — está húmido lá fora (ponto de orvalho {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Mantenha as janelas fechadas por agora: o exterior ({outdoor}) ainda não está mais fresco do que o interior ({indoor}).",
   "timeline.step.held.pause": "{base} Aplica-se quando a porta ou a janela fechar.",
   "timeline.step.held.suffix": "{base} Aplica-se quando o CA retomar o horário às {until}.",

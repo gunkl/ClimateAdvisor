@@ -183,15 +183,25 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         # Issue #1690 (plan #1507 H0): event types RESERVED for the later #1507 lanes, registered now so the lanes
         # cannot collide on names (humidity_facts.RESERVED_EVENT_TYPES; nothing emits them yet). Rule-8 justification:
         # the previous semantics were not wrong for any event that exists; this only decides, ahead of time, how the
-        # new types are read: unmapped, the same class as their siblings (nat_vent_humid_skip left this list when
-        # Issue #1691 started emitting it: it is mapped in _map_event_to_outcome); humid_windows_close_notice is
-        # advice only; overcool_started /
-        # overcool_ended announce a commanded-setpoint adjustment whose effect is asserted through the action_log and
-        # live engine state. Could this let a real failure pass silently? No: no existing scenario can see these
-        # types, and a lane that needs one as a decision outcome must move it to a mapping with its own rule-8 note.
-        "humid_windows_close_notice",
+        # new types are read: unmapped, the same class as their siblings. nat_vent_humid_skip left this list when
+        # Issue #1691 started emitting it (mapped in _map_event_to_outcome); humid_windows_close_notice left it when
+        # Issue #1692 did (its own unmapped registration below). overcool_started / overcool_ended announce a
+        # commanded-setpoint adjustment whose effect is asserted through the action_log and live engine state. Could
+        # this let a real failure pass silently? No: no existing scenario can see these types, and a lane that needs one
+        # as a decision outcome must move it to a mapping with its own rule-8 note.
         "overcool_started",
         "overcool_ended",
+        # Issue #1692 (plan #1507 H1): humid_windows_close_notice is now EMITTED (the coordinator's 5-minute tick, once
+        # per humid-with-windows-open episode) and leaves the reserved list; it stays unmapped by a conscious rule-8
+        # decision. Why the reserved semantics were not wrong and stay right: the notice is advice only (a push and an
+        # Activity row asking the occupant to close the windows). It commands nothing: with a window open the
+        # thermostat is held Off by the door/window pause, whose own deciding events (paused / resumed) still map,
+        # and the window-advice withdrawal it accompanies is asserted through the coordinator's classification and the
+        # engine's planned-window state, not through this event. Mapping it would let an advice row shadow the pause
+        # outcome under last-decision-wins. Could this let a real failure pass silently? No: a missing or wrong HVAC
+        # decision on a humid night still shows in the mapped events and the action_log; the notice itself is pinned
+        # by tests/test_humid_window_advice_1692.py.
+        "humid_windows_close_notice",
         # Issue #1432: forecast_model_changed announces which v4 model the decisions read after a nightly fit
         # (stitched CA reading or each room separately). It commands nothing itself; the decisions that read the new
         # model still emit their own deciding events, so leaving it unmapped cannot hide a real failure, while mapping

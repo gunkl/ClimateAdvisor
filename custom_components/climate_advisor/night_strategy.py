@@ -857,6 +857,13 @@ def rank(options: Sequence[StrategyOption]) -> list[StrategyOption]:
     return tied + rest
 
 
+def _pick_recommended(ranked: Sequence[StrategyOption]) -> str | None:
+    """The pick from the ranked offered options. An option that would not run tonight duplicates "closed": it stays
+    listed (with its note) but is never the pick. Shared by ``plan_night`` and ``withhold_outdoor_air``."""
+    pick_pool = [o for o in ranked if o.runs or o.key == OPT_CLOSED]
+    return pick_pool[0].key if pick_pool else (ranked[0].key if ranked else None)
+
+
 def plan_night(inp: NightInputs) -> NightStrategy:
     """Simulate every option for the fan mode, gate by evidence, rank, and recommend."""
     model = inp.model
@@ -900,9 +907,7 @@ def plan_night(inp: NightInputs) -> NightStrategy:
                 }
             )
     ranked = rank([o for o in offered])
-    # an option that would not run tonight duplicates "closed"; it stays listed (with its note) but is never the pick
-    pick_pool = [o for o in ranked if o.runs or o.key == OPT_CLOSED]
-    recommended = pick_pool[0].key if pick_pool else (ranked[0].key if ranked else None)
+    recommended = _pick_recommended(ranked)
     closed = next((o for o in ranked if o.key == OPT_CLOSED), None)
     show_numbers = bool(closed is not None and closed.grade in OFFERED_GRADES)
     debug = {
@@ -928,6 +933,40 @@ def plan_night(inp: NightInputs) -> NightStrategy:
         show_numbers=show_numbers,
         hidden=tuple(hidden),
         debug=debug,
+    )
+
+
+def withhold_outdoor_air(strategy: NightStrategy, dew_point_f: float | None) -> NightStrategy:
+    """``strategy`` without its open-window options while the humid-air guard blocks (Issue #1692). Pure.
+
+    Occupant view: on a muggy evening the bedroom advice never says "open the windows" or "run the fan" (which opens
+    them): the same verdict that stops the fan starts and withdraws the window advice (``dew_point_f``: the outdoor
+    dew point while it blocks, None when it does not). Closed and the blower (windows shut) stay; the recommendation
+    is re-picked from what is left by the same rule as ``plan_night``. Applied on every read of the planned night with
+    the LIVE latch only: tonight's future hours have no humidity forecast (deferred with the other forecast layers).
+    """
+    if dew_point_f is None:
+        return strategy
+    keep = tuple(o for o in strategy.options if not (o.key in _SPECS and _SPECS[o.key].windows))
+    if len(keep) == len(strategy.options):
+        return strategy
+    withheld = tuple(
+        {
+            "key": o.key,
+            "label": o.label,
+            "class": o.cls,
+            "reasons": [f"outdoor air too humid (dew point {dew_point_f:.1f} F)"],
+            "humid_air": True,
+        }
+        for o in strategy.options
+        if o.key in _SPECS and _SPECS[o.key].windows
+    )
+    return dataclasses.replace(
+        strategy,
+        options=keep,
+        recommended=_pick_recommended(keep),
+        hidden=tuple(strategy.hidden) + withheld,
+        debug={**dict(strategy.debug), "humid_air_dp_f": round(float(dew_point_f), 2)},
     )
 
 

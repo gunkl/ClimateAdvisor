@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Close windows by {t}",
   "timeline.card.close_hold_heat": "Close windows to hold heat — outdoor's cooler ({outdoor} vs {indoor}).",
+  "timeline.card.close_humid": "Close the windows — it's humid outside (dew point {dew_point}).",
   "timeline.card.close_not_helping": "Close windows — outdoor's not helping now ({outdoor} vs {indoor}).",
   "timeline.card.open_at": "Open windows at {t}",
   "timeline.card.open_briefly": "Open windows briefly — outdoor's warmer ({outdoor} vs {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA sends the daily briefing.",
   "timeline.step.ceiling_guard.default": "{t}: CA switches the AC on to hold the {ceiling} ceiling.",
   "timeline.step.held.direction_veto.heat": "Keep windows closed to hold heat — outdoor ({outdoor}) would cool the house below its {floor} floor.",
+  "timeline.step.held.direction_veto.humid": "Keep windows closed for now — it's humid outside (dew point {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Keep windows closed for now — outdoor ({outdoor}) isn't cooler than indoor ({indoor}) yet.",
   "timeline.step.held.pause": "{base} It applies when the door or window closes.",
   "timeline.step.held.suffix": "{base} It applies when CA resumes the schedule at {until}.",

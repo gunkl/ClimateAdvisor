@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "Fermez les fenêtres avant {t}",
   "timeline.card.close_hold_heat": "Fermez les fenêtres pour garder la chaleur : il fait plus frais dehors ({outdoor} contre {indoor}).",
+  "timeline.card.close_humid": "Fermez les fenêtres — il fait humide dehors (point de rosée {dew_point}).",
   "timeline.card.close_not_helping": "Fermez les fenêtres : l’extérieur n’aide plus ({outdoor} contre {indoor}).",
   "timeline.card.open_at": "Ouvrez les fenêtres : {t}",
   "timeline.card.open_briefly": "Ouvrez brièvement les fenêtres : il fait plus chaud dehors ({outdoor} contre {indoor}).",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t} : CA envoie le bilan quotidien.",
   "timeline.step.ceiling_guard.default": "{t} : CA allume le climatiseur pour tenir le seuil haut de {ceiling}.",
   "timeline.step.held.direction_veto.heat": "Gardez les fenêtres fermées pour garder la chaleur : l’extérieur ({outdoor}) ferait passer la maison sous son seuil bas de {floor}.",
+  "timeline.step.held.direction_veto.humid": "Gardez les fenêtres fermées pour l’instant — il fait humide dehors (point de rosée {dew_point}).",
   "timeline.step.held.direction_veto.warm": "Gardez les fenêtres fermées pour l’instant : l’extérieur ({outdoor}) n’est pas encore plus frais que l’intérieur ({indoor}).",
   "timeline.step.held.pause": "{base} Cela s’applique quand la porte ou la fenêtre se ferme.",
   "timeline.step.held.suffix": "{base} Cela s’applique quand CA reprend la planification à {until}.",

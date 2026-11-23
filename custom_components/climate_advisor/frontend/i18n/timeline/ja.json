@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "{t}までに窓を閉めてください",
   "timeline.card.close_hold_heat": "窓を閉めて暖かさを保ってください。外のほうが涼しい状態です（室外 {outdoor}、室内 {indoor}）。",
+  "timeline.card.close_humid": "窓を閉めてください — 外は湿っています（露点 {dew_point}）。",
   "timeline.card.close_not_helping": "窓を閉めてください。今は外気が役に立ちません（室外 {outdoor}、室内 {indoor}）。",
   "timeline.card.open_at": "{t}に窓を開けてください",
   "timeline.card.open_briefly": "窓を少しの間開けてください。外のほうが暖かい状態です（室外 {outdoor}、室内 {indoor}）。",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}：CAが毎日のブリーフィングを送信します。",
   "timeline.step.ceiling_guard.default": "{t}：CAがエアコンをオンにして、上限 {ceiling} を保ちます。",
   "timeline.step.held.direction_veto.heat": "窓は閉めたままにして暖かさを保ってください。室外（{outdoor}）では室温が下限 {floor} を下回ります。",
+  "timeline.step.held.direction_veto.humid": "今は窓を閉めたままにしてください — 外は湿っています（露点 {dew_point}）。",
   "timeline.step.held.direction_veto.warm": "今は窓を閉めたままにしてください。室外（{outdoor}）はまだ室内（{indoor}）より涼しくありません。",
   "timeline.step.held.pause": "{base} ドアや窓が閉まると適用されます。",
   "timeline.step.held.suffix": "{base} CAが{until}にスケジュールを再開すると適用されます。",

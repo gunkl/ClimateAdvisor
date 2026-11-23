@@ -306,35 +306,46 @@ def _text_fields(field: str, value: Any, lang: str | None, *, code: bool = False
 
 
 def humid_air_view(engine: Any, unit: str, lang: str | None = None) -> dict[str, Any] | None:
-    """The Status page line while the humid-air guard blocks fan starts (Issue #1691, #1507 H1), else None.
+    """The one humid-air Status line (Issues #1691, #1692; #1507 H1) while the guard blocks, else None.
 
-    Read live from the engine's ``humid_air_status_verdict()`` (the same predicate every fan start asks, shown only
-    when a fan exists for ventilation), never re-decided here. The one humid-air Status line (the
-    new dashboard and the classic page both read ``humid_air_guard``).
-    ``{code, outdoor_dew_point, indoor_dew_point, ceiling, text, text_msg}``; dew points in the display unit.
+    Read live from the engine (``humid_air_verdict()``, the same predicate every fan start and every window-advice
+    surface asks), never re-decided here. The new dashboard and the classic page both read ``humid_air_guard``.
+    While it blocks the window advice is always withheld (#1692: gate, card, plan step, night strategy, briefing);
+    with a fan for ventilation (``humid_air_status_verdict()``) the line also says the fan was not started.
+    ``{code, fan, outdoor_dew_point, indoor_dew_point, ceiling, text, text_msg}``; dew points in the display unit.
     """
-    getter = getattr(engine, "humid_air_status_verdict", None)
+    getter = getattr(engine, "humid_air_verdict", None)
     if not callable(getter):
         return None
     try:
         verdict = getter()
+        fan_getter = getattr(engine, "humid_air_status_verdict", None)
+        fan = bool(callable(fan_getter) and fan_getter() is not None)
     except Exception:  # noqa: BLE001 - a status read must never break the endpoint
         return None
     if verdict is None or not getattr(verdict, "blocks", False) or verdict.outdoor_dp_f is None:
         return None
     outdoor = i18n.Temp(float(verdict.outdoor_dp_f), unit, 1)
+    fan_word = "yes" if fan else "no"
     if verdict.reason == "ceiling" and verdict.ceiling_f is not None:
         msg = i18n.Msg(
-            "status.humid_air.blocking_ceiling", outdoor=outdoor, ceiling=i18n.Temp(float(verdict.ceiling_f), unit, 1)
+            "status.humid_air.blocking_ceiling",
+            fan=fan_word,
+            outdoor=outdoor,
+            ceiling=i18n.Temp(float(verdict.ceiling_f), unit, 1),
         )
     elif verdict.indoor_dp_f is not None:
         msg = i18n.Msg(
-            "status.humid_air.blocking_wetter", outdoor=outdoor, indoor=i18n.Temp(float(verdict.indoor_dp_f), unit, 1)
+            "status.humid_air.blocking_wetter",
+            fan=fan_word,
+            outdoor=outdoor,
+            indoor=i18n.Temp(float(verdict.indoor_dp_f), unit, 1),
         )
     else:
         return None
     return {
         "code": verdict.reason,
+        "fan": fan,
         "outdoor_dew_point": display_temp(verdict.outdoor_dp_f, unit),
         "indoor_dew_point": display_temp(verdict.indoor_dp_f, unit) if verdict.indoor_dp_f is not None else None,
         "ceiling": display_temp(verdict.ceiling_f, unit) if verdict.ceiling_f is not None else None,

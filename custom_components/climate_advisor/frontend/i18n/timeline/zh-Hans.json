@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "请在{t}前关窗",
   "timeline.card.close_hold_heat": "请关窗保温，室外更冷（室外 {outdoor}，室内 {indoor}）。",
+  "timeline.card.close_humid": "请关上窗户 — 室外潮湿（露点 {dew_point}）。",
   "timeline.card.close_not_helping": "请关窗，现在室外空气已没有帮助（室外 {outdoor}，室内 {indoor}）。",
   "timeline.card.open_at": "请在{t}开窗",
   "timeline.card.open_briefly": "请短暂开窗，室外更暖（室外 {outdoor}，室内 {indoor}）。",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}：CA发送每日简报。",
   "timeline.step.ceiling_guard.default": "{t}：CA开启空调，将温度保持在上限 {ceiling} 以内。",
   "timeline.step.held.direction_veto.heat": "请保持关窗以保温，室外（{outdoor}）会使室内降到下限 {floor} 以下。",
+  "timeline.step.held.direction_veto.humid": "暂时保持窗户关闭 — 室外潮湿（露点 {dew_point}）。",
   "timeline.step.held.direction_veto.warm": "暂时请保持关窗，室外（{outdoor}）还没有比室内（{indoor}）更凉爽。",
   "timeline.step.held.pause": "{base} 门窗关闭后生效。",
   "timeline.step.held.suffix": "{base} 在{until} CA恢复计划后生效。",

@@ -1558,6 +1558,17 @@ def should_defer_to_occupancy_setback(occupancy_mode: str) -> bool:
     return occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
 
 
+def close_windows_advice_deferred(occupancy_mode: str | None) -> bool:
+    """Whether a "close the windows" push waits because nobody is home (Issue #1225 item 2, shared by #1692).
+
+    While away / on vacation the setpoint is the setback and closing the windows only re-arms it, so "close the
+    windows and it will cool the house" is neither useful nor true. One rule for the blower close-windows advice
+    (``_advise_close_windows_if_too_warm``) and the humid-air close notice (``coordinator._tick_humid_windows_notice``),
+    and it is the occupancy-setback rule itself (``should_defer_to_occupancy_setback``).
+    """
+    return should_defer_to_occupancy_setback(str(occupancy_mode or ""))
+
+
 def _fan_device_label(config: dict) -> str:
     """Return a human-readable device label for the active fan type."""
     mode = config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -19153,6 +19164,11 @@ class AutomationEngine:
         await self._advise_close_windows_if_too_warm()
         return _hold
 
+    def note_close_windows_advised(self) -> None:
+        """Issue #1692: the humid-air close notice went out during this ventilation session, so the session's blower
+        close-windows advice does not push again (one close-the-windows push per session; re-armed per session)."""
+        self._close_windows_advised = True
+
     async def _advise_close_windows_if_too_warm(self) -> None:
         """Tell the occupant to close the windows when blower ventilation is not enough (Issue #1142 D7).
 
@@ -19164,10 +19180,11 @@ class AutomationEngine:
             return
         if self._close_windows_advised:
             return
-        if self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
+        if close_windows_advice_deferred(self._occupancy_mode):
             # Issue #1225 item 2: while away the setpoint is the setback, not the occupied comfort ceiling, and
             # closing the windows only re-arms that setback -- "close the windows and it will cool the house" is
             # neither useful nor true. Not marked advised: the occupant may come home during the same session.
+            # Issue #1692: ``_close_windows_advised`` is also set by the humid-air close notice (one push per session).
             return
         indoor = self._get_indoor_temp_f()
         comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))

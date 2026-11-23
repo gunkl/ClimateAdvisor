@@ -1,6 +1,7 @@
 {
   "timeline.card.close_by": "{t} तक खिड़कियाँ बंद करें",
   "timeline.card.close_hold_heat": "गर्मी बनाए रखने के लिए खिड़कियाँ बंद करें — बाहर ज़्यादा ठंड है ({outdoor} बनाम {indoor})।",
+  "timeline.card.close_humid": "खिड़कियाँ बंद करें — बाहर नमी है (ओसांक {dew_point})।",
   "timeline.card.close_not_helping": "खिड़कियाँ बंद करें — बाहर की हवा अब मदद नहीं कर रही ({outdoor} बनाम {indoor})।",
   "timeline.card.open_at": "{t} पर खिड़कियाँ खोलें",
   "timeline.card.open_briefly": "खिड़कियाँ थोड़ी देर के लिए खोलें — बाहर ज़्यादा गर्मी है ({outdoor} बनाम {indoor})।",
@@ -34,6 +35,7 @@
   "timeline.step.briefing_send.default": "{t}: CA दैनिक ब्रीफ़िंग भेजता है।",
   "timeline.step.ceiling_guard.default": "{t}: CA एसी चालू करता है ताकि ऊपरी सीमा {ceiling} बनी रहे।",
   "timeline.step.held.direction_veto.heat": "गर्मी बनाए रखने के लिए खिड़कियाँ बंद रखें — बाहर ({outdoor}) से घर निचली सीमा {floor} से नीचे चला जाएगा।",
+  "timeline.step.held.direction_veto.humid": "अभी खिड़कियाँ बंद रखें — बाहर नमी है (ओसांक {dew_point})।",
   "timeline.step.held.direction_veto.warm": "अभी खिड़कियाँ बंद रखें — बाहर ({outdoor}) अभी घर के अंदर ({indoor}) से ज़्यादा ठंडा नहीं है।",
   "timeline.step.held.pause": "{base} यह तब लागू होता है जब दरवाज़ा या खिड़की बंद हो जाती है।",
   "timeline.step.held.suffix": "{base} यह तब लागू होता है जब CA {until} पर शेड्यूल फिर शुरू करता है।",

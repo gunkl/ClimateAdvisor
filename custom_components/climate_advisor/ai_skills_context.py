@@ -685,9 +685,10 @@ def _moisture_lines(coordinator: Any) -> list[str]:
     if not isinstance(ceiling, (int, float)):
         guard_text = "off"
     elif guard.get("blocks"):
+        ended = ", planned window period ended" if guard.get("window_plan_withdrawn") else ""
         guard_text = (
-            f"blocking ({guard.get('reason')}; ceiling {format_temp(ceiling, unit, 1)}): open-window advice withdrawn,"
-            " planned window period ended, no new fan / nat-vent starts"
+            f"blocking ({guard.get('reason')}; ceiling {format_temp(ceiling, unit, 1)}): open-window advice withdrawn"
+            f"{ended}, no new fan / nat-vent starts"
         )
     else:
         guard_text = f"clear (ceiling {format_temp(ceiling, unit, 1)})"

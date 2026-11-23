@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "Interno: {indoor} — nessuna lettura esterna disponibile.",
   "status.next_action.keep_closed_hold_heat": "Tenere chiuse le finestre per trattenere il calore — l’esterno ({outdoor}) porterebbe la casa sotto il limite inferiore di {floor}.",
   "status.next_action.keep_closed_hold_heat_indoor": "Tenere chiuse finestre e porte per trattenere il calore (interno {indoor}).",
-  "status.next_action.keep_closed_humid": "Tenere chiuse le finestre — fuori è umido (punto di rugiada {dew_point}).",
+  "status.next_action.keep_closed_humid": "Tenere chiuse le finestre per ora — fuori è umido (punto di rugiada {dew_point}). Aggiornerò il piano se l’aria si asciuga.",
   "status.next_action.keep_closed_not_cooler": "Tenere chiuse le finestre per ora — l’esterno ({outdoor}) non è ancora più fresco dell’interno ({indoor}).",
   "status.next_action.keep_doors_closed": "Tenere chiuse le porte.",
   "status.next_action.keep_windows_blinds_closed": "Tenere chiuse finestre e tapparelle.",

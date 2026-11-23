@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "الحرارة الداخلية {indoor} — لا توجد قراءة للخارج.",
   "status.next_action.keep_closed_hold_heat": "أبقِ النوافذ مغلقة للحفاظ على الدفء — هواء الخارج ({outdoor}) سيبرّد المنزل دون حدّه الأدنى {floor}.",
   "status.next_action.keep_closed_hold_heat_indoor": "أبقِ النوافذ والأبواب مغلقة للحفاظ على الدفء (الداخل {indoor}).",
-  "status.next_action.keep_closed_humid": "أبقِ النوافذ مغلقة — الجو رطب في الخارج (نقطة الندى {dew_point}).",
+  "status.next_action.keep_closed_humid": "أبقِ النوافذ مغلقة الآن — الجو رطب في الخارج (نقطة الندى {dew_point}). سأحدّث الخطة إذا جفّ الهواء.",
   "status.next_action.keep_closed_not_cooler": "أبقِ النوافذ مغلقة الآن — الخارج ({outdoor}) ليس أبرد من الداخل ({indoor}) بعد.",
   "status.next_action.keep_doors_closed": "أبقِ الأبواب مغلقة.",
   "status.next_action.keep_windows_blinds_closed": "أبقِ النوافذ والستائر مغلقة.",

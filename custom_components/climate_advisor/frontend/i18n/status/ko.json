@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "실내 온도는 {indoor}입니다 — 실외 측정값이 없습니다.",
   "status.next_action.keep_closed_hold_heat": "열을 유지하려면 창문을 닫아 두세요 — 실외({outdoor}) 공기가 들어오면 실내 온도가 하한 {floor} 아래로 내려갑니다.",
   "status.next_action.keep_closed_hold_heat_indoor": "열을 유지하려면 창문과 문을 닫아 두세요 (실내 {indoor}).",
-  "status.next_action.keep_closed_humid": "창문을 닫아 두세요 — 밖이 습합니다(이슬점 {dew_point}).",
+  "status.next_action.keep_closed_humid": "지금은 창문을 닫아 두세요 — 밖이 습합니다(이슬점 {dew_point}). 공기가 건조해지면 계획을 업데이트하겠습니다.",
   "status.next_action.keep_closed_not_cooler": "지금은 창문을 닫아 두세요 — 실외({outdoor})가 아직 실내({indoor})보다 시원하지 않습니다.",
   "status.next_action.keep_doors_closed": "문을 닫아 두세요.",
   "status.next_action.keep_windows_blinds_closed": "창문과 블라인드를 닫아 두세요.",

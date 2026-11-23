@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "W środku jest {indoor} — brak odczytu temperatury zewnętrznej.",
   "status.next_action.keep_closed_hold_heat": "Zostaw okna zamknięte, aby zatrzymać ciepło — powietrze z zewnątrz ({outdoor}) wychłodziłoby dom poniżej dolnej granicy {floor}.",
   "status.next_action.keep_closed_hold_heat_indoor": "Zostaw okna i drzwi zamknięte, aby zatrzymać ciepło (w środku {indoor}).",
-  "status.next_action.keep_closed_humid": "Zostaw okna zamknięte — na zewnątrz jest wilgotno (punkt rosy {dew_point}).",
+  "status.next_action.keep_closed_humid": "Na razie zostaw okna zamknięte — na zewnątrz jest wilgotno (punkt rosy {dew_point}). Zaktualizuję plan, gdy powietrze przeschnie.",
   "status.next_action.keep_closed_not_cooler": "Na razie zostaw okna zamknięte — na zewnątrz ({outdoor}) nie jest jeszcze chłodniej niż w środku ({indoor}).",
   "status.next_action.keep_doors_closed": "Zostaw drzwi zamknięte.",
   "status.next_action.keep_windows_blinds_closed": "Zostaw okna i rolety zamknięte.",

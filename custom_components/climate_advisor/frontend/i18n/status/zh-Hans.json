@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "室内为 {indoor} — 没有室外读数。",
   "status.next_action.keep_closed_hold_heat": "请保持窗户关闭以保温 — 室外（{outdoor}）空气会让室温降到下限 {floor} 以下。",
   "status.next_action.keep_closed_hold_heat_indoor": "请保持门窗关闭以保温（室内 {indoor}）。",
-  "status.next_action.keep_closed_humid": "保持窗户关闭 — 室外潮湿（露点 {dew_point}）。",
+  "status.next_action.keep_closed_humid": "暂时保持窗户关闭 — 室外潮湿（露点 {dew_point}）。如果空气变干，我会更新计划。",
   "status.next_action.keep_closed_not_cooler": "暂时保持窗户关闭 — 室外（{outdoor}）还没有比室内（{indoor}）凉。",
   "status.next_action.keep_doors_closed": "请保持门关闭。",
   "status.next_action.keep_windows_blinds_closed": "请保持窗户和百叶窗关闭。",

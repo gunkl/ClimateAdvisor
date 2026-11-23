@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "В помещении {indoor} — нет показаний уличной температуры.",
   "status.next_action.keep_closed_hold_heat": "Держите окна закрытыми, чтобы сохранить тепло — уличный воздух ({outdoor}) охладил бы дом ниже нижней границы {floor}.",
   "status.next_action.keep_closed_hold_heat_indoor": "Держите окна и двери закрытыми, чтобы сохранить тепло (в помещении {indoor}).",
-  "status.next_action.keep_closed_humid": "Держите окна закрытыми — на улице влажно (точка росы {dew_point}).",
+  "status.next_action.keep_closed_humid": "Пока держите окна закрытыми — на улице влажно (точка росы {dew_point}). Я обновлю план, если воздух станет суше.",
   "status.next_action.keep_closed_not_cooler": "Пока держите окна закрытыми — на улице ({outdoor}) ещё не прохладнее, чем в помещении ({indoor}).",
   "status.next_action.keep_doors_closed": "Держите двери закрытыми.",
   "status.next_action.keep_windows_blinds_closed": "Держите окна и жалюзи закрытыми.",

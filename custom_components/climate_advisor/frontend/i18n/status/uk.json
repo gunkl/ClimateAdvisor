@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "У приміщенні {indoor} — немає показань зовнішньої температури.",
   "status.next_action.keep_closed_hold_heat": "Тримайте вікна зачиненими, щоб зберегти тепло — повітря надворі ({outdoor}) охолодило б будинок нижче нижньої межі {floor}.",
   "status.next_action.keep_closed_hold_heat_indoor": "Тримайте вікна й двері зачиненими, щоб зберегти тепло (у приміщенні {indoor}).",
-  "status.next_action.keep_closed_humid": "Тримайте вікна зачиненими — надворі волого (точка роси {dew_point}).",
+  "status.next_action.keep_closed_humid": "Поки що тримайте вікна зачиненими — надворі волого (точка роси {dew_point}). Я оновлю план, якщо повітря стане сухішим.",
   "status.next_action.keep_closed_not_cooler": "Поки що тримайте вікна зачиненими — надворі ({outdoor}) ще не прохолодніше, ніж у приміщенні ({indoor}).",
   "status.next_action.keep_doors_closed": "Тримайте двері зачиненими.",
   "status.next_action.keep_windows_blinds_closed": "Тримайте вікна та жалюзі зачиненими.",

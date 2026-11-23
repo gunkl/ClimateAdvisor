@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "Binnen is het {indoor} — geen buitentemperatuur beschikbaar.",
   "status.next_action.keep_closed_hold_heat": "Houd de ramen dicht om de warmte vast te houden — de buitenlucht ({outdoor}) zou het huis onder de ondergrens van {floor} laten afkoelen.",
   "status.next_action.keep_closed_hold_heat_indoor": "Houd ramen en deuren dicht om de warmte vast te houden (binnen {indoor}).",
-  "status.next_action.keep_closed_humid": "Houd de ramen dicht — het is vochtig buiten (dauwpunt {dew_point}).",
+  "status.next_action.keep_closed_humid": "Houd de ramen voorlopig dicht — het is vochtig buiten (dauwpunt {dew_point}). Ik pas het plan aan als het droger wordt.",
   "status.next_action.keep_closed_not_cooler": "Houd de ramen voorlopig dicht — buiten ({outdoor}) is het nog niet koeler dan binnen ({indoor}).",
   "status.next_action.keep_doors_closed": "Houd de deuren dicht.",
   "status.next_action.keep_windows_blinds_closed": "Houd ramen en jaloezieën dicht.",

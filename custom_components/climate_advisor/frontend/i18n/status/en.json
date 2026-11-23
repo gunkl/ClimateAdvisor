@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "Indoor is {indoor} — no outdoor reading available.",
   "status.next_action.keep_closed_hold_heat": "Keep windows closed to hold heat — outdoor ({outdoor}) would cool the house below its {floor} floor.",
   "status.next_action.keep_closed_hold_heat_indoor": "Keep windows and doors closed to hold heat (indoor {indoor}).",
-  "status.next_action.keep_closed_humid": "Keep windows closed — it's humid outside (dew point {dew_point}).",
+  "status.next_action.keep_closed_humid": "Keep windows closed for now — it's humid outside (dew point {dew_point}). I'll update the plan if it dries out.",
   "status.next_action.keep_closed_not_cooler": "Keep windows closed for now — outdoor ({outdoor}) isn't cooler than indoor ({indoor}) yet.",
   "status.next_action.keep_doors_closed": "Keep doors closed.",
   "status.next_action.keep_windows_blinds_closed": "Keep windows and blinds closed.",

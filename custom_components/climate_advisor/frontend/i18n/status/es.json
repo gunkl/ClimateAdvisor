@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "Interior: {indoor} — no hay lectura exterior disponible.",
   "status.next_action.keep_closed_hold_heat": "Mantén las ventanas cerradas para conservar el calor — el exterior ({outdoor}) enfriaría la casa por debajo de su límite inferior de {floor}.",
   "status.next_action.keep_closed_hold_heat_indoor": "Mantén ventanas y puertas cerradas para conservar el calor (interior {indoor}).",
-  "status.next_action.keep_closed_humid": "Mantén las ventanas cerradas — hace humedad fuera (punto de rocío {dew_point}).",
+  "status.next_action.keep_closed_humid": "Mantén las ventanas cerradas por ahora — hace humedad fuera (punto de rocío {dew_point}). Actualizaré el plan si el aire se seca.",
   "status.next_action.keep_closed_not_cooler": "Mantén las ventanas cerradas por ahora — el exterior ({outdoor}) aún no está más fresco que el interior ({indoor}).",
   "status.next_action.keep_doors_closed": "Mantén las puertas cerradas.",
   "status.next_action.keep_windows_blinds_closed": "Mantén ventanas y persianas cerradas.",

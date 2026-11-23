@@ -180,8 +180,8 @@ class TestPlannedWindowPeriod:
             _air(session, "17:20", HUMID, hold_min=16)
             assert session.coordinator._current_classification.windows_recommended is True
 
-    def test_zone_without_humidity_is_todays_behaviour(self):
-        """A zone (of a two-zone install) with no humidity anywhere: dew points unknown, the advice stands."""
+    def test_install_without_any_humidity_is_todays_behaviour(self):
+        """No humidity anywhere (no sensor, no weather humidity): dew points unknown, the advice stands."""
         with _session(first={"indoor_f": 75.0, "outdoor_f": 70.0}) as session:
             _window_day(session, "17:05")
             _go(session, "17:20", {"type": "temp_update", "indoor_f": 75.0, "outdoor_f": 70.0})
@@ -190,6 +190,52 @@ class TestPlannedWindowPeriod:
             assert facts.outdoor_dew_point_f is None and facts.indoor_dew_point_f is None
             assert session.coordinator._current_classification.windows_recommended is True
             assert session.coordinator._humid_air_status() is None
+
+
+class TestInstalls:
+    """The plan's install matrix for the advice: two zones (one without humidity), a WHF install, windows only."""
+
+    @staticmethod
+    def _zone(outdoor: dict, indoor: dict) -> tuple[bool, Any]:
+        """One zone's coordinator through a window evening: (advice still standing, verdict)."""
+        first = {**indoor, **DRY}
+        with _session(first=first) as zone:
+            _window_day(zone, "17:05")
+            _air(zone, "17:20", outdoor, indoor=indoor, hold_min=16)
+            return zone.coordinator._current_classification.windows_recommended, zone.coordinator._humid_air_verdict()
+
+    def test_two_zones_one_without_indoor_humidity(self):
+        """Two zones share the outdoor sensor; zone B has no indoor humidity. Each zone is its own coordinator, as in
+        production (the guard is per zone); the harness patches one clock per session, so they run one after another.
+        """
+        zone_b_indoor = {"indoor_f": 75.0}  # no humidity: the indoor dew point is unknown
+        # muggy (above the ceiling): the ceiling clause needs only the outdoor dew point, both zones withdraw
+        for indoor in (INDOOR, zone_b_indoor):
+            standing, verdict = self._zone(HUMID, indoor)
+            assert standing is False and verdict.reason == "ceiling"
+        # humid but under the ceiling and wetter than zone A's house (59.8 vs 55 F): only zone A, which knows its
+        # indoor dew point, withdraws; zone B cannot judge "wetter than the house" (today's behaviour)
+        wetter = {"outdoor_f": 70.0, "outdoor_humidity": 70.0}
+        standing_a, verdict_a = self._zone(wetter, INDOOR)
+        assert standing_a is False and verdict_a.reason == "wetter_than_house"
+        standing_b, verdict_b = self._zone(wetter, zone_b_indoor)
+        assert standing_b is True and verdict_b.blocks is False and verdict_b.indoor_dp_f is None
+
+    def test_whole_house_fan_install(self):
+        with _session(fan_mode="whole_house_fan", fan_entity="fan.whf") as session:
+            _window_day(session, "17:05")
+            _air(session, "17:20", HUMID, hold_min=16)
+            assert session.coordinator._current_classification.windows_recommended is False
+            assert not advises_opening(_card(session, open_=False))
+            assert not session.engine._natural_vent_active  # windows shut: nothing started
+
+    def test_windows_only_install(self):
+        """No fan configured (the default ``_config``): the advice is the only lever and it is withdrawn."""
+        with _session() as session:
+            assert session.coordinator.config.get("fan_mode", "disabled") in ("disabled", "", None)
+            _window_day(session, "17:05")
+            _air(session, "17:20", HUMID, hold_min=16)
+            assert session.coordinator._current_classification.windows_recommended is False
 
 
 class TestNextActionCard:
@@ -214,7 +260,13 @@ class TestNextActionCard:
             card = _card(session, open_=False)
             assert not advises_opening(card)
             assert card.code == "keep_closed_humid"
-            assert "humid" in str(card).lower() and "67°F" in str(card)
+            assert str(card) == (
+                "Keep windows closed for now — it's humid outside (dew point 67°F). "
+                "I'll update the plan if it dries out."
+            )
+            # the guard releases: the card invites opening again (the plan's 7 PM step)
+            _air(session, "18:00", DRY, hold_min=20)
+            assert advises_opening(_card(session, open_=False))
 
     def test_open_window_is_told_to_close(self):
         with _session() as session:
@@ -253,23 +305,47 @@ class TestCloseWindowsNotice:
             assert len(_notices(session)) == 1
             assert session.coordinator.data["humid_air_status"].code == "ceiling"
 
-    def test_reopening_within_the_hour_does_not_notify_again(self):
+    def test_a_reopened_window_waits_out_the_hour_then_gets_one_reminder(self):
+        """A new episode inside the 60-minute interval is held back; if the window is still open when the interval
+        runs out it gets one notice then (one reminder an hour later), never one per tick."""
         with _session() as session:
             _air(session, "17:01", HUMID, hold_min=16)
             _go(session, "17:20", {"type": "sensor_open", "entity": WINDOW})
             session.advance_to(_at("17:26"))
-            assert len(_notices(session)) == 1
+            first = _notices(session)
+            assert len(first) == 1
+            first_at = datetime.fromisoformat(first[0]["time"])
             _go(session, "17:30", {"type": "sensor_close", "entity": WINDOW})
             session.advance_to(_at("17:36"))
             _go(session, "17:40", {"type": "sensor_open", "entity": WINDOW})
-            session.advance_to(_at("17:51"))
-            assert len(_notices(session)) == 1  # a new episode inside the 60-minute interval
-            _go(session, "18:30", {"type": "sensor_close", "entity": WINDOW})
-            session.advance_to(_at("18:36"))
-            _air(session, "18:37", HUMID)  # keep the reading fresh
-            _go(session, "18:40", {"type": "sensor_open", "entity": WINDOW})
-            session.advance_to(_at("18:51"))
-            assert len(_notices(session)) == 2
+            session.advance_to(_at("18:15"))
+            assert len(_notices(session)) == 1  # the new episode waits for the interval
+            _air(session, "18:16", HUMID)  # keep the reading fresh
+            session.advance_to(_at("18:45"))
+            notices = _notices(session)
+            assert len(notices) == 2
+            delay = datetime.fromisoformat(notices[1]["time"]) - first_at
+            assert timedelta(minutes=60) <= delay <= timedelta(minutes=65)  # sent on the first tick after the hour
+            session.advance_to(_at("19:30"))
+            assert len(_notices(session)) == 2  # still the same (second) episode
+
+    def test_notice_while_cas_own_fan_session_runs(self):
+        """D4: a running nat-vent session is kept when the guard engages; the notice still goes out (humid air is the
+        reason to close) and stands for the blower-style close advice of that session."""
+        warm = {"indoor_f": 77.0, "humidity": 50.0}
+        with _session(fan_mode="whole_house_fan", fan_entity="fan.whf") as session:
+            _window_day(session, "17:05")
+            _air(session, "17:06", DRY, indoor=warm)
+            _go(session, "17:10", {"type": "sensor_open", "entity": WINDOW})
+            session.advance_to(_at("17:20"))
+            ae = session.engine
+            assert ae._natural_vent_active is True  # control: dry air, the fan session started
+            _air(session, "17:21", HUMID, indoor=warm, hold_min=20)
+            assert ae._natural_vent_active is True  # start-only: the running session is not ended here
+            notices = _notices(session)
+            assert len(notices) == 1 and notices[0]["ac_takes_over"] is True
+            assert ae._close_windows_advised is True  # the session's own close advice will not push again
+            assert _pushes(session)[0]["data"]["message"].endswith("the AC will take over.")
 
     def test_dry_night_with_window_open_sends_nothing(self):
         with _session() as session:
@@ -543,9 +619,10 @@ class TestBriefing:
         assert "Indoors: dew point 55°F (50% relative humidity)." in text
         assert "Outdoors: dew point 67°F (90% relative humidity)." in text
         assert "too humid to bring in right now (dew point 67°F, at or above your 65°F limit)" in text
-        assert "The fan stayed off 2 times today" in text  # renders once #1691 emits nat_vent_humid_skip
-        assert "close the windows once today" in text
-        assert "Windows: Closed — humid outside (dew point 67°F)" in text
+        # renders once #1691 emits nat_vent_humid_skip (one per humid spell)
+        assert "Since midnight the fan stayed off during 2 humid spells" in text
+        assert "Since midnight I asked you to close the windows once" in text
+        assert "Windows: Closed for now — humid outside (dew point 67°F); I'll update the plan if it dries out" in text
 
     def test_no_humidity_no_section(self, frozen_now):
         frozen_now(datetime(2026, 7, 15, 6, 0, tzinfo=UTC))
@@ -630,28 +707,72 @@ class TestEdges:
         humid = ns.withhold_outdoor_air(only_open, 66.9)
         assert humid.options == () and humid.recommended is None  # nothing to advise, never "open the windows"
 
-    def test_heat_only_thermostat_gets_no_ac_notice(self):
+    @pytest.mark.parametrize(
+        ("caps", "mode", "pre_pause", "key"),
+        [
+            ((True, False), "heat", None, "notify.humid_windows_close_neutral"),  # heat-only thermostat
+            ((True, True), "heat", None, "notify.humid_windows_close_neutral"),  # can cool, but heating
+            ((True, True), "off", "heat", "notify.humid_windows_close_neutral"),  # paused from heat
+            ((True, True), "off", "cool", "notify.humid_windows_close"),  # paused from cool: the AC takes over
+            ((True, True), "heat_cool", None, "notify.humid_windows_close"),
+        ],
+    )
+    def test_ac_wording_only_when_the_thermostat_will_cool(self, caps, mode, pre_pause, key):
         coord = _gate_stub(55.0, 66.9)
         coord.data = {}
         coord.async_update_listeners = MagicMock()
         coord._any_sensor_open_and_settled = lambda: True
         coord._startup_coalesce_active = False
         coord._occupancy_mode = "home"
+        coord._humid_notice_episode = False
+        coord._humid_notice_last_at = None
         coord.automation_engine = SimpleNamespace(
-            _get_thermostat_capabilities=lambda: SimpleNamespace(supports_heat=True, supports_cool=False)
+            _get_thermostat_capabilities=lambda: SimpleNamespace(supports_heat=caps[0], supports_cool=caps[1]),
+            _paused_by_door=pre_pause is not None,
+            _pre_pause_mode=pre_pause,
+            _pre_fan_hvac_mode=None,
+            _natural_vent_active=False,
         )
+        coord._thermostat_hvac_mode = lambda: mode
         coord._emit_event = MagicMock()
         coord._notify_in_background = MagicMock()
-        now = datetime(2026, 7, 15, 20, 0, tzinfo=UTC)
-        coord._tick_humid_windows_notice(now)
-        assert not coord._emit_event.called and not coord._notify_in_background.called
-        assert coord.data["humid_air_status"].code == "ceiling"  # the Status line still says why
-        coord.automation_engine = SimpleNamespace(
-            _get_thermostat_capabilities=lambda: SimpleNamespace(supports_heat=True, supports_cool=True)
-        )
+        coord._tick_humid_windows_notice(datetime(2026, 7, 15, 20, 0, tzinfo=UTC))
+        assert coord._emit_event.call_count == 1
+        assert coord._notify_in_background.call_args.args[1].key == key
+        assert coord.data["humid_air_status"].code == "ceiling"  # the Status line says why
+
+    def test_blower_advice_already_sent_this_session_suppresses_the_notice(self):
+        coord = _gate_stub(55.0, 66.9)
+        coord.data = {}
+        coord.async_update_listeners = MagicMock()
+        coord._any_sensor_open_and_settled = lambda: True
+        coord._startup_coalesce_active = False
+        coord._occupancy_mode = "home"
         coord._humid_notice_episode = False
-        coord._tick_humid_windows_notice(now)
-        assert coord._emit_event.call_count == 1 and coord._notify_in_background.call_count == 1
+        coord._humid_notice_last_at = None
+        coord.automation_engine = SimpleNamespace(_natural_vent_active=True, _close_windows_advised=True)
+        coord._emit_event = MagicMock()
+        coord._notify_in_background = MagicMock()
+        coord._tick_humid_windows_notice(datetime(2026, 7, 15, 20, 0, tzinfo=UTC))
+        assert not coord._emit_event.called and not coord._notify_in_background.called
+        assert coord._humid_notice_episode is True  # marked: no retry every tick
+
+    def test_humid_notice_suppresses_the_blower_advice_of_the_same_session(self):
+        from custom_components.climate_advisor.automation import AutomationEngine, close_windows_advice_deferred
+
+        assert close_windows_advice_deferred("away") and close_windows_advice_deferred("vacation")
+        assert not close_windows_advice_deferred("home")
+        engine = object.__new__(AutomationEngine)
+        engine._natural_vent_active = True
+        engine.config = {"fan_mode": "hvac_fan", "comfort_cool": 74}
+        engine._close_windows_advised = True  # set by the humid notice
+        engine._occupancy_mode = "home"
+        engine._get_indoor_temp_f = lambda: 80.0
+        engine._notify = MagicMock()
+        import asyncio
+
+        asyncio.run(engine._advise_close_windows_if_too_warm())
+        assert not engine._notify.called
 
     def test_verdict_failure_reads_as_not_blocking(self):
         coord = _gate_stub(55.0, 66.9)
@@ -693,7 +814,12 @@ class TestEdges:
             assert shown["outdoor"]["dp_f"] == pytest.approx(dew_point_f(70.0, 90.0), abs=0.05)
             assert shown["outdoor"]["rh"] == pytest.approx(90.0)
             assert shown["indoor"]["dp_f"] == pytest.approx(dew_point_f(75.0, 50.0), abs=0.05)
-            assert shown["guard"] == {"blocks": True, "reason": "ceiling", "ceiling_f": 65.0}
+            assert shown["guard"] == {
+                "blocks": True,
+                "window_plan_withdrawn": False,  # no window period planned today
+                "reason": "ceiling",
+                "ceiling_f": 65.0,
+            }
             facts = session.coordinator._briefing_humidity()
             assert facts is not None and facts.blocking == "ceiling" and facts.outdoor_rh == pytest.approx(90.0)
 
@@ -720,3 +846,62 @@ class TestEdges:
             assert c._briefing_humid_blocking is True
             assert "humid outside" in str(c._last_briefing_short)
             assert c._maybe_regenerate_briefing_for_drift() is False  # once per flip
+            # A2 (mirror): the guard releases on dry air -> the shown text is rewritten back to a window plan
+            _air(session, "18:00", DRY, hold_min=20)
+            assert c._humid_blocks() is None
+            assert c._maybe_regenerate_briefing_for_drift() is True
+            assert c._briefing_humid_blocking is False
+            assert "humid outside" not in str(c._last_briefing_short)
+            assert c._maybe_regenerate_briefing_for_drift() is False
+
+    @pytest.mark.parametrize("stored", [True, False, "missing"])
+    def test_briefing_humid_baseline_survives_a_restart(self, stored):
+        """A3/B9: the flag the shown briefing was written with is saved and restored through the real save / restore
+        path, so a restart mid-day keeps following the guard; a state saved before 0.9.74 (no flag) reads as
+        "written while not blocking"."""
+        from tools.sim_harness._loop import run_coro
+
+        with _session() as session:
+            c = session.coordinator
+            c._briefing_humid_blocking = stored is True
+            saved = c._build_state_dict()
+            if stored == "missing":
+                saved["briefing_state"].pop("briefing_humid_blocking")
+            else:
+                assert saved["briefing_state"]["briefing_humid_blocking"] is stored
+            c._briefing_humid_blocking = None
+            c._state_persistence.load = lambda: saved
+            run_coro(c.async_restore_state())
+            assert c._briefing_humid_blocking is (stored is True)
+
+    def test_a_briefing_stored_by_0_9_73_still_renders(self, frozen_now):
+        """B1: today's briefing saved before the upgrade has no humidity slot; restoring it must not show a raw key."""
+        from custom_components.climate_advisor.briefing import generate_briefing_msg
+
+        coord_mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        frozen_now(datetime(2026, 7, 15, 6, 0, tzinfo=UTC))
+        c = DayClassification(
+            day_type="cold",
+            trend_direction="stable",
+            trend_magnitude=1.0,
+            today_high=45.0,
+            today_low=30.0,
+            tomorrow_high=45.0,
+            tomorrow_low=30.0,
+        )
+        msg = generate_briefing_msg(
+            classification=c,
+            comfort_heat=70.0,
+            comfort_cool=75.0,
+            setback_heat=60.0,
+            setback_cool=80.0,
+            wake_time=time(6, 30),
+            sleep_time=time(22, 30),
+        )
+        wire = msg.to_wire()
+        old = {**wire, "params": {k: v for k, v in wire["params"].items() if k not in ("has_humidity", "humidity")}}
+        assert old["key"] == "briefing.full.cold" and "has_humidity" not in old["params"]
+        text = coord_mod._restore_briefing_text("stored English", old)
+        for lang in ("en", "de"):
+            rendered = i18n.render(text.msg, lang)
+            assert not rendered.startswith("briefing.full") and "========" in rendered

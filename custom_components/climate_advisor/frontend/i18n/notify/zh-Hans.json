@@ -37,6 +37,7 @@
   "notify.grace_expired_manual": "您对恒温器的手动更改已到期。Climate Advisor已恢复自动控制。",
   "notify.grace_repause": "暂停期已结束，但仍有门/窗处于打开状态。暖通空调已再次暂停。",
   "notify.humid_windows_close": "室外潮湿（露点 {dew_point}）：请关上窗户，空调会接手。",
+  "notify.humid_windows_close_neutral": "室外潮湿（露点 {dew_point}）：请关上窗户，挡住湿气。",
   "notify.invariant_ac_whf_mutex": "全屋换气扇正在实际运行，同时空调正处于{hvac_action}状态——二者绝不能同时运行。",
   "notify.invariant_violated": "{detail}Climate Advisor的全屋换气扇安全检查正在尽力处理，但由于这种情况绝不应该发生，所以向您提示。",
   "notify.override_self_resolved": "检测到恒温器的短暂调整——已视为临时调整（在确认时间内已恢复）。Climate Advisor继续正常运行。",

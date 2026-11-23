@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "İç sıcaklık {indoor} — dış sıcaklık okuması yok.",
   "status.next_action.keep_closed_hold_heat": "Isıyı korumak için pencereleri kapalı tutun — dış hava ({outdoor}) evi {floor} alt sınırının altına soğutur.",
   "status.next_action.keep_closed_hold_heat_indoor": "Isıyı korumak için pencere ve kapıları kapalı tutun (iç {indoor}).",
-  "status.next_action.keep_closed_humid": "Pencereleri kapalı tutun — dışarısı nemli (çiğ noktası {dew_point}).",
+  "status.next_action.keep_closed_humid": "Şimdilik pencereleri kapalı tutun — dışarısı nemli (çiğ noktası {dew_point}). Hava kurursa planı güncelleyeceğim.",
   "status.next_action.keep_closed_not_cooler": "Şimdilik pencereleri kapalı tutun — dışarısı ({outdoor}) henüz içeriden ({indoor}) serin değil.",
   "status.next_action.keep_doors_closed": "Kapıları kapalı tutun.",
   "status.next_action.keep_windows_blinds_closed": "Pencereleri ve panjurları kapalı tutun.",

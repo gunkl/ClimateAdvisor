@@ -37,6 +37,7 @@
   "notify.grace_expired_manual": "La modifica manuale del termostato è scaduta. Climate Advisor ha ripreso il controllo automatico.",
   "notify.grace_repause": "Il periodo di pausa è scaduto ma una porta/finestra è ancora aperta. La climatizzazione è stata messa di nuovo in pausa.",
   "notify.humid_windows_close": "Fuori è umido (punto di rugiada {dew_point}): chiudere le finestre e il condizionatore subentrerà.",
+  "notify.humid_windows_close_neutral": "Fuori è umido (punto di rugiada {dew_point}): chiudere le finestre per tenere fuori l’umidità.",
   "notify.invariant_ac_whf_mutex": "Il condizionatore è attivo ({hvac_action}) mentre la ventola per tutta la casa è fisicamente in funzione: non devono mai funzionare insieme.",
   "notify.invariant_violated": "{detail} Il controllo di sicurezza della ventola per tutta la casa di Climate Advisor interviene dove può, ma viene segnalato perché non dovrebbe mai accadere.",
   "notify.override_self_resolved": "Rilevata una breve regolazione del termostato: considerata transitoria (annullata entro il tempo di conferma). Climate Advisor continua a funzionare normalmente.",

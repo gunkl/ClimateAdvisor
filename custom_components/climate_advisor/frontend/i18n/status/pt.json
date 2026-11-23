@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "Interior: {indoor} — sem leitura exterior disponível.",
   "status.next_action.keep_closed_hold_heat": "Mantenha as janelas fechadas para manter o calor — o exterior ({outdoor}) arrefeceria a casa abaixo do limite inferior de {floor}.",
   "status.next_action.keep_closed_hold_heat_indoor": "Mantenha janelas e portas fechadas para manter o calor (interior {indoor}).",
-  "status.next_action.keep_closed_humid": "Mantenha as janelas fechadas — está húmido lá fora (ponto de orvalho {dew_point}).",
+  "status.next_action.keep_closed_humid": "Mantenha as janelas fechadas por agora — está húmido lá fora (ponto de orvalho {dew_point}). Atualizo o plano se o ar secar.",
   "status.next_action.keep_closed_not_cooler": "Mantenha as janelas fechadas por agora — o exterior ({outdoor}) ainda não está mais fresco do que o interior ({indoor}).",
   "status.next_action.keep_doors_closed": "Mantenha as portas fechadas.",
   "status.next_action.keep_windows_blinds_closed": "Mantenha janelas e estores fechados.",

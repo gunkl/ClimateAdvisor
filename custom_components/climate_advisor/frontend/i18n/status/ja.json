@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "室内は{indoor}です — 屋外の測定値がありません。",
   "status.next_action.keep_closed_hold_heat": "熱を保つため窓を閉めたままにしてください — 屋外（{outdoor}）の空気が入ると、室温が下限の{floor}を下回ります。",
   "status.next_action.keep_closed_hold_heat_indoor": "熱を保つため窓とドアを閉めたままにしてください（室内 {indoor}）。",
-  "status.next_action.keep_closed_humid": "窓は閉めたままにしてください — 外は湿っています（露点 {dew_point}）。",
+  "status.next_action.keep_closed_humid": "今は窓を閉めたままにしてください — 外は湿っています（露点 {dew_point}）。乾いてきたら計画を更新します。",
   "status.next_action.keep_closed_not_cooler": "今は窓を閉めたままにしてください — 屋外（{outdoor}）はまだ室内（{indoor}）より涼しくありません。",
   "status.next_action.keep_doors_closed": "ドアを閉めたままにしてください。",
   "status.next_action.keep_windows_blinds_closed": "窓とブラインドを閉めたままにしてください。",

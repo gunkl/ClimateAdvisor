@@ -64,6 +64,7 @@ from .automation import (
     _refuse_if_shut_down,
     awake_comfort_edges,
     band_resolver_for,
+    close_windows_advice_deferred,
     compute_bedtime_setback,
     compute_pre_cool_target,
     fallback_edges_without_classification,
@@ -1105,6 +1106,9 @@ def _first_non_none(*values):
     return next((v for v in values if v is not None), None)
 
 
+_READ_HUMID = object()  # ``_outdoor_direction_ok``: read the humid-air verdict itself (no caller-read verdict)
+
+
 def _fmt_dp(value: float | None) -> str:
     """A dew point (internal °F) for a log line at its native resolution (two decimals), ``unknown`` when None."""
     return f"{value:.2f}" if isinstance(value, (int, float)) else "unknown"
@@ -1255,10 +1259,19 @@ def _briefing_msg_wire(text: Any) -> dict | None:
     return msg.to_wire() if msg is not None else None
 
 
+# Issue #1692: slots a newer ``briefing.full.*`` message needs that a briefing stored by an older version lacks (an
+# absent paragraph, the ``briefing._slots`` convention), so today's restored briefing still renders after an upgrade.
+_BRIEFING_FULL_SLOTS_ADDED: dict[str, str] = {"has_humidity": "no", "humidity": ""}
+
+
 def _restore_briefing_text(text: str, wire: Any) -> str:
     """A stored briefing: its English plus, when a message was stored, the message (a malformed one is dropped)."""
     if isinstance(wire, dict):
         try:
+            key = wire.get("key")
+            params = wire.get("params")
+            if isinstance(key, str) and key.startswith("briefing.full.") and isinstance(params, dict):
+                wire = {**wire, "params": {**_BRIEFING_FULL_SLOTS_ADDED, **params}}  # a pre-0.9.74 briefing
             return BriefingText(text, i18n.Msg.from_wire(wire))
         except KeyError, TypeError, ValueError, i18n.I18nError:
             _LOGGER.warning("Stored briefing message could not be read; showing the stored English text")
@@ -1592,6 +1605,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1404: the time-of-use bank baked into the briefing text (drift trigger: the bank opened or ended).
         self._briefing_tou_bank: tuple | None = None
         self._briefing_humid_blocking: bool | None = None  # Issue #1692: the humid-air guard as the text was written
+        # Issue #1692: the close-the-windows notice's episode and spacing (memory only: a restart can send one more)
+        self._humid_notice_episode: bool = False
+        self._humid_notice_last_at: datetime | None = None
         self._door_open_timers: dict[str, Any] = {}
         self._door_open_timer_expiry: dict[str, str] = {}
         # Issue #645: last_changed timestamps known to be a reconnect/availability blip
@@ -3085,6 +3101,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_day_type = briefing.get("briefing_day_type")
         self._briefing_today_high = briefing.get("briefing_today_high")
         self._briefing_windows_recommended = briefing.get("briefing_windows_recommended")
+        # Issue #1692: missing (a state saved before 0.9.74) = written while not blocking
+        self._briefing_humid_blocking = bool(briefing.get("briefing_humid_blocking", False))
         _restored_nat_vent_cutoff = briefing.get("briefing_nat_vent_cutoff")
         try:
             self._briefing_nat_vent_cutoff = (
@@ -3235,6 +3253,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "briefing_day_type": self._briefing_day_type,
                 "briefing_today_high": getattr(self, "_briefing_today_high", None),
                 "briefing_windows_recommended": getattr(self, "_briefing_windows_recommended", None),
+                "briefing_humid_blocking": getattr(self, "_briefing_humid_blocking", None),
                 "briefing_nat_vent_cutoff": (
                     getattr(self, "_briefing_nat_vent_cutoff", None).isoformat()
                     if getattr(self, "_briefing_nat_vent_cutoff", None)
@@ -4438,8 +4457,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if reason is None:
             # Issue #1692 (plan #1507 H1): the same humid-air verdict the fan starts read. A humid night is not a
             # window night: the advice is withdrawn, which also ends the planned window period (intended).
-            humid = self._humid_air_verdict()
-            if humid is not None and humid.blocks:
+            humid = self._humid_blocks()
+            if humid is not None:
                 _LOGGER.info(
                     "Window advice withdrawn: humid outside reason=%s outdoor_dp=%s indoor_dp=%s ceiling=%s",
                     humid.reason,
@@ -4471,6 +4490,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("humid-air verdict unavailable", exc_info=True)
             return None
 
+    def _humid_blocks(self, now: datetime | None = None) -> HumidAirVerdict | None:
+        """The verdict while the humid-air guard withholds outdoor air (Issue #1692), None when it does not.
+
+        The ONE "is it blocking?" read for the advice surfaces. A blocking verdict always carries the outdoor dew point
+        (both clauses need it). Read it once per decision pass and hand it on (``_outdoor_direction_ok(humid=...)``)."""
+        humid = self._humid_air_verdict(now)
+        if humid is None or not humid.blocks or humid.outdoor_dp_f is None:
+            return None
+        return humid
+
     def _humid_air_status(
         self, now: datetime | None = None, verdict: HumidAirVerdict | None = None
     ) -> CodedText | None:
@@ -4479,7 +4508,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Occupant view: on a muggy night Climate Advisor stops suggesting open windows (and, with #1691, starting the
         fan); this line says why, with the outdoor dew point in the user's unit. ``verdict``: one already read now.
         """
-        humid = verdict if verdict is not None else self._humid_air_verdict(now)
+        humid = verdict if verdict is not None else self._humid_blocks(now)
         if humid is None or not humid.blocks or humid.outdoor_dp_f is None:
             return None
         unit = self.config.get("temp_unit", "fahrenheit")
@@ -4493,37 +4522,46 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Tell the occupant once to close the windows when humid air is coming in (Issue #1692). Never raises.
 
         Occupant view: the windows are open on a muggy night; the thermostat stays off while they are open (rule 3)
-        and the fan will not start, so the house only gets stickier. One push: "Humid outside (dew point X): close
-        the windows and the AC will take over." Sent once per episode (the guard blocking with a window open past
-        its delay); a new episode waits ``HUMID_WINDOWS_NOTICE_MIN_INTERVAL_MINUTES`` after the last notice. Not sent
-        while away or on vacation (closing the windows then only re-arms the setback, the #1225 rule of the
-        blower close-windows advice), nor to a thermostat that cannot cool. Called on the 5-minute tick after the
-        dew-point sample; also refreshes the Status line.
+        and no new fan session starts, so the house only gets stickier. One push: "Humid outside (dew point X): close
+        the windows and the AC will take over." when the thermostat can cool and the mode Climate Advisor returns to is
+        cool / heat_cool (``_humid_notice_cools``), else "... close the windows to keep the moisture out."
+
+        - Once per episode: the guard blocking with a window open past its delay. A new episode waits
+          ``HUMID_WINDOWS_NOTICE_MIN_INTERVAL_MINUTES`` after the last notice; one held back by that interval is sent
+          when it runs out if the window is still open. The spacing is in memory only: a restart can send one more.
+        - One close-the-windows push per window-open episode: during a ventilation session the blower advice
+          (``_close_windows_advised``, #1142 D7, re-armed per session) and this notice share the engine's flag, so
+          whichever goes out first stands for both.
+        - Sent while Climate Advisor's own fan / nat-vent session is still running (a running session is kept, #1691
+          D4): humid air is the reason to close; closing then stops the fan (sealed-house stop) and the thermostat
+          resumes.
+        - Not while away or on vacation (``automation.close_windows_advice_deferred``, shared with the blower advice).
+        Called on the 5-minute tick after the dew-point sample; also refreshes the Status line.
         """
         try:
-            humid = self._humid_air_verdict(now)
+            humid = self._humid_blocks(now)
             status = self._humid_air_status(now, humid)
             data = getattr(self, "data", None)
             if isinstance(data, dict) and data.get("humid_air_status") != status:
                 data["humid_air_status"] = status
                 self.async_update_listeners()
-            open_now = bool(self._any_sensor_open_and_settled())
-            if humid is None or not humid.blocks or not open_now or humid.outdoor_dp_f is None:
+            if humid is None or humid.outdoor_dp_f is None or not self._any_sensor_open_and_settled():
                 self._humid_notice_episode = False
                 return
-            if self.__dict__.get("_humid_notice_episode"):
+            if self._humid_notice_episode:
                 return
-            if self._startup_coalesce_active or self._occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION):
+            if self._startup_coalesce_active or close_windows_advice_deferred(self._occupancy_mode):
                 return
             ae = self.automation_engine
-            caps = ae._get_thermostat_capabilities() if ae is not None else None
-            if caps is not None and caps.supports_heat and not caps.supports_cool:
-                self._humid_notice_episode = True
+            session = ae is not None and bool(getattr(ae, "_natural_vent_active", False))
+            if session and getattr(ae, "_close_windows_advised", False):
+                self._humid_notice_episode = True  # the blower advice already asked this episode to close up
                 _LOGGER.info(
-                    "Humid-window notice skipped: the thermostat cannot cool outdoor_dp=%s", _fmt_dp(humid.outdoor_dp_f)
+                    "Humid-window notice skipped: close-windows advice already sent outdoor_dp=%s",
+                    _fmt_dp(humid.outdoor_dp_f),
                 )
                 return
-            last = self.__dict__.get("_humid_notice_last_at")
+            last = self._humid_notice_last_at
             if (
                 isinstance(last, datetime)
                 and seconds_since(last, now=now) < HUMID_WINDOWS_NOTICE_MIN_INTERVAL_MINUTES * 60
@@ -4531,13 +4569,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return
             self._humid_notice_episode = True
             self._humid_notice_last_at = now
+            if session:
+                ae._close_windows_advised = True  # the running session's blower advice will not push again
             unit = self.config.get("temp_unit", "fahrenheit")
+            cools = self._humid_notice_cools()
             _LOGGER.info(
-                "Humid-window notice sent: reason=%s outdoor_dp=%s indoor_dp=%s ceiling=%s",
+                "Humid-window notice sent: reason=%s outdoor_dp=%s indoor_dp=%s ceiling=%s ac_takes_over=%s",
                 humid.reason,
                 _fmt_dp(humid.outdoor_dp_f),
                 _fmt_dp(humid.indoor_dp_f),
                 _fmt_dp(humid.ceiling_f),
+                cools,
             )
             self._emit_event(
                 "humid_windows_close_notice",
@@ -4546,16 +4588,38 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "outdoor_dp_f": round(float(humid.outdoor_dp_f), 2),
                     "indoor_dp_f": round(float(humid.indoor_dp_f), 2) if humid.indoor_dp_f is not None else None,
                     "ceiling_f": humid.ceiling_f,
+                    "ac_takes_over": cools,
                 },
             )
             self._notify_in_background(
                 i18n.Msg("notify.title.humid_windows_close"),
-                i18n.Msg("notify.humid_windows_close", dew_point=i18n.Temp(float(humid.outdoor_dp_f), unit)),
+                i18n.Msg(
+                    "notify.humid_windows_close" if cools else "notify.humid_windows_close_neutral",
+                    dew_point=i18n.Temp(float(humid.outdoor_dp_f), unit),
+                ),
                 "door_window_pause",
                 email=False,
             )
         except Exception:  # noqa: BLE001 - a notice must never break the tick
             _LOGGER.debug("humid-window notice check failed", exc_info=True)
+
+    def _humid_notice_cools(self) -> bool:
+        """Whether "the AC will take over" is true once the windows close (Issue #1692): the thermostat can cool and the
+        mode it returns to is cool / heat_cool (the live mode, else the one the door/window pause or the fan session
+        interrupted). A heat-only thermostat, or one heating, gets the neutral wording."""
+        ae = self.automation_engine
+        if ae is None:
+            return False
+        try:
+            caps = ae._get_thermostat_capabilities()
+            if caps is not None and caps.supports_heat and not caps.supports_cool:
+                return False
+            mode = self._thermostat_hvac_mode()
+            if mode in (None, "off"):
+                mode = (ae._pre_pause_mode if ae._paused_by_door else None) or getattr(ae, "_pre_fan_hvac_mode", None)
+            return mode in ("cool", "heat_cool")
+        except Exception:  # noqa: BLE001 - the wording falls back to the neutral sentence
+            return False
 
     def humidity_display(self, now: datetime | None = None) -> dict[str, Any]:
         """The house's and the outside air's moisture as the decisions see it (Issue #1696), for the briefing, the AI
@@ -4581,8 +4645,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "source": dp.humidity_source if known and dp is not None else None,
             }
         humid = self._humid_air_verdict(at)
+        blocks = humid is not None and humid.blocks and humid.outdoor_dp_f is not None
+        c = getattr(self, "_current_classification", None)
         out["guard"] = {
-            "blocks": bool(humid is not None and humid.blocks),
+            "blocks": blocks,
+            # the day had a planned window period and the guard withdrew it (the classifier's answer vs the gated flag)
+            "window_plan_withdrawn": bool(
+                blocks and c is not None and c.forecast_windows_recommended and not c.windows_recommended
+            ),
             "reason": humid.reason if humid is not None else None,
             "ceiling_f": humid.ceiling_f if humid is not None else None,
         }
@@ -4626,10 +4696,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _humid_blocking_dp(self, now: datetime | None = None) -> float | None:
         """The outdoor dew point (internal °F) while the humid-air guard blocks, else None (Issue #1692)."""
-        humid = self._humid_air_verdict(now)
-        if humid is None or not humid.blocks or humid.outdoor_dp_f is None:
-            return None
-        return float(humid.outdoor_dp_f)
+        humid = self._humid_blocks(now)
+        return float(humid.outdoor_dp_f) if humid is not None and humid.outdoor_dp_f is not None else None
 
     def _push_override_card_status(self) -> None:
         """Re-render the override/grace card fields in ``self.data`` and notify the entities (Issue #1264).
@@ -8381,6 +8449,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             armed = decide_sync(self, ae._resolved_comfort_band, c) if ae is not None else None
             if armed is None:
                 armed = resolve_active_band(c, self.config, occupancy_mode=self._occupancy_mode, now=dt_util.now())
+            humid = self._humid_blocks()
             return apply_direction_veto(
                 tl,
                 dt_util.now(),
@@ -8389,11 +8458,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     indoor=indoor,
                     outdoor=outdoor,
                     windows_open=bool(self._any_sensor_open()),
-                    direction_ok=bool(self._outdoor_direction_ok(outdoor, indoor, armed.floor, armed.ceiling)),
+                    direction_ok=bool(
+                        self._outdoor_direction_ok(outdoor, indoor, armed.floor, armed.ceiling, humid=humid)
+                    ),
                     heat_side_veto=outdoor is not None and indoor is not None and outdoor < indoor,
                     armed_heat=armed.floor,
                     armed_cool=armed.ceiling,
-                    humid_dp_f=self._humid_blocking_dp(),
+                    humid_dp_f=humid.outdoor_dp_f if humid is not None else None,
                 ),
             )
         except Exception:  # noqa: BLE001 - a surface keeps the plan as latched rather than fail
@@ -10086,9 +10157,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1692: the humid-air guard engaging or releasing changes the day's window plan the text states (the
         # latch has 1 °F hysteresis and is read on this 30-minute cycle, so it does not flap).
         _baked_humid = getattr(self, "_briefing_humid_blocking", None)
-        _live_humid = self._humid_air_verdict()
-        live_humid = bool(_live_humid is not None and _live_humid.blocks)
-        humid_flipped = _baked_humid is not None and bool(_baked_humid) != live_humid
+        live_humid = self._humid_blocks() is not None
+        humid_flipped = bool(_baked_humid) != live_humid  # missing (a pre-0.9.74 state) = not blocking
 
         if not (
             day_type_changed
@@ -10457,8 +10527,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._briefing_nat_vent_cutoff_reason = _plan_at_generation.get("nat_vent_cutoff_reason")
             self._briefing_evening_open_time = _plan_at_generation.get("evening_open_time")
             self._briefing_tou_bank = self._briefing_tou_bank_key()
-            _humid_at_send = self._humid_air_verdict()
-            self._briefing_humid_blocking = bool(_humid_at_send is not None and _humid_at_send.blocks)
+            self._briefing_humid_blocking = self._humid_blocks() is not None
 
             # In observe-only mode, skip sending the notification
             if not self._automation_enabled:
@@ -17829,7 +17898,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Issue #1692: while the humid-air guard blocks, no branch may invite the occupant to open the windows (the
         # same verdict the fan starts and the windows gate read); an open window is told to close (below).
-        _humid_dp = self._humid_blocking_dp()
+        _humid = self._humid_blocks()
+        _humid_dp = _humid.outdoor_dp_f if _humid is not None else None
 
         def _decide(code: str, msg: i18n.Msg | str, *, warn: bool = False, **ctx: Any) -> CodedText:
             # ``msg`` is a catalog message, or plain text another module still produces (the timeline card).
@@ -17910,7 +17980,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # can differ when Prefer savings widens the band or the house sits within a swing of a held edge). The card
         # follows this live direction; the briefing follows the classifier's forecast answer, so the two can
         # legitimately differ for part of a day.
-        direction_ok = self._outdoor_direction_ok(outdoor_temp, indoor_temp, _armed_heat, _armed_cool)
+        direction_ok = self._outdoor_direction_ok(outdoor_temp, indoor_temp, _armed_heat, _armed_cool, humid=_humid)
         # Air going the wrong way: cooler air into a house the heat is holding (or warmer air into one the AC is).
         heat_side_veto = outdoor_temp is not None and indoor_temp is not None and outdoor_temp < indoor_temp
         if _humid_dp is not None and windows_physically_open:
@@ -18669,7 +18739,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return mode if isinstance(mode, str) else None
 
     def _outdoor_direction_ok(
-        self, outdoor: float | None, indoor: float | None, comfort_heat: float, comfort_cool: float
+        self,
+        outdoor: float | None,
+        indoor: float | None,
+        comfort_heat: float,
+        comfort_cool: float,
+        *,
+        humid: Any = _READ_HUMID,
     ) -> bool:
         """The ONE live "does outside air move the house the right way?" rule for advice (Issue #1276).
 
@@ -18696,12 +18772,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             swing_heat_f=swing_heat,
             swing_cool_f=swing_cool,
         )
-        if ok:
-            # Issue #1692: humid outdoor air does not help the house, whatever its temperature (the fan starts read
-            # the same verdict). The surfaces word it as "humid outside" (``CardLive.humid_dp_f``).
-            humid = self._humid_air_verdict()
-            if humid is not None and humid.blocks:
-                return False
+        # Issue #1692: humid outdoor air does not help the house, whatever its temperature (the fan starts read the
+        # same verdict). The surfaces word it as "humid outside" (``CardLive.humid_dp_f``). ``humid``: the blocking
+        # verdict the caller already read this pass (None = not blocking).
+        if ok and (self._humid_blocks() if humid is _READ_HUMID else humid) is not None:
+            return False
         return ok
 
     def _is_within_thermostat_hysteresis(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:

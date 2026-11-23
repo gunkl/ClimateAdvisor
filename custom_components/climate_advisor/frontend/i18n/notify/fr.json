@@ -37,6 +37,7 @@
   "notify.grace_expired_manual": "Votre modification manuelle du thermostat a expiré. Climate Advisor a repris le contrôle automatique.",
   "notify.grace_repause": "Le délai de pause est écoulé, mais une porte ou fenêtre est encore ouverte. Le CVC a été de nouveau mis en pause.",
   "notify.humid_windows_close": "Il fait humide dehors (point de rosée {dew_point}) : fermez les fenêtres et la climatisation prendra le relais.",
+  "notify.humid_windows_close_neutral": "Il fait humide dehors (point de rosée {dew_point}) : fermez les fenêtres pour garder l’humidité dehors.",
   "notify.invariant_ac_whf_mutex": "La climatisation est en {hvac_action} alors que le ventilateur de toute la maison tourne : ils ne doivent jamais fonctionner en même temps.",
   "notify.invariant_violated": "{detail} Le contrôle de sécurité du ventilateur de toute la maison de Climate Advisor intervient dans la mesure du possible, mais cela est signalé car cela ne devrait jamais arriver.",
   "notify.override_self_resolved": "Brève modification du thermostat détectée : considérée comme passagère (annulée dans le délai de confirmation). Climate Advisor poursuit son fonctionnement normal.",

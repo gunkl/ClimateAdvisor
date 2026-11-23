@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "Intérieur : {indoor} — aucune mesure extérieure disponible.",
   "status.next_action.keep_closed_hold_heat": "Gardez les fenêtres fermées pour conserver la chaleur — l’extérieur ({outdoor}) ferait passer la maison sous sa limite basse de {floor}.",
   "status.next_action.keep_closed_hold_heat_indoor": "Gardez fenêtres et portes fermées pour conserver la chaleur (intérieur {indoor}).",
-  "status.next_action.keep_closed_humid": "Gardez les fenêtres fermées — il fait humide dehors (point de rosée {dew_point}).",
+  "status.next_action.keep_closed_humid": "Gardez les fenêtres fermées pour l’instant — il fait humide dehors (point de rosée {dew_point}). Je mettrai le plan à jour si l’air s’assèche.",
   "status.next_action.keep_closed_not_cooler": "Gardez les fenêtres fermées pour l’instant — l’extérieur ({outdoor}) n’est pas encore plus frais que l’intérieur ({indoor}).",
   "status.next_action.keep_doors_closed": "Gardez les portes fermées.",
   "status.next_action.keep_windows_blinds_closed": "Gardez fenêtres et stores fermés.",

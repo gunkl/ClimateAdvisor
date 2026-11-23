@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "अंदर का तापमान {indoor} है — बाहर की रीडिंग उपलब्ध नहीं।",
   "status.next_action.keep_closed_hold_heat": "गर्मी बनाए रखने के लिए खिड़कियाँ बंद रखें — बाहर की हवा ({outdoor}) से घर निचली सीमा {floor} से नीचे ठंडा हो जाएगा।",
   "status.next_action.keep_closed_hold_heat_indoor": "गर्मी बनाए रखने के लिए खिड़कियाँ और दरवाज़े बंद रखें (अंदर {indoor})।",
-  "status.next_action.keep_closed_humid": "खिड़कियाँ बंद रखें — बाहर नमी है (ओसांक {dew_point})।",
+  "status.next_action.keep_closed_humid": "अभी खिड़कियाँ बंद रखें — बाहर नमी है (ओसांक {dew_point})। हवा सूखने पर मैं योजना अपडेट कर दूँगा।",
   "status.next_action.keep_closed_not_cooler": "अभी खिड़कियाँ बंद रखें — बाहर ({outdoor}) अभी अंदर ({indoor}) से ठंडा नहीं है।",
   "status.next_action.keep_doors_closed": "दरवाज़े बंद रखें।",
   "status.next_action.keep_windows_blinds_closed": "खिड़कियाँ और ब्लाइंड बंद रखें।",

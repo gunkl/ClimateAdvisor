@@ -37,6 +37,7 @@
   "notify.grace_expired_manual": "Your manual thermostat override has expired. Climate Advisor has resumed automated control.",
   "notify.grace_repause": "Grace period expired but a door/window is still open. HVAC has been paused again.",
   "notify.humid_windows_close": "Humid outside (dew point {dew_point}): close the windows and the AC will take over.",
+  "notify.humid_windows_close_neutral": "Humid outside (dew point {dew_point}): close the windows to keep the moisture out.",
   "notify.invariant_ac_whf_mutex": "AC is actively {hvac_action} while the whole-house fan is physically running — these must never run at the same time.",
   "notify.invariant_violated": "{detail} Climate Advisor's whole-house-fan safety check is acting on this where it can, but it is flagged because it should never happen.",
   "notify.override_self_resolved": "Brief thermostat adjustment detected — treated as transient (reverted within confirmation window). Climate Advisor continues normal operation.",

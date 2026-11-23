@@ -37,6 +37,7 @@
   "notify.grace_expired_manual": "Deine manuelle Thermostat-Änderung ist abgelaufen. Climate Advisor steuert wieder automatisch.",
   "notify.grace_repause": "Die Pausenzeit ist abgelaufen, aber eine Tür oder ein Fenster ist noch offen. Heizung/Klimaanlage wurde erneut pausiert.",
   "notify.humid_windows_close": "Draußen ist es feucht (Taupunkt {dew_point}): Schließ die Fenster, dann übernimmt die Klimaanlage.",
+  "notify.humid_windows_close_neutral": "Draußen ist es feucht (Taupunkt {dew_point}): Schließ die Fenster, damit die Feuchtigkeit draußen bleibt.",
   "notify.invariant_ac_whf_mutex": "Die Klimaanlage ist aktiv ({hvac_action}), während der Hausventilator tatsächlich läuft – beides darf nie gleichzeitig laufen.",
   "notify.invariant_violated": "{detail} Die Sicherheitsprüfung des Hausventilators von Climate Advisor greift ein, soweit möglich, wird aber gemeldet, weil das nie passieren sollte.",
   "notify.override_self_resolved": "Kurze Thermostat-Änderung erkannt – als vorübergehend behandelt (innerhalb der Bestätigungszeit zurückgesetzt). Climate Advisor arbeitet normal weiter.",

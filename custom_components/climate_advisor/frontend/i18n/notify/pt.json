@@ -37,6 +37,7 @@
   "notify.grace_expired_manual": "A sua alteração manual do termóstato expirou. O Climate Advisor retomou o controlo automático.",
   "notify.grace_repause": "O período de pausa terminou, mas uma porta/janela continua aberta. O AVAC foi novamente colocado em pausa.",
   "notify.humid_windows_close": "Está húmido lá fora (ponto de orvalho {dew_point}): feche as janelas e o ar condicionado assume.",
+  "notify.humid_windows_close_neutral": "Está húmido lá fora (ponto de orvalho {dew_point}): feche as janelas para manter a humidade lá fora.",
   "notify.invariant_ac_whf_mutex": "O ar condicionado está ativo ({hvac_action}) enquanto a ventoinha de toda a casa está fisicamente a funcionar — nunca devem funcionar ao mesmo tempo.",
   "notify.invariant_violated": "{detail} A verificação de segurança da ventoinha de toda a casa do Climate Advisor atua sempre que possível, mas isto é sinalizado porque nunca deveria acontecer.",
   "notify.override_self_resolved": "Foi detetado um ajuste breve do termóstato — tratado como transitório (revertido dentro do prazo de confirmação). O Climate Advisor continua a funcionar normalmente.",

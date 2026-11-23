@@ -857,6 +857,13 @@ def rank(options: Sequence[StrategyOption]) -> list[StrategyOption]:
     return tied + rest
 
 
+def _pick_recommended(ranked: Sequence[StrategyOption]) -> str | None:
+    """The pick from the ranked offered options. An option that would not run tonight duplicates "closed": it stays
+    listed (with its note) but is never the pick. Shared by ``plan_night`` and ``withhold_outdoor_air``."""
+    pick_pool = [o for o in ranked if o.runs or o.key == OPT_CLOSED]
+    return pick_pool[0].key if pick_pool else (ranked[0].key if ranked else None)
+
+
 def plan_night(inp: NightInputs) -> NightStrategy:
     """Simulate every option for the fan mode, gate by evidence, rank, and recommend."""
     model = inp.model
@@ -900,9 +907,7 @@ def plan_night(inp: NightInputs) -> NightStrategy:
                 }
             )
     ranked = rank([o for o in offered])
-    # an option that would not run tonight duplicates "closed"; it stays listed (with its note) but is never the pick
-    pick_pool = [o for o in ranked if o.runs or o.key == OPT_CLOSED]
-    recommended = pick_pool[0].key if pick_pool else (ranked[0].key if ranked else None)
+    recommended = _pick_recommended(ranked)
     closed = next((o for o in ranked if o.key == OPT_CLOSED), None)
     show_numbers = bool(closed is not None and closed.grade in OFFERED_GRADES)
     debug = {
@@ -956,12 +961,10 @@ def withhold_outdoor_air(strategy: NightStrategy, dew_point_f: float | None) -> 
         for o in strategy.options
         if o.key in _SPECS and _SPECS[o.key].windows
     )
-    pick_pool = [o for o in keep if o.runs or o.key == OPT_CLOSED]
-    recommended = pick_pool[0].key if pick_pool else (keep[0].key if keep else None)
     return dataclasses.replace(
         strategy,
         options=keep,
-        recommended=recommended,
+        recommended=_pick_recommended(keep),
         hidden=tuple(strategy.hidden) + withheld,
         debug={**dict(strategy.debug), "humid_air_dp_f": round(float(dew_point_f), 2)},
     )

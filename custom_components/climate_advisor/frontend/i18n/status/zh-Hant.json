@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "室內 {indoor}，目前沒有戶外溫度讀數。",
   "status.next_action.keep_closed_hold_heat": "請保持窗戶關閉以保暖——戶外（{outdoor}）會讓室內降到 {floor} 下限以下。",
   "status.next_action.keep_closed_hold_heat_indoor": "請保持門窗關閉以保暖（室內 {indoor}）。",
-  "status.next_action.keep_closed_humid": "請保持窗戶關閉——戶外潮濕（露點 {dew_point}）。",
+  "status.next_action.keep_closed_humid": "請暫時保持窗戶關閉——戶外潮濕（露點 {dew_point}）。如果空氣變乾，我會更新計畫。",
   "status.next_action.keep_closed_not_cooler": "請暫時保持窗戶關閉——戶外（{outdoor}）還沒有比室內（{indoor}）涼。",
   "status.next_action.keep_doors_closed": "請保持門關閉。",
   "status.next_action.keep_windows_blinds_closed": "請保持窗戶和窗簾關閉。",

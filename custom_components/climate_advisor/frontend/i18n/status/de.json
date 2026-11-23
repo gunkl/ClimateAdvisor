@@ -117,7 +117,7 @@
   "status.next_action.indoor_no_outdoor": "Innen: {indoor} — kein Außenwert verfügbar.",
   "status.next_action.keep_closed_hold_heat": "Lass die Fenster zu, um die Wärme zu halten — die Außenluft ({outdoor}) würde das Haus unter die Untergrenze von {floor} abkühlen.",
   "status.next_action.keep_closed_hold_heat_indoor": "Lass Fenster und Türen zu, um die Wärme zu halten (innen {indoor}).",
-  "status.next_action.keep_closed_humid": "Lass die Fenster zu — draußen ist es feucht (Taupunkt {dew_point}).",
+  "status.next_action.keep_closed_humid": "Lass die Fenster vorerst zu — draußen ist es feucht (Taupunkt {dew_point}). Ich passe den Plan an, wenn es trockener wird.",
   "status.next_action.keep_closed_not_cooler": "Lass die Fenster vorerst zu — draußen ({outdoor}) ist es noch nicht kühler als drinnen ({indoor}).",
   "status.next_action.keep_doors_closed": "Lass die Türen zu.",
   "status.next_action.keep_windows_blinds_closed": "Lass Fenster und Jalousien geschlossen.",

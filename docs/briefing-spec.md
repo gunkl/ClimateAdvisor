@@ -204,7 +204,9 @@ dew point is known and nothing changed). While the guard blocks as the briefing 
 window plan: the body and the Windows row are built from a copy of the classification with the window flags off and
 the row reads `Windows: Closed — humid outside (dew point X)` (also for a running period the live veto holds as
 `humid`). The shown text regenerates when the guard engages or releases (`_briefing_humid_blocking`, one of the
-`_maybe_regenerate_briefing_for_drift` triggers). See
+`_maybe_regenerate_briefing_for_drift` triggers, saved in `briefing_state`; missing = not blocking). The morning push is
+not re-sent, so the humid row says "for now; I'll update the plan if it dries out". A briefing stored by 0.9.73 is
+restored with `has_humidity` = no (`coordinator._BRIEFING_FULL_SLOTS_ADDED`), so it still renders after the upgrade. See
 [Computation Reference](08-COMPUTATION-REFERENCE.md#humid-air-window-advice-issue-1692).
 
 ## Coherence Validation (Issue #518)

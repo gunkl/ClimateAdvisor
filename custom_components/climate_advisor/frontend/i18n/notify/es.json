@@ -37,6 +37,7 @@
   "notify.grace_expired_manual": "Tu cambio manual del termostato ha caducado. Climate Advisor ha retomado el control automático.",
   "notify.grace_repause": "Ha terminado el periodo de pausa, pero una puerta o ventana sigue abierta. La climatización se ha vuelto a pausar.",
   "notify.humid_windows_close": "Hace humedad fuera (punto de rocío {dew_point}): cierra las ventanas y el aire acondicionado se encargará.",
+  "notify.humid_windows_close_neutral": "Hace humedad fuera (punto de rocío {dew_point}): cierra las ventanas para que no entre la humedad.",
   "notify.invariant_ac_whf_mutex": "El aire acondicionado está en {hvac_action} mientras el ventilador de toda la casa funciona físicamente: nunca deben funcionar a la vez.",
   "notify.invariant_violated": "{detail} La comprobación de seguridad del ventilador de toda la casa de Climate Advisor actúa en lo que puede, pero se avisa porque esto nunca debería ocurrir.",
   "notify.override_self_resolved": "Se detectó un ajuste breve del termostato: se trata como pasajero (revertido dentro del plazo de confirmación). Climate Advisor continúa con normalidad.",

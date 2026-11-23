@@ -37,6 +37,7 @@
   "notify.grace_expired_manual": "Manuel termostat değişikliğinizin süresi doldu. Climate Advisor otomatik kontrole geri döndü.",
   "notify.grace_repause": "Duraklatma süresi doldu ancak bir kapı/pencere hâlâ açık. HVAC yeniden duraklatıldı.",
   "notify.humid_windows_close": "Dışarısı nemli (çiğ noktası {dew_point}): pencereleri kapatın, klima devralacak.",
+  "notify.humid_windows_close_neutral": "Dışarısı nemli (çiğ noktası {dew_point}): nemi dışarıda tutmak için pencereleri kapatın.",
   "notify.invariant_ac_whf_mutex": "Tüm ev fanı fiilen çalışırken klima etkin olarak çalışıyor ({hvac_action}) — bunlar asla aynı anda çalışmamalı.",
   "notify.invariant_violated": "{detail} Climate Advisor’ın tüm ev fanı güvenlik kontrolü mümkün olan yerde buna müdahale ediyor, ancak bu asla olmaması gereken bir durum olduğu için işaretlendi.",
   "notify.override_self_resolved": "Kısa süreli termostat ayarı tespit edildi — geçici sayıldı (onay süresi içinde geri alındı). Climate Advisor normal çalışmaya devam ediyor.",

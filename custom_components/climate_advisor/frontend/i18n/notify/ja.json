@@ -37,6 +37,7 @@
   "notify.grace_expired_manual": "サーモスタットの手動変更の有効期間が終了しました。Climate Advisorは自動制御を再開しました。",
   "notify.grace_repause": "一時停止期間が終了しましたが、ドア/窓がまだ開いています。空調を再び一時停止しました。",
   "notify.humid_windows_close": "外が湿っています（露点 {dew_point}）。窓を閉めると、エアコンが引き継ぎます。",
+  "notify.humid_windows_close_neutral": "外が湿っています（露点 {dew_point}）。湿気が入らないよう窓を閉めてください。",
   "notify.invariant_ac_whf_mutex": "エアコンが{hvac_action}の状態で、全館換気ファンも実際に作動しています。この2つを同時に動かしてはいけません。",
   "notify.invariant_violated": "{detail} Climate Advisorの全館換気ファン安全チェックは可能な範囲で対処していますが、本来起きてはならないことのため警告しています。",
   "notify.override_self_resolved": "サーモスタットの一時的な調整を検出しました。確認時間内に元に戻ったため、一時的なものとして扱います。Climate Advisorは通常どおり動作を続けます。",

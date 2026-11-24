@@ -7774,12 +7774,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return self.hass.data.setdefault(_V4_FIT_LOCK_KEY, asyncio.Lock())
 
     def _v4_cancel_fit(self) -> None:
-        """Cancel a running fit task (unload). The executor thread cannot be interrupted; its result is dropped."""
-        task = getattr(self, "_v4_fit_task", None)
-        if task is not None and not task.done():
-            task.cancel()
-        self._v4_fit_task = None
+        """Cancel a running fit or night-replay task (unload); subprocess workers are killed and reaped."""
+        for attr in ("_v4_fit_task", "_v4_night_replay_task_handle"):
+            task = getattr(self, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+            setattr(self, attr, None)
         self._v4_fit_running = False
+        self._v4_night_replay_running = False
 
     def _v4_node_inputs(self) -> dict[str, Any]:
         """What ``v4_shadow.build_samples`` needs, captured on the event loop: the fit's node choice and row mapping.
@@ -7792,7 +7794,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # rows are skipped for the primary node.
         aliases = tuple(c for c in (self.config.get("climate_entity"),) if c)
         cfg = dict(self.config)
-        in_sleep = (lambda dt, _cfg=cfg: _in_sleep_window(dt, _cfg)) if cfg.get("sleep_indoor_temp_entity") else None
+        has_sleep = bool(cfg.get("sleep_indoor_temp_entity"))
+        in_sleep = (lambda dt, _cfg=cfg: _in_sleep_window(dt, _cfg)) if has_sleep else None
+        sleep_window = (cfg.get("sleep_time"), cfg.get("wake_time")) if has_sleep else None
         # Issue #1432: the separate sleep sensor (None: none configured, or it is the primary): the per-room model
         # needs it modelled before it is used, so sleep hours are never forecast from the thermostat's room.
         sleep = cfg.get("sleep_indoor_temp_entity") or None
@@ -7802,45 +7806,44 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "sensors": sensors,
             "aliases": aliases,
             "in_sleep": in_sleep,
+            "sleep_window": sleep_window,
             "sleep_sensor": sleep_sensor,
         }
 
     async def _v4_run_night_replay(self, reason: str) -> None:
         """The nightly recorded-night replay behind the night-strategy gate (Issue #1230 R6). Never raises.
 
-        Runs in the executor, after the v4 fit and serialised with every zone's fit under the same domain lock, and
-        stores its record next to the model (``night_validation``). A failure keeps the previous record."""
+        Runs in a subprocess (with executor fallback), after the v4 fit and serialised with every zone's fit under
+        the same domain lock, and stores its record next to the model (``night_validation``). A failure keeps the
+        previous record."""
         state = getattr(self, "_v4_store", None)
         model_dict = state.v4_model if state is not None else None
         if state is None or not isinstance(model_dict, dict) or model_dict.get("confidence", "none") == "none":
             return
         started = _monotonic()
         try:
-            from . import night_replay  # noqa: PLC0415 - lazy: a broken engine costs the night plan, not setup
-
             now = dt_util.now()
             node = self._v4_node_inputs()
             sleep_t = _parse_time(self.config.get("sleep_time", "22:30"))
             wake_t = _parse_time(self.config.get("wake_time", "06:30"))
             async with self._v4_fit_lock():
-                record = await self._executor_job(
-                    functools.partial(
-                        night_replay.run_nightly,
-                        chart_entries=self._chart_log.raw_entries(),
-                        snapshots_fn=self._forecast_archive.get_snapshots,
-                        tz=now.tzinfo,
-                        now=now,
-                        primary=node["primary"],
-                        sensors=node["sensors"],
-                        primary_aliases=node["aliases"],
-                        in_sleep=node["in_sleep"],
-                        bed=(sleep_t.hour, sleep_t.minute),
-                        wake=(wake_t.hour, wake_t.minute),
-                        train_days=V4_FIT_TRAIN_DAYS,
-                        model_fitted_at=str(model_dict.get("fitted_at") or ""),
-                        # Issue #1525: what newer nights have not displaced carries over (never fades with time)
-                        previous=state.night_validation if isinstance(state.night_validation, dict) else None,
-                    )
+                record = await v4_shadow.async_run_night_replay(
+                    self._executor_job,
+                    chart_entries=self._chart_log.raw_entries(),
+                    snapshots_fn=self._forecast_archive.get_snapshots,
+                    tz=now.tzinfo,
+                    now=now,
+                    primary=node["primary"],
+                    sensors=node["sensors"],
+                    primary_aliases=node["aliases"],
+                    in_sleep=node["in_sleep"],
+                    sleep_window=node.get("sleep_window"),
+                    bed=(sleep_t.hour, sleep_t.minute),
+                    wake=(wake_t.hour, wake_t.minute),
+                    train_days=V4_FIT_TRAIN_DAYS,
+                    model_fitted_at=str(model_dict.get("fitted_at") or ""),
+                    # Issue #1525: what newer nights have not displaced carries over (never fades with time)
+                    previous=state.night_validation if isinstance(state.night_validation, dict) else None,
                 )
             if getattr(self, "_shut_down", False) is True:
                 return
@@ -7882,7 +7885,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._v4_last_fit_attempt = _monotonic()
         coro = self._v4_night_replay_task(reason)
         try:
-            self._spawn(coro, background=True)
+            self._v4_night_replay_task_handle = self._spawn(coro, background=True)
         except Exception:
             coro.close()
             self._v4_night_replay_running = False
@@ -7895,9 +7898,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 await self._v4_run_night_replay(reason)
         finally:
             self._v4_night_replay_running = False
+            self._v4_night_replay_task_handle = None
 
     async def _v4_run_fit(self, reason: str) -> None:
-        """Fit off the event loop and store the model; on any failure the previous model is kept."""
+        """Fit off the event loop (subprocess, executor fallback) and store the model; on failure keep previous."""
         started = _monotonic()
         try:
             with log_capture.zone_scope(self.zone_label):
@@ -7910,28 +7914,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     node["aliases"],
                     node["in_sleep"],
                 )
-                # Captured on the loop (rule: no self.* reads inside the executor job); the row copy is shallow.
-                # One fit at a time across ALL zones (M5): several zones fitting at once starve the event loop (GIL).
+                sleep_window = node.get("sleep_window")
+                # Captured on the loop (rule: no self.* reads inside the worker); one fit at a time across ALL zones.
                 if reason == V4_DISPLAY_FIT_REASON:
-                    await self._v4_run_display_fit(now, primary, sensors, aliases, in_sleep)
+                    await self._v4_run_display_fit(now, primary, sensors, aliases, in_sleep, sleep_window=sleep_window)
                     return
                 async with self._v4_fit_lock():
-                    model_dict, seconds, fit_line = await self._executor_job(
-                        functools.partial(
-                            v4_shadow.run_fit,
-                            chart_entries=self._chart_log.raw_entries(),
-                            snapshots_fn=self._forecast_archive.get_snapshots,
-                            tz=tz,
-                            now=now,
-                            primary=primary,
-                            sensors=sensors,
-                            previous_model=self._v4_store.v4_model,
-                            primary_aliases=aliases,
-                            in_sleep=in_sleep,
-                            train_days=V4_FIT_TRAIN_DAYS,
-                            sleep_sensor=node.get("sleep_sensor"),
-                            climate_entity=self.config.get("climate_entity") or None,
-                        )
+                    model_dict, seconds, fit_line = await v4_shadow.async_run_fit(
+                        self._executor_job,
+                        chart_entries=self._chart_log.raw_entries(),
+                        snapshots_fn=self._forecast_archive.get_snapshots,
+                        tz=tz,
+                        now=now,
+                        primary=primary,
+                        sensors=sensors,
+                        previous_model=self._v4_store.v4_model,
+                        primary_aliases=aliases,
+                        in_sleep=in_sleep,
+                        sleep_window=sleep_window,
+                        train_days=V4_FIT_TRAIN_DAYS,
+                        sleep_sensor=node.get("sleep_sensor"),
+                        climate_entity=self.config.get("climate_entity") or None,
                     )
                 if getattr(self, "_shut_down", False) is True:
                     return  # unloaded while fitting: drop the result
@@ -8080,7 +8083,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("v4 node-choice note failed", exc_info=True)
 
     async def _v4_run_display_fit(
-        self, now: datetime, primary: str, sensors: list[str], aliases: tuple[str, ...], in_sleep: Any
+        self,
+        now: datetime,
+        primary: str,
+        sensors: list[str],
+        aliases: tuple[str, ...],
+        in_sleep: Any,
+        *,
+        sleep_window: tuple[Any, Any] | None = None,
     ) -> None:
         """Fold newly qualified display-only sensor nodes into the stored model (Issue #1422, option b). Never raises.
 
@@ -8095,19 +8105,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         try:
             async with self._v4_fit_lock():
-                new_dict, seconds, line = await self._executor_job(
-                    functools.partial(
-                        v4_shadow.run_display_fit,
-                        chart_entries=self._chart_log.raw_entries(),
-                        tz=now.tzinfo,
-                        now=now,
-                        primary=primary,
-                        sensors=sensors,
-                        model_dict=model_dict,
-                        primary_aliases=aliases,
-                        in_sleep=in_sleep,
-                        train_days=V4_FIT_TRAIN_DAYS,
-                    )
+                new_dict, seconds, line = await v4_shadow.async_run_display_fit(
+                    self._executor_job,
+                    chart_entries=self._chart_log.raw_entries(),
+                    tz=now.tzinfo,
+                    now=now,
+                    primary=primary,
+                    sensors=sensors,
+                    model_dict=model_dict,
+                    primary_aliases=aliases,
+                    in_sleep=in_sleep,
+                    sleep_window=sleep_window,
+                    train_days=V4_FIT_TRAIN_DAYS,
                 )
         except asyncio.CancelledError:
             raise

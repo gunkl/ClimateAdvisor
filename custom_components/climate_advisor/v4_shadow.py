@@ -17,15 +17,23 @@ instead of breaking setup.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
+import functools
+import json
 import logging
 import math
+import os
+import sys
 import time
 import zlib
-from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta, tzinfo
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from datetime import time as dtime
+from pathlib import Path
 from typing import Any, NamedTuple
+from zoneinfo import ZoneInfo
 
 from . import i18n
 from .const import V4_PREDICT_HORIZON_HOURS, V4_UNUSABLE_WARN_REFITS
@@ -1500,3 +1508,413 @@ def night_inputs(
         loop_startup_latency_s=loop_startup_latency_s,
         run_now=None if ahead else run_now,
     )
+
+
+# ---------------------------------------------------------------------------
+# Subprocess offload for CPU-bound v4 fitting (Issue #1722)
+# ---------------------------------------------------------------------------
+# ``predictor_v4`` is pure-Python CPU-bound math (no C extensions releasing the GIL). On slower hardware such as a
+# Raspberry Pi 4 a single fit takes ~60-100 s and starves Home Assistant's MainThread event loop when run inside
+# ``hass.async_add_executor_job`` (thread pool). Running the fit in a dedicated Python subprocess gives it its own
+# GIL on another core, lowers its CPU priority (nice +10) and lets unload cancel/kill it cleanly.
+
+_ORIG_RUN_FIT = run_fit
+_ORIG_RUN_DISPLAY_FIT = run_display_fit
+_PKG_DIR = Path(__file__).resolve().parent
+_PARENT_DIR = _PKG_DIR.parent
+
+_WORKER_BOOTSTRAP = (
+    "import sys, types; "
+    "from datetime import UTC, datetime; "
+    "ha = types.ModuleType('homeassistant'); "
+    "ha_u = types.ModuleType('homeassistant.util'); "
+    "ha_dt = types.ModuleType('homeassistant.util.dt'); "
+    "ha_dt.utcnow = lambda: datetime.now(UTC); "
+    "ha_dt.now = lambda tz=None: datetime.now(tz or UTC); "
+    "ha_dt.as_utc = lambda d: d.astimezone(UTC) if d.tzinfo else d.replace(tzinfo=UTC); "
+    "sys.modules.update({'homeassistant': ha, 'homeassistant.util': ha_u, 'homeassistant.util.dt': ha_dt}); "
+    "m1 = types.ModuleType('custom_components'); m1.__path__ = [sys.argv[2]]; sys.modules['custom_components'] = m1; "
+    "m2 = types.ModuleType('custom_components.climate_advisor'); m2.__path__ = [sys.argv[1]]; "
+    "sys.modules['custom_components.climate_advisor'] = m2; "
+    "from custom_components.climate_advisor.v4_shadow import _worker_main; "
+    "_worker_main()"
+)
+
+
+def _is_real_predictor() -> bool:
+    """True when ``predictor_v4`` is the real on-disk module (not a test double like ``FakePredictor``)."""
+    try:
+        pred = _predictor()
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(getattr(pred, "__file__", None), str)
+
+
+def _serialize_tz(tz: tzinfo | None, now: datetime) -> dict[str, Any] | None:
+    if tz is None:
+        return None
+    key = getattr(tz, "key", None)
+    if isinstance(key, str) and key:
+        return {"key": key}
+    offset = tz.utcoffset(now)
+    if offset is not None:
+        return {"offset_s": int(offset.total_seconds())}
+    return None
+
+
+def _deserialize_tz(raw: Mapping[str, Any] | None) -> tzinfo:
+    if not isinstance(raw, Mapping):
+        return UTC
+    key = raw.get("key")
+    if isinstance(key, str) and key:
+        try:
+            return ZoneInfo(key)
+        except Exception:  # noqa: BLE001
+            pass
+    offset_s = raw.get("offset_s")
+    if isinstance(offset_s, (int, float)):
+        return timezone(timedelta(seconds=int(offset_s)))
+    return UTC
+
+
+def _make_in_sleep(sleep_window: Sequence[Any] | None) -> Callable[[datetime], bool] | None:
+    """Rebuild ``_in_sleep_window`` from ``(sleep_time, wake_time)`` without importing ``automation``."""
+    if not sleep_window or len(sleep_window) != 2:
+        return None
+    sleep_str, wake_str = sleep_window[0], sleep_window[1]
+    if not sleep_str or not wake_str:
+        return None
+    try:
+        sp = str(sleep_str).split(":")
+        wp = str(wake_str).split(":")
+        sleep_t = dtime(int(sp[0]), int(sp[1]))
+        wake_t = dtime(int(wp[0]), int(wp[1]))
+    except ValueError, IndexError:
+        return None
+    if sleep_t == wake_t:
+        return lambda _dt: False
+    if sleep_t < wake_t:
+        return lambda dt: sleep_t <= dt.time().replace(second=0, microsecond=0) < wake_t
+    return lambda dt: (
+        dt.time().replace(second=0, microsecond=0) >= sleep_t or (dt.time().replace(second=0, microsecond=0) < wake_t)
+    )
+
+
+async def _run_in_subprocess(op: str, payload: dict[str, Any]) -> Any:
+    """Execute one v4 worker operation in a child Python process; kill and reap it on cancellation."""
+    raw_in = json.dumps({"op": op, "payload": payload}).encode("utf-8")
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        _WORKER_BOOTSTRAP,
+        str(_PKG_DIR),
+        str(_PARENT_DIR),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await proc.communicate(raw_in)
+    except asyncio.CancelledError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise
+    if proc.returncode != 0:
+        err_text = stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"v4 worker ({op}) exited with code {proc.returncode}: {err_text[-500:]}")
+    try:
+        resp = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"v4 worker ({op}) returned invalid JSON: {exc}") from exc
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        raise RuntimeError(f"v4 worker ({op}) failed: {resp.get('error') if isinstance(resp, dict) else resp}")
+    return resp["result"]
+
+
+def _worker_main() -> None:
+    """Subprocess entrypoint: read one JSON job on stdin, run the v4 fit/replay, write JSON on stdout."""
+    with contextlib.suppress(OSError, AttributeError):
+        os.nice(10)
+    try:
+        req = json.loads(sys.stdin.read())
+        op = req["op"]
+        p = req["payload"]
+        now = datetime.fromisoformat(p["now"])
+        tz = _deserialize_tz(p.get("tz"))
+        in_sleep = _make_in_sleep(p.get("sleep_window"))
+        if op == "fit":
+            snapshots = list(p.get("snapshots") or [])
+            model_dict, seconds, fit_line = run_fit(
+                chart_entries=p["chart_entries"],
+                snapshots_fn=(lambda _a, _b, _s=snapshots: _s) if snapshots else None,
+                tz=tz,
+                now=now,
+                primary=p["primary"],
+                sensors=p["sensors"],
+                previous_model=p.get("previous_model"),
+                primary_aliases=tuple(p.get("primary_aliases") or ()),
+                in_sleep=in_sleep,
+                train_days=p.get("train_days"),
+                sleep_sensor=p.get("sleep_sensor"),
+                climate_entity=p.get("climate_entity"),
+            )
+            result: Any = [model_dict, seconds, fit_line]
+        elif op == "display_fit":
+            new_dict, seconds, line = run_display_fit(
+                chart_entries=p["chart_entries"],
+                tz=tz,
+                now=now,
+                primary=p["primary"],
+                sensors=p["sensors"],
+                model_dict=p["model_dict"],
+                primary_aliases=tuple(p.get("primary_aliases") or ()),
+                in_sleep=in_sleep,
+                train_days=p.get("train_days"),
+            )
+            result = [new_dict, seconds, line]
+        elif op == "night_replay":
+            from . import night_replay  # noqa: PLC0415
+
+            snapshots = list(p.get("snapshots") or [])
+            bed = tuple(p["bed"])
+            wake = tuple(p["wake"])
+            result = night_replay.run_nightly(
+                chart_entries=p["chart_entries"],
+                snapshots_fn=(lambda _a, _b, _s=snapshots: _s) if snapshots else None,
+                tz=tz,
+                now=now,
+                primary=p["primary"],
+                sensors=p["sensors"],
+                primary_aliases=tuple(p.get("primary_aliases") or ()),
+                in_sleep=in_sleep,
+                bed=(int(bed[0]), int(bed[1])),
+                wake=(int(wake[0]), int(wake[1])),
+                train_days=int(p["train_days"]),
+                model_fitted_at=p.get("model_fitted_at"),
+                previous=p.get("previous"),
+            )
+        else:
+            raise ValueError(f"unknown v4 worker op: {op!r}")
+        sys.stdout.write(json.dumps({"ok": True, "result": result}))
+    except Exception as exc:  # noqa: BLE001
+        sys.stdout.write(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
+
+
+async def _fetch_snapshots_in_executor(
+    executor_job: Callable[..., Awaitable[Any]],
+    snapshots_fn: Callable[[datetime, datetime], list[dict]] | None,
+    start: datetime,
+    end: datetime,
+) -> list[dict]:
+    if snapshots_fn is None:
+        return []
+    try:
+        return list(await executor_job(snapshots_fn, start, end))
+    except Exception:  # noqa: BLE001 - matches run_fit / run_nightly degradation
+        _LOGGER.warning("v4 fit: forecast archive unreadable; fitting from the chart log alone", exc_info=True)
+        return []
+
+
+async def async_run_fit(
+    executor_job: Callable[..., Awaitable[Any]],
+    *,
+    chart_entries: Sequence[Mapping[str, Any]],
+    snapshots_fn: Callable[[datetime, datetime], list[dict]] | None,
+    tz: tzinfo | None,
+    now: datetime,
+    primary: str,
+    sensors: Sequence[str],
+    previous_model: Mapping[str, Any] | None = None,
+    primary_aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
+    sleep_window: Sequence[Any] | None = None,
+    train_days: float | None = None,
+    sleep_sensor: str | None = None,
+    climate_entity: str | None = None,
+    use_subprocess: bool | None = None,
+) -> tuple[dict, float, str]:
+    """Run ``run_fit`` in a subprocess (avoiding GIL starvation on HA's event loop) with executor fallback."""
+    want_sub = (
+        use_subprocess
+        if use_subprocess is not None
+        else (_is_real_predictor() and run_fit is _ORIG_RUN_FIT and (in_sleep is None or sleep_window is not None))
+    )
+    if want_sub:
+        windowed = rows_in_window(chart_entries, now, train_days) if train_days else list(chart_entries)
+        snapshots = await _fetch_snapshots_in_executor(
+            executor_job, snapshots_fn, now - timedelta(days=(train_days or 400) + 1), now + timedelta(hours=1)
+        )
+        payload = {
+            "chart_entries": windowed,
+            "snapshots": snapshots,
+            "tz": _serialize_tz(tz, now),
+            "now": now.isoformat(),
+            "primary": primary,
+            "sensors": list(sensors),
+            "previous_model": dict(previous_model) if previous_model is not None else None,
+            "primary_aliases": list(primary_aliases),
+            "sleep_window": list(sleep_window) if sleep_window is not None else None,
+            "train_days": train_days,
+            "sleep_sensor": sleep_sensor,
+            "climate_entity": climate_entity,
+        }
+        try:
+            model_dict, seconds, fit_line = await _run_in_subprocess("fit", payload)
+            return dict(model_dict), float(seconds), str(fit_line)
+        except OSError:
+            _LOGGER.warning("v4 fit: subprocess launch failed; falling back to executor thread", exc_info=True)
+    result: tuple[dict, float, str] = await executor_job(
+        functools.partial(
+            run_fit,
+            chart_entries=chart_entries,
+            snapshots_fn=snapshots_fn,
+            tz=tz or UTC,
+            now=now,
+            primary=primary,
+            sensors=sensors,
+            previous_model=previous_model,
+            primary_aliases=primary_aliases,
+            in_sleep=in_sleep,
+            train_days=train_days,
+            sleep_sensor=sleep_sensor,
+            climate_entity=climate_entity,
+        )
+    )
+    return result
+
+
+async def async_run_display_fit(
+    executor_job: Callable[..., Awaitable[Any]],
+    *,
+    chart_entries: Sequence[Mapping[str, Any]],
+    tz: tzinfo | None,
+    now: datetime,
+    primary: str,
+    sensors: Sequence[str],
+    model_dict: Mapping[str, Any],
+    primary_aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
+    sleep_window: Sequence[Any] | None = None,
+    train_days: float | None = None,
+    use_subprocess: bool | None = None,
+) -> tuple[dict, float, str]:
+    """Run ``run_display_fit`` in a subprocess with executor fallback."""
+    want_sub = (
+        use_subprocess
+        if use_subprocess is not None
+        else (
+            _is_real_predictor()
+            and run_display_fit is _ORIG_RUN_DISPLAY_FIT
+            and (in_sleep is None or sleep_window is not None)
+        )
+    )
+    if want_sub:
+        windowed = rows_in_window(chart_entries, now, train_days) if train_days else list(chart_entries)
+        payload = {
+            "chart_entries": windowed,
+            "tz": _serialize_tz(tz, now),
+            "now": now.isoformat(),
+            "primary": primary,
+            "sensors": list(sensors),
+            "model_dict": dict(model_dict),
+            "primary_aliases": list(primary_aliases),
+            "sleep_window": list(sleep_window) if sleep_window is not None else None,
+            "train_days": train_days,
+        }
+        try:
+            new_dict, seconds, line = await _run_in_subprocess("display_fit", payload)
+            return dict(new_dict), float(seconds), str(line)
+        except OSError:
+            _LOGGER.warning("v4 display fit: subprocess launch failed; falling back to executor thread", exc_info=True)
+    result: tuple[dict, float, str] = await executor_job(
+        functools.partial(
+            run_display_fit,
+            chart_entries=chart_entries,
+            tz=tz or UTC,
+            now=now,
+            primary=primary,
+            sensors=sensors,
+            model_dict=model_dict,
+            primary_aliases=primary_aliases,
+            in_sleep=in_sleep,
+            train_days=train_days,
+        )
+    )
+    return result
+
+
+async def async_run_night_replay(
+    executor_job: Callable[..., Awaitable[Any]],
+    *,
+    chart_entries: Sequence[Mapping[str, Any]],
+    snapshots_fn: Callable[[datetime, datetime], list[dict]] | None,
+    tz: tzinfo | None,
+    now: datetime,
+    primary: str,
+    sensors: Sequence[str],
+    primary_aliases: Sequence[str] = (),
+    in_sleep: Callable[[datetime], bool] | None = None,
+    sleep_window: Sequence[Any] | None = None,
+    bed: tuple[int, int] = (22, 30),
+    wake: tuple[int, int] = (6, 30),
+    train_days: int = 30,
+    model_fitted_at: str | None = None,
+    previous: Mapping[str, Any] | None = None,
+    use_subprocess: bool | None = None,
+) -> dict[str, Any]:
+    """Run ``night_replay.run_nightly`` in a subprocess with executor fallback."""
+    from . import night_replay  # noqa: PLC0415
+
+    unpatched_replay = getattr(night_replay.run_nightly, "__module__", "") == night_replay.__name__
+    want_sub = (
+        use_subprocess
+        if use_subprocess is not None
+        else (_is_real_predictor() and unpatched_replay and (in_sleep is None or sleep_window is not None))
+    )
+    if want_sub:
+        horizon_days = float(train_days + night_replay.NIGHT_REPLAY_NIGHTS * 1.1 + night_replay.NIGHT_REPLAY_EXTRA_DAYS)
+        windowed = rows_in_window(chart_entries, now, horizon_days)
+        snapshots = await _fetch_snapshots_in_executor(
+            executor_job, snapshots_fn, now - timedelta(days=horizon_days + 1), now + timedelta(hours=1)
+        )
+        payload = {
+            "chart_entries": windowed,
+            "snapshots": snapshots,
+            "tz": _serialize_tz(tz, now),
+            "now": now.isoformat(),
+            "primary": primary,
+            "sensors": list(sensors),
+            "primary_aliases": list(primary_aliases),
+            "sleep_window": list(sleep_window) if sleep_window is not None else None,
+            "bed": [int(bed[0]), int(bed[1])],
+            "wake": [int(wake[0]), int(wake[1])],
+            "train_days": int(train_days),
+            "model_fitted_at": model_fitted_at,
+            "previous": dict(previous) if previous is not None else None,
+        }
+        try:
+            record = await _run_in_subprocess("night_replay", payload)
+            return dict(record)
+        except OSError:
+            _LOGGER.warning("night replay: subprocess launch failed; falling back to executor thread", exc_info=True)
+    result: dict[str, Any] = await executor_job(
+        functools.partial(
+            night_replay.run_nightly,
+            chart_entries=chart_entries,
+            snapshots_fn=snapshots_fn,
+            tz=tz or UTC,
+            now=now,
+            primary=primary,
+            sensors=sensors,
+            primary_aliases=primary_aliases,
+            in_sleep=in_sleep,
+            bed=bed,
+            wake=wake,
+            train_days=train_days,
+            model_fitted_at=model_fitted_at,
+            previous=previous,
+        )
+    )
+    return result

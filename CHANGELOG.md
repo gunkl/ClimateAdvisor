@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.85] — 2026-11-24
+
+### Fixed
+- Fix #1722: on slower hardware such as a Raspberry Pi 4, v4's background model fit (and display-node / night-replay fits) now runs in a separate low-priority Python subprocess instead of a Home Assistant executor thread. Before, the pure-Python fit held Python's GIL for up to ~90–100 seconds and could freeze Home Assistant's event loop, causing Zigbee coordinators and sensors to briefly drop offline and trigger false "entity not responding" alerts. Unloading or reloading Climate Advisor during a fit now also terminates the worker immediately.
+
 ## [0.9.84] — 2026-11-23
 
 ### Fixed

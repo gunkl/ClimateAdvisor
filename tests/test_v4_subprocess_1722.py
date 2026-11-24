@@ -115,8 +115,9 @@ def test_async_run_fit_executes_in_real_subprocess() -> None:
     assert model_dict.get("schema_version") == 1
     assert seconds >= 0.0
     assert isinstance(fit_line, str)
-    # Only snapshots_fn ran in the executor; run_fit itself ran in the child process.
-    assert executor_calls == [snapshots_fn]
+    # Only snapshots_fn and JSON encode/decode ran in the executor; run_fit itself ran in the child process.
+    assert snapshots_fn in executor_calls
+    assert not any(getattr(fn, "func", fn) is v4_shadow.run_fit for fn in executor_calls)
 
 
 def test_async_run_display_fit_and_night_replay_in_real_subprocess() -> None:
@@ -208,7 +209,7 @@ def test_subprocess_cancellation_kills_and_reaps_child(monkeypatch: pytest.Monke
     monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_subprocess)
 
     async def scenario() -> None:
-        task = asyncio.create_task(v4_shadow._run_in_subprocess("fit", {}))
+        task = asyncio.create_task(v4_shadow._run_in_subprocess(_sync_executor, "fit", {}))
         await asyncio.sleep(0.05)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -226,11 +227,13 @@ def test_subprocess_oserror_falls_back_to_executor(
         raise OSError("spawn disabled")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_spawn)
-    executor_called: list[bool] = []
+    fallback_called: list[bool] = []
 
     async def fake_executor(fn, *args):
-        executor_called.append(True)
-        return ({"schema_version": 1, "confidence": "none"}, 0.1, "fallback")
+        if getattr(fn, "func", fn) is v4_shadow.run_fit:
+            fallback_called.append(True)
+            return ({"schema_version": 1, "confidence": "none"}, 0.1, "fallback")
+        return fn(*args)
 
     tz = ZoneInfo("America/Chicago")
     now = datetime(2026, 11, 24, 15, 0, tzinfo=tz)
@@ -248,7 +251,7 @@ def test_subprocess_oserror_falls_back_to_executor(
             )
         )
 
-    assert executor_called == [True]
+    assert fallback_called == [True]
     assert line == "fallback"
     assert seconds == 0.1
     assert model_dict["confidence"] == "none"

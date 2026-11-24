@@ -1600,9 +1600,9 @@ def _make_in_sleep(sleep_window: Sequence[Any] | None) -> Callable[[datetime], b
     )
 
 
-async def _run_in_subprocess(op: str, payload: dict[str, Any]) -> Any:
+async def _run_in_subprocess(executor_job: Callable[..., Awaitable[Any]], op: str, payload: dict[str, Any]) -> Any:
     """Execute one v4 worker operation in a child Python process; kill and reap it on cancellation."""
-    raw_in = json.dumps({"op": op, "payload": payload}).encode("utf-8")
+    raw_in: bytes = await executor_job(lambda: json.dumps({"op": op, "payload": payload}).encode("utf-8"))
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-c",
@@ -1625,7 +1625,7 @@ async def _run_in_subprocess(op: str, payload: dict[str, Any]) -> Any:
         err_text = stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"v4 worker ({op}) exited with code {proc.returncode}: {err_text[-500:]}")
     try:
-        resp = json.loads(stdout.decode("utf-8"))
+        resp = await executor_job(lambda: json.loads(stdout.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"v4 worker ({op}) returned invalid JSON: {exc}") from exc
     if not isinstance(resp, dict) or not resp.get("ok"):
@@ -1761,7 +1761,7 @@ async def async_run_fit(
             "climate_entity": climate_entity,
         }
         try:
-            model_dict, seconds, fit_line = await _run_in_subprocess("fit", payload)
+            model_dict, seconds, fit_line = await _run_in_subprocess(executor_job, "fit", payload)
             return dict(model_dict), float(seconds), str(fit_line)
         except OSError:
             _LOGGER.warning("v4 fit: subprocess launch failed; falling back to executor thread", exc_info=True)
@@ -1824,7 +1824,7 @@ async def async_run_display_fit(
             "train_days": train_days,
         }
         try:
-            new_dict, seconds, line = await _run_in_subprocess("display_fit", payload)
+            new_dict, seconds, line = await _run_in_subprocess(executor_job, "display_fit", payload)
             return dict(new_dict), float(seconds), str(line)
         except OSError:
             _LOGGER.warning("v4 display fit: subprocess launch failed; falling back to executor thread", exc_info=True)
@@ -1895,7 +1895,7 @@ async def async_run_night_replay(
             "previous": dict(previous) if previous is not None else None,
         }
         try:
-            record = await _run_in_subprocess("night_replay", payload)
+            record = await _run_in_subprocess(executor_job, "night_replay", payload)
             return dict(record)
         except OSError:
             _LOGGER.warning("night replay: subprocess launch failed; falling back to executor thread", exc_info=True)

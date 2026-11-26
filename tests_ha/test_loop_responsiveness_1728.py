@@ -14,7 +14,10 @@ CI runner does not flake. The simulated clock is held still (no ``house.advance(
 ``test_process_offload_realha_1722.py``).
 
 Each job has a process test (today's code: must stay within budget) and a control in thread mode (the #1722 mechanism:
-must exceed it), so a green test proves the probe can see the bug.
+must exceed it), so a green test proves the probe can see the bug. The tier normally runs executor jobs synchronously
+on the loop (``track_executor`` in ``house/settle.py``), which only blocks the loop for one tick; that would not be
+#1722. The controls therefore use the ``real_executor`` fixture, which restores asyncio's real ``run_in_executor`` for
+the test, so the job runs in a pool thread competing with the loop for the GIL, exactly as in production.
 """
 
 from __future__ import annotations
@@ -37,12 +40,15 @@ pytestmark = pytest.mark.house
 
 # ---- budgets (Issue #1728 plan: two-way constants) ------------------------------------------------------------------
 _TICK_S = 0.005  # the probe's period
-_P99_LAG_BUDGET_MS = 3.0  # p99 wake-up lateness while a heavy job runs, at most ...
+# Why 15 / 25 ms: the worst PROCESS-mode p99 seen anywhere (2 busy cores, 2 CPU hogs, one pinned core) was 7.29 ms, so
+# these have 2x or more headroom; 3 ms flaked (4.20 ms measured on 2 busy cores). The real-GIL thread controls
+# (`real_executor` fixture) lose 52-87% of their ticks, far above _MAX_TICK_LOSS, which is the primary discriminator. Do
+# not raise the p99 floors above 20 ms: the night-replay control's own p99 is about 16 ms and must stay detectable.
+_P99_LAG_BUDGET_MS = 15.0  # p99 wake-up lateness while a heavy job runs, at most ...
 _P99_IDLE_FACTOR = 4.0  # ... or this many times the idle p99, whichever is larger (a noisy runner)
-# On ONE usable core a worker process shares the loop's core, so the loop waits for scheduler time slices (measured:
-# p99 3.0-3.6 ms pinned with taskset). That is the OS, not the GIL; the budget is for a runner with a spare core.
-# The thread control still misses it by a factor of 60 or more (hundreds of ms).
-_ONE_CORE_P99_MS = 12.0
+# On ONE usable core a worker process shares the loop's core, so the loop waits for scheduler time slices. That is the
+# OS, not the GIL; the budget is for a runner with a spare core.
+_ONE_CORE_P99_MS = 25.0
 _MAX_TICK_LOSS = 0.15  # fraction of ticks lost against the idle baseline
 _IDLE_TICKS = 300  # about 1.5 s of baseline
 _MIN_JOB_S = 0.4  # a job shorter than this proves nothing: the fixture history is too small
@@ -164,11 +170,18 @@ def _assert_responsive(label: str, idle: Lag, busy: Lag) -> None:
 
 
 def _assert_starved(label: str, idle: Lag, busy: Lag) -> None:
-    """The control: the same job in a thread must trip the probe (else the probe could not see #1722)."""
+    """The control: the same job in a real pool thread must starve the loop (else the probe could not see #1722).
+
+    "Starves" means EITHER p99 lateness over the allowed value OR tick loss over the limit; both are printed.
+    """
     _report(label, idle, busy)
     assert busy.wall_s >= _MIN_JOB_S, f"{label}: the job took {busy.wall_s:.2f}s; the history is too small"
-    assert busy.p99_ms > _allowed_p99_ms(idle) or _tick_loss(idle, busy) > _MAX_TICK_LOSS, (
-        f"{label}: a thread-mode job did not trip the probe ({busy} vs idle {idle}); the probe cannot see #1722"
+    p99_over = busy.p99_ms > _allowed_p99_ms(idle)
+    loss_over = _tick_loss(idle, busy) > _MAX_TICK_LOSS
+    print(f"[loop-lag] {label}: p99_over={p99_over} loss_over={loss_over}")  # noqa: T201
+    assert p99_over or loss_over, (
+        f"{label}: a real-executor thread job did not starve the loop ({busy} vs idle {idle}); "
+        "the probe cannot see #1722 (GIL contention)"
     )
 
 
@@ -228,6 +241,25 @@ async def _v4_house(make_house, monkeypatch):
     return house
 
 
+@pytest.fixture
+def real_executor(monkeypatch):
+    """Returns ``enable()``: call it AFTER ``make_house`` to run executor jobs on asyncio's real pool for this test.
+
+    The tier's ``track_executor`` shadows ``loop.run_in_executor`` with a synchronous wrapper (it blocks the loop for
+    the whole job, which hides GIL contention) and is installed while the house is built, so the wrapper must be
+    removed afterwards. Deleting the instance attribute exposes the class method; ``monkeypatch`` puts the wrapper
+    back at teardown, so other tests are unaffected. Safe because the simulated clock is held still during a job.
+    """
+
+    def enable() -> None:
+        loop = asyncio.get_running_loop()
+        assert "run_in_executor" in vars(loop), "the tier no longer wraps run_in_executor; revisit this fixture"
+        monkeypatch.delattr(loop, "run_in_executor")
+        assert "run_in_executor" not in vars(loop)
+
+    return enable
+
+
 def _process_mode(monkeypatch) -> None:
     monkeypatch.setattr(process_offload, "default_mode", "process")
 
@@ -284,11 +316,12 @@ async def test_v4_fit_keeps_the_loop_responsive_in_a_worker(make_house, monkeypa
     _assert_responsive("v4 fit / process", idle, busy)
 
 
-async def test_control_v4_fit_in_a_thread_starves_the_loop(make_house, monkeypatch) -> None:
+async def test_control_v4_fit_in_a_thread_starves_the_loop(make_house, monkeypatch, real_executor) -> None:
     house = await _v4_house(make_house, monkeypatch)
     coord = house.coordinator
     monkeypatch.setattr(coord, "_v4_run_night_replay", _noop_replay)
     _thread_mode(monkeypatch)
+    real_executor()
     idle, busy = await _measure(lambda: _v4_fit_only(coord))
     _assert_starved("v4 fit / thread (control)", idle, busy)
 
@@ -302,10 +335,11 @@ async def test_night_replay_keeps_the_loop_responsive_in_a_worker(make_house, mo
     _assert_responsive("night replay / process", idle, busy)
 
 
-async def test_control_night_replay_in_a_thread_starves_the_loop(make_house, monkeypatch) -> None:
+async def test_control_night_replay_in_a_thread_starves_the_loop(make_house, monkeypatch, real_executor) -> None:
     house = await _fitted_house(make_house, monkeypatch)
     coord = house.coordinator
     _thread_mode(monkeypatch)
+    real_executor()
     idle, busy = await _measure(lambda: coord._v4_run_night_replay("test"))
     _assert_starved("night replay / thread (control)", idle, busy)
 
@@ -319,9 +353,10 @@ async def test_cycle_refit_keeps_the_loop_responsive_in_a_worker(make_house, mon
     _assert_responsive("cycle refit / process", idle, busy)
 
 
-async def test_control_cycle_refit_in_a_thread_starves_the_loop(make_house, monkeypatch) -> None:
+async def test_control_cycle_refit_in_a_thread_starves_the_loop(make_house, monkeypatch, real_executor) -> None:
     house, now_ts = await _cycle_house(make_house)
     coord = house.coordinator
     _thread_mode(monkeypatch)
+    real_executor()
     idle, busy = await _measure(lambda: coord._cycle_refit("heat", now_ts))
     _assert_starved("cycle refit / thread (control)", idle, busy)

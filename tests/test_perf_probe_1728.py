@@ -311,3 +311,97 @@ def test_memory_is_bounded_but_count_total_and_max_stay_exact():
     assert len(stat.cpu) == perf_probe.RESERVOIR
     assert stat.max_cpu == (n - 1) / 1000
     assert stat.total_cpu == pytest.approx(sum(range(n)) / 1000)
+
+
+# ---- a probe fault must not break the run (verification finding: the nightly step gates on simulate.py) -----------
+def _state():
+    return (
+        fh.FakeHass.__dict__["async_add_executor_job"],
+        fs.FakeScheduler.__dict__["enqueue_task"],
+        asyncio.events.Handle.__dict__["_run"],
+        gc.isenabled(),
+        list(gc.callbacks),
+    )
+
+
+def test_a_failed_enter_rolls_back_every_patch_and_reenables_gc(monkeypatch):
+    def boom(self):
+        raise RuntimeError("monitoring unavailable")
+
+    monkeypatch.setattr(PerfProbe, "_start_lines", boom)  # the LAST install step: everything before it must be undone
+    before = _state()
+    probe = PerfProbe(lines=True)
+    with pytest.raises(RuntimeError, match="monitoring unavailable"):
+        probe.__enter__()
+    assert _state() == before
+    assert gc.isenabled()
+    assert not probe._active
+    with PerfProbe():  # and the object world is usable again
+        pass
+
+
+def test_a_failed_enter_keeps_gc_off_if_it_was_off(monkeypatch):
+    monkeypatch.setattr(PerfProbe, "_start_lines", lambda self: 1 / 0)
+    gc.disable()
+    try:
+        with pytest.raises(ZeroDivisionError):
+            PerfProbe(lines=True).__enter__()
+        assert not gc.isenabled()
+    finally:
+        gc.enable()
+
+
+@pytest.mark.parametrize("fault", ["import", "init", "enter"])
+def test_a_probe_fault_runs_the_simulation_plainly(fault, monkeypatch, tmp_path, capsys):
+    import simulate  # noqa: PLC0415
+
+    name = next(p.stem for p in sorted(GOLDEN.glob("*.json")) if p.name != "MANIFEST.json")
+    monkeypatch.setattr(sys, "argv", ["simulate.py", "-s", name])
+    rc_plain = simulate.main()
+    text_plain = capsys.readouterr().out
+
+    out = tmp_path / "perf.json"
+    if fault == "import":
+        monkeypatch.setitem(sys.modules, "tools.sim_harness.perf_probe", None)  # `from ... import` raises ImportError
+        monkeypatch.delattr(sys.modules["tools.sim_harness"], "perf_probe")
+    elif fault == "init":
+        monkeypatch.setattr(PerfProbe, "__init__", lambda self, **kw: 1 / 0)
+    else:
+        monkeypatch.setattr(PerfProbe, "_start_lines", lambda self: 1 / 0)
+    before = _state()
+    monkeypatch.setattr(sys, "argv", ["simulate.py", "-s", name, "--perf-report", str(out), "--perf-lines"])
+    rc = simulate.main()
+    text = capsys.readouterr().out
+    assert rc == rc_plain
+    warning, _, rest = text.partition("\n")
+    assert warning.startswith("perf probe unavailable, running without it"), warning
+    assert rest.endswith(text_plain) or rest.lstrip("\n") == text_plain.lstrip("\n")  # the run's own output is intact
+    assert text.count("perf probe unavailable") == 1  # exactly one warning
+    assert "Performance report" not in text
+    assert not out.exists()
+    assert _state() == before  # nothing left patched, GC back on
+
+
+# ---- the cheaper GC scheme -------------------------------------------------------------------------------------------
+def _spans(probe: PerfProbe, n: int = 6) -> None:
+    for _ in range(n):
+        probe._end("loop", "x", probe._begin())
+
+
+@pytest.mark.parametrize(
+    ("full_interval", "expect_full"), [(1e9, False), (0.0, True)], ids=["young-only", "full-every-time"]
+)
+def test_collections_between_spans_are_young_unless_the_full_interval_elapsed(monkeypatch, full_interval, expect_full):
+    calls: list[int | None] = []
+    real = gc.collect
+
+    def spy(generation: int = 2) -> int:
+        calls.append(generation)
+        return real(generation)
+
+    with PerfProbe(collect_interval_s=0.0, full_collect_interval_s=full_interval) as probe:
+        monkeypatch.setattr(gc, "collect", spy)
+        _spans(probe)
+    assert calls, "no collection ran"
+    assert (2 in calls) == expect_full
+    assert (1 in calls) == (not expect_full)

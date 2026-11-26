@@ -16,8 +16,9 @@ While active it records, without touching production code:
 
 GC: it is disabled for the run (restored on exit) and every pause is timed through ``gc.callbacks`` and subtracted
 from any span it falls inside, so a collection is never attributed to a job. Because a disabled GC would grow
-without bound over a long run, the probe collects explicitly between top-level spans (at most once per
-``collect_interval_s``); that time is booked as GC too.
+without bound over a long run, the probe collects explicitly between top-level spans: a young collection
+(``gc.collect(1)``) at most once per ``collect_interval_s`` and a full one at most once per ``full_collect_interval_s``
+(a forced full collection every second cost about 10% of a ``--generate 20`` run); that time is booked as GC too.
 
 Memory is bounded: per name, count / total / max are exact and percentiles come from a 2048-sample reservoir.
 
@@ -109,9 +110,12 @@ class _Stat:
 class PerfProbe:
     """Context manager; ``with PerfProbe() as probe: ...; probe.report()``."""
 
-    def __init__(self, *, lines: bool = False, collect_interval_s: float = 1.0) -> None:
+    def __init__(
+        self, *, lines: bool = False, collect_interval_s: float = 1.0, full_collect_interval_s: float = 20.0
+    ) -> None:
         self.lines = lines
         self.collect_interval_s = collect_interval_s
+        self.full_collect_interval_s = full_collect_interval_s
         # kind -> name -> stats
         self.samples: dict[str, dict[str, _Stat]] = defaultdict(lambda: defaultdict(_Stat))
         self.line_counts: dict[str, int] = defaultdict(int)
@@ -121,6 +125,7 @@ class PerfProbe:
         self._gc_start: tuple[float, float] | None = None
         self._depth = 0
         self._last_collect = 0.0
+        self._last_full_collect = 0.0
         self._restore: list[Any] = []
         self._gc_was_enabled = True
         self._active = False
@@ -154,7 +159,13 @@ class PerfProbe:
         if self._depth == 0 and self.collect_interval_s is not None:
             now = time.perf_counter()
             if now - self._last_collect >= self.collect_interval_s:
-                gc.collect()  # outside every span; booked as GC time by the callback
+                # outside every span; booked as GC time by the callback. Young collections keep the garbage of the
+                # frequent short-lived cycles bounded; the rare full one reclaims whatever got promoted.
+                if now - self._last_full_collect >= self.full_collect_interval_s:
+                    gc.collect()
+                    self._last_full_collect = time.perf_counter()
+                else:
+                    gc.collect(1)
                 self._last_collect = time.perf_counter()
 
     # -- install / uninstall -------------------------------------------
@@ -174,9 +185,17 @@ class PerfProbe:
 
         self._active = True
         self._gc_was_enabled = gc.isenabled()
+        try:
+            self._install(fh, fs, po)
+        except BaseException:
+            self._rollback()  # a half-installed probe must leave nothing behind (GC back on, every patch undone)
+            raise
+        return self
+
+    def _install(self, fh: Any, fs: Any, po: Any) -> None:
         gc.disable()
         gc.callbacks.append(self._gc_callback)
-        self.started_wall = self._last_collect = time.perf_counter()
+        self.started_wall = self._last_collect = self._last_full_collect = time.perf_counter()
         probe = self
 
         orig_exec = fh.FakeHass.async_add_executor_job
@@ -232,7 +251,20 @@ class PerfProbe:
 
         if self.lines:
             self._start_lines()
-        return self
+
+    def _rollback(self) -> None:
+        """Undo whatever ``__enter__`` got through: patches, the monitoring tool, the GC callback, the GC itself."""
+        with contextlib.suppress(Exception):
+            self._stop_lines()
+        for owner, attr, original in reversed(self._restore):
+            with contextlib.suppress(Exception):
+                setattr(owner, attr, original)
+        self._restore.clear()
+        with contextlib.suppress(ValueError):
+            gc.callbacks.remove(self._gc_callback)
+        if self._gc_was_enabled:
+            gc.enable()
+        self._active = False
 
     @staticmethod
     def _handle_name(handle: Any) -> str:
@@ -250,16 +282,8 @@ class PerfProbe:
     def __exit__(self, *exc: Any) -> None:
         if not self._active:
             return
-        self._stop_lines()
-        for owner, attr, original in reversed(self._restore):
-            setattr(owner, attr, original)
-        self._restore.clear()
-        with contextlib.suppress(ValueError):
-            gc.callbacks.remove(self._gc_callback)
-        if self._gc_was_enabled:
-            gc.enable()
+        self._rollback()
         self.total_wall = time.perf_counter() - self.started_wall
-        self._active = False
 
     # -- sys.monitoring line counts ------------------------------------
     def _start_lines(self) -> None:

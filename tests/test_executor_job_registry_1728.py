@@ -16,20 +16,22 @@ What it checks (AST only, no timing, deterministic, well under a second):
   coordinator source is reported as unclassified.
 
 What it does NOT check: the measured numbers themselves. They were taken by hand (see each ``reason``); the guard makes
-adding a callable a conscious, reviewed act, and a human re-measures when a job's input grows. Callables that reach the
-executor by reference (``executor_job=self._executor_job`` in ``process_offload.async_run_job``) are out of scope: the
-scanner reads calls, not references.
+adding a callable a conscious, reviewed act, and a human re-measures when a job's input grows. The callables that
+``process_offload.async_run_job`` hands to its ``executor_job`` PARAMETER (the coordinator passes ``_executor_job``) are
+scanned too: ``executor_job(...)`` is a scanned call form, so ``_encode``, ``_decode`` and ``_thread_run`` are entries.
 
 Scanned call forms (the callable is the FIRST positional argument unless stated):
 
-* ``_executor_job(fn, ...)``, ``<anything>.async_add_executor_job(fn, ...)``, ``asyncio.to_thread(fn, ...)``;
+* ``_executor_job(fn, ...)``, ``executor_job(fn, ...)`` (the parameter ``process_offload`` receives it as),
+  ``<anything>.async_add_executor_job(fn, ...)``, ``asyncio.to_thread(fn, ...)``;
 * ``<loop>.run_in_executor(executor, fn, ...)`` (callable is the second argument);
 * ``_process_job(job, payload_fn, timeout_s)``: the job NAME (a string) is the ``worker`` entry; the payload builder
   runs in the executor and is scanned as a callable too (second positional argument or ``payload_fn=``).
 
 Id scheme (one, stable under line moves and call-site moves): ``"<file>:<callable>"``.
 
-* ``<file>`` is the module file name (``coordinator.py``).
+* ``<file>`` is the module path relative to the package, in POSIX form (``coordinator.py``; a subpackage module would be
+  ``sub/mod.py``, so two modules with one base name cannot collide).
 * ``<callable>`` is the unparsed callable expression after unwrapping ``functools.partial(f, ...)`` and
   ``log_capture.bind_zone_for_executor(f)`` to ``f``: ``"self._chart_log.save"``, ``"v4_shadow.run_cycle"``.
   Many call sites of one callable are ONE entry: the classification belongs to the callable, not the site.
@@ -50,7 +52,14 @@ Classes (``REGISTRY[id]["cls"]``):
 * ``forwarder``: a wrapper that forwards its parameter. Nothing to cost.
 * ``over_budget``: KNOWN DEBT, measured at or over the budget on a realistic input. A ratchet, not a classification:
   it exists so the guard can be merged while the owner decides (move to a worker job, or make the work cheaper).
-  Once the cost falls under the budget the entry must be reclassified (the test fails on a stale ``over_budget``).
+  Once the cost falls under the budget the entry must be reclassified (the test fails on a stale ``over_budget``). The
+  SET of ``over_budget`` ids is pinned (``_ALLOWED_OVER_BUDGET``): a new heavy job must become a worker job, it cannot
+  be parked here.
+* ``worker_fallback``: ``process_offload._thread_run``, the whole worker job run in an executor thread. It can exceed
+  the budget BY DESIGN, and only when a worker process cannot start (``OSError`` from the spawn, a degraded host); the
+  production path is the process. The set of ids with this class is pinned (``_ALLOWED_FALLBACK``).
+* ``short_cpu`` may carry ``near_budget=True`` when ``ms`` is above ``_NEAR_BUDGET_FRACTION`` of the budget: tracked
+  for moving into a worker (the test lists the set and forces the marker both ways).
 
 To add a callable: classify it. If it can run longer than 0.5 s on x86 it must be a worker job (claude.md Thread-Safety,
 third hazard; docs/process-offload-brief.md), not a ``short_cpu`` entry.
@@ -74,7 +83,13 @@ assert API_PY.parent == PACKAGE_DIR
 # long on x86 (a Pi is about 5x slower). Longer work is a worker job (``_process_job``).
 _EXECUTOR_CPU_BUDGET_S = 0.5
 
-_EXECUTOR_CALLS = {"_executor_job": 0, "async_add_executor_job": 0, "to_thread": 0, "run_in_executor": 1}
+_EXECUTOR_CALLS = {
+    "_executor_job": 0,
+    "executor_job": 0,
+    "async_add_executor_job": 0,
+    "to_thread": 0,
+    "run_in_executor": 1,
+}
 _PROCESS_JOB = "_process_job"
 _WRAPPERS = {"partial", "bind_zone_for_executor"}
 _BUILTINS = frozenset(dir(builtins))
@@ -204,7 +219,10 @@ def scan_source(source: str, filename: str) -> dict[str, Found]:
 def scan_package() -> dict[str, Found]:
     found: dict[str, Found] = {}
     for path in sorted(PACKAGE_DIR.rglob("*.py")):
-        found.update(scan_source(path.read_text(encoding="utf-8"), path.name))
+        rel = path.relative_to(PACKAGE_DIR).as_posix()
+        for ident, item in scan_source(path.read_text(encoding="utf-8"), rel).items():
+            assert ident not in found, f"{ident} found in two modules"  # a collision must be loud, never an overwrite
+            found[ident] = item
     return found
 
 
@@ -220,11 +238,19 @@ def io(reason: str, *, cpu_ms: float | None = None, at: str | None = None) -> di
     return entry
 
 
-def short_cpu(ms: float, at: str, reason: str, calls: tuple[str, ...] | None = None) -> dict[str, Any]:
+def short_cpu(
+    ms: float, at: str, reason: str, calls: tuple[str, ...] | None = None, *, near_budget: bool = False
+) -> dict[str, Any]:
     entry: dict[str, Any] = {"cls": "short_cpu", "ms": ms, "at": at, "reason": reason}
     if calls is not None:
         entry["calls"] = calls
+    if near_budget:
+        entry["near_budget"] = True
     return entry
+
+
+def worker_fallback(reason: str) -> dict[str, Any]:
+    return {"cls": "worker_fallback", "reason": reason}
 
 
 def worker(reason: str) -> dict[str, Any]:
@@ -261,8 +287,10 @@ REGISTRY: dict[str, dict[str, Any]] = {
     "api.py:ClimateAdvisorPredictionAccuracyView.get._build": short_cpu(
         330,
         f"range=1y, {_MAX_LOG}, 1-year v4+v3 archive, 4 sensors x 4 leads (24h-30d: 190-200 ms)",
-        "prediction-accuracy payload; also reads the backtest file (io). NEAR BUDGET (66%): a Pi holds the GIL ~1.6 s",
+        "prediction-accuracy payload; also reads the backtest file (io). NEAR BUDGET (66%): a Pi holds the GIL ~1.6 s; "
+        "tracked for moving to a worker",
         calls=("dt_util.now", "prediction_accuracy.build_prediction_accuracy", "prediction_accuracy.load_backtest"),
+        near_budget=True,
     ),
     # ---- claude_api.py / config_flow.py: the SDK client builds an SSL context and reads the CA bundle ---------------
     "claude_api.py:AsyncAnthropic": io("Anthropic SDK client construction (SSL context, CA bundle read)"),
@@ -331,10 +359,15 @@ REGISTRY: dict[str, dict[str, Any]] = {
         4.3, "672 grid steps, 1 sensor", "the two display-only extra lines of the Status chart"
     ),
     "coordinator.py:ClimateAdvisorCoordinator._cycle_judge._job": short_cpu(
-        227,
-        "3 cycles x 400 samples each (the sample cap); one realistic cycle 28 ms, 5 realistic cycles 148 ms",
-        "one fit_cycles per just-closed cycle; the refit of the whole pool is the cycle_refit worker, not this",
+        420,
+        "3 just-closed cycles x 400 samples each (the sample cap): 7 runs on a quiet box 331-418 ms, median 357 (an "
+        "earlier 227 ms was a lighter input; verifier 313-379 ms at 3 x 404). One realistic cycle of 65-73 samples is "
+        "30 ms, 5 of them 160 ms",
+        "one fit_cycles per just-closed cycle; the refit of the whole pool is the cycle_refit worker, not this. "
+        "Linear in cycles x samples: NEAR BUDGET (84%, worst case): a Pi holds the GIL ~2 s. Tracked for moving to a "
+        "worker",
         calls=("cycle_model.fit_cycles", "cycle_model.prior_from_cache"),
+        near_budget=True,
     ),
     "coordinator.py:ClimateAdvisorCoordinator._cycle_refit._payload": short_cpu(
         195,
@@ -358,12 +391,30 @@ REGISTRY: dict[str, dict[str, Any]] = {
         364,
         f"105-day horizon (30 + 60 x 1.1 + 9), {_MAX_LOG}, 8,760 hourly snapshots; best 324 ms",
         "windows rows and prefetches the forecast archive for the v4_night_replay worker. NEAR BUDGET (73%): a Pi "
-        "holds the GIL ~1.8 s once a night. Candidate to move into the worker",
+        "holds the GIL ~1.8 s once a night. Candidate to move into the worker; tracked for moving to a worker",
+        near_budget=True,
     ),
     "coordinator.py:process_job:v4_fit": worker("the v4 fit (21-24 s on x86)"),
     "coordinator.py:process_job:v4_display_fit": worker("the v4 display-only fit"),
     "coordinator.py:process_job:v4_night_replay": worker("the recorded-night replay (34 s on x86)"),
     "coordinator.py:process_job:cycle_refit": worker("the pooled cycle-model refit (1.2-1.5 s on x86)"),
+    # ---- process_offload.py: the callables async_run_job hands to its ``executor_job`` parameter ---------------------
+    "process_offload.py:_encode": short_cpu(
+        52,
+        "json.dumps of a 5.1 MB envelope: all 17,520 chart rows (more than any real job windows) + 8,760 forecast "
+        "snapshots of 12 values",
+        "serialises the worker payload for the child's stdin (a 105-day night replay payload is about 2 MB, 24 ms)",
+    ),
+    "process_offload.py:_decode": short_cpu(
+        45,
+        "json.loads of a 5.1 MB result (the real results are small model dicts, a few KB)",
+        "decodes the worker's stdout envelope",
+    ),
+    "process_offload.py:_thread_run": worker_fallback(
+        "the whole worker job in an executor thread, with a JSON round-trip. Runs only when the worker process cannot "
+        "be started (OSError, a degraded host) and when a test selects thread mode; it can exceed the budget by "
+        "design (the v4 fit is 21-24 s on x86). A warning is logged each time"
+    ),
     "coordinator.py:ClimateAdvisorCoordinator._executor_job(param fn)": forwarder("the wrapper itself: zone-tags fn"),
     "coordinator.py:ClimateAdvisorCoordinator._process_job(param payload_fn)": forwarder(
         "the wrapper itself: runs the caller's payload builder, classified at the _process_job call site"
@@ -386,8 +437,20 @@ REGISTRY: dict[str, dict[str, Any]] = {
     "services.py:zone_coordinator.learning.reset": io("clears the learning state and writes it"),
 }
 
-_CLASSES = {"io", "short_cpu", "worker", "forwarder", "over_budget"}
+_CLASSES = {"io", "short_cpu", "worker", "forwarder", "over_budget", "worker_fallback"}
 _BUDGET_MS = _EXECUTOR_CPU_BUDGET_S * 1000
+_NEAR_BUDGET_FRACTION = 0.6  # a short_cpu entry above this share of the budget carries near_budget=True
+
+# Pinned sets: adding to either is a reviewed decision in THIS file, never a side effect of adding a registry entry.
+_ALLOWED_OVER_BUDGET = frozenset({"coordinator.py:self._v4_archive.load"})  # known debt; do not add to it
+_ALLOWED_FALLBACK = frozenset({"process_offload.py:_thread_run"})
+_EXPECTED_NEAR_BUDGET = frozenset(
+    {
+        "api.py:ClimateAdvisorPredictionAccuracyView.get._build",
+        "coordinator.py:ClimateAdvisorCoordinator._cycle_judge._job",
+        "coordinator.py:night_replay.nightly_job_payload",
+    }
+)
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -432,6 +495,15 @@ def budget_problems(found: dict[str, Found], registry: dict[str, dict[str, Any]]
             problems.append(f"{ident}: io cpu_ms must be under {_BUDGET_MS:.0f} ms and say what it was measured on")
         if cls == "over_budget" and not (isinstance(entry.get("ms"), int | float) and entry["ms"] >= _BUDGET_MS):
             problems.append(f"{ident}: over_budget but measured under the budget: reclassify it")
+        if cls == "short_cpu" and isinstance(entry.get("ms"), int | float):
+            near = entry["ms"] > _NEAR_BUDGET_FRACTION * _BUDGET_MS
+            if near != bool(entry.get("near_budget")):
+                problems.append(
+                    f"{ident}: {entry['ms']} ms is {'above' if near else 'under'} {_NEAR_BUDGET_FRACTION:.0%} of the "
+                    f"budget, so near_budget must be {near} (tracked for moving to a worker)"
+                )
+        if entry.get("near_budget") and cls != "short_cpu":
+            problems.append(f"{ident}: near_budget belongs on short_cpu entries only")
         if cls == "worker":
             job = ident.partition(":process_job:")[2]
             if job not in process_offload.JOBS:
@@ -554,3 +626,50 @@ def test_a_removed_or_added_registry_entry_is_reported() -> None:
     over = {**REGISTRY, "coordinator.py:self._chart_log.save": short_cpu(900, "x", "too slow")}
     assert any("worker job" in p for p in budget_problems(found, over))
     assert budget_problems(found, {**REGISTRY, "coordinator.py:process_job:nope": worker("x")}) != []
+
+
+def test_over_budget_is_a_pinned_ratchet() -> None:
+    """The over_budget set may only shrink. A new heavy job becomes a worker job; it cannot be parked here."""
+    ids = {i for i, e in REGISTRY.items() if e["cls"] == "over_budget"}
+    assert ids == _ALLOWED_OVER_BUDGET, (
+        f"over_budget ids are pinned to {sorted(_ALLOWED_OVER_BUDGET)}, found {sorted(ids)}. A NEW heavy job must "
+        "become a worker job (coordinator._process_job, process_offload.JOBS), not an over_budget entry; an id that "
+        "left the set was fixed: reclassify it and shrink _ALLOWED_OVER_BUDGET"
+    )
+
+
+def test_an_over_budget_entry_that_is_under_budget_fails() -> None:
+    found = scan_package()
+    victim = "coordinator.py:self._v4_archive.load"
+    assert budget_problems(found, REGISTRY) == []
+    fixed = {**REGISTRY, victim: over_budget(120, "x", "cheaper now")}
+    assert any("reclassify" in p for p in budget_problems(found, fixed))
+
+
+def test_the_by_reference_callables_are_scanned_and_the_fallback_is_pinned() -> None:
+    """``process_offload`` hands _encode/_decode/_thread_run to ``executor_job``: still scanned, still ours."""
+    found = scan_package()
+    by_ref = {"process_offload.py:_encode", "process_offload.py:_decode", "process_offload.py:_thread_run"}
+    assert by_ref <= set(found), by_ref - set(found)
+    assert {i for i in found if i.startswith("process_offload.py:")} == by_ref
+    assert {i for i, e in REGISTRY.items() if e["cls"] == "worker_fallback"} == _ALLOWED_FALLBACK
+    assert REGISTRY["process_offload.py:_thread_run"]["cls"] == "worker_fallback"
+
+
+def test_ids_are_package_relative_paths_so_modules_cannot_collide() -> None:
+    planted = "async def f(hass):\n    await hass.async_add_executor_job(helper)\n"
+    assert set(scan_source(planted, "sub/a.py")) == {"sub/a.py:helper"}
+    assert set(scan_source(planted, "a.py")) == {"a.py:helper"}
+    assert all(i.partition(":")[0].endswith(".py") for i in scan_package())
+
+
+def test_near_budget_entries_are_listed_and_marked_both_ways() -> None:
+    """Every short_cpu entry above 60% of the budget carries near_budget (and says it is tracked for a worker)."""
+    near = {i for i, e in REGISTRY.items() if e.get("near_budget")}
+    assert near == _EXPECTED_NEAR_BUDGET, sorted(near)
+    assert all("tracked for moving to a worker" in REGISTRY[i]["reason"].lower() for i in near)
+    assert budget_problems(scan_package(), REGISTRY) == []
+    unmarked = {**REGISTRY, "coordinator.py:night_replay.nightly_job_payload": short_cpu(364, "x", "r")}
+    assert any("near_budget must be True" in p for p in budget_problems(scan_package(), unmarked))
+    overmarked = {**REGISTRY, "fix_history.py:search_records": short_cpu(9, "x", "r", near_budget=True)}
+    assert any("near_budget must be False" in p for p in budget_problems(scan_package(), overmarked))

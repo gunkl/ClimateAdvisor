@@ -728,13 +728,24 @@ def main() -> int:
     if args.perf_report is None:
         return _run(args)
 
-    _repo_root = str(Path(__file__).resolve().parent.parent)
-    if _repo_root not in sys.path:
-        sys.path.insert(0, _repo_root)
-    from tools.sim_harness import perf_probe  # noqa: PLC0415
+    # Report only: a probe that cannot start (import, construction or install) must never take the gating nightly
+    # step with it. One warning, then the plain run.
+    probe = None
+    try:
+        _repo_root = str(Path(__file__).resolve().parent.parent)
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
+        from tools.sim_harness import perf_probe  # noqa: PLC0415
 
-    with perf_probe.PerfProbe(lines=args.perf_lines) as probe:
+        probe = perf_probe.PerfProbe(lines=args.perf_lines)
+        probe.__enter__()
+    except Exception as exc:  # noqa: BLE001
+        print(f"perf probe unavailable, running without it (ignored): {type(exc).__name__}: {exc}")
+        return _run(args)
+    try:
         rc = _run(args)
+    finally:
+        probe.__exit__(None, None, None)
     try:
         report = probe.report()
         print("\n" + perf_probe.format_table(report))

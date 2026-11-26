@@ -451,6 +451,86 @@ def evidence_from_record(rec: Any) -> ns.Evidence | None:
 
 
 # --------------------------------------------------------------------------------------------- the nightly job
+def nightly_horizon_days(train_days: int, nights: int) -> float:
+    """How far back the replay reads rows: the live fit window, the replayed nights and the first week's extra days."""
+    return float(train_days + nights * 1.1 + NIGHT_REPLAY_EXTRA_DAYS)
+
+
+def nightly_snapshot_window(now: datetime, horizon_days: float) -> tuple[datetime, datetime]:
+    """The forecast-archive window the replay reads. The one definition: :func:`run_nightly` asks its ``snapshots_fn``
+    for it and :func:`nightly_job_payload` prefetches it (Issue #1722)."""
+    return v4_shadow.snapshot_window(now, horizon_days)
+
+
+def nightly_job_payload(
+    *,
+    chart_entries: Sequence[Mapping[str, Any]],
+    snapshots_fn: Callable[[datetime, datetime], list[dict]] | None,
+    tz: tzinfo,
+    now: datetime,
+    primary: str,
+    sensors: Sequence[str],
+    primary_aliases: Sequence[str] = (),
+    sleep_window: Sequence[Any] | None = None,
+    bed: tuple[int, int] = (22, 30),
+    wake: tuple[int, int] = (6, 30),
+    train_days: int = V4_FIT_TRAIN_DAYS,
+    nights: int = NIGHT_REPLAY_NIGHTS,
+    model_fitted_at: str | None = None,
+    previous: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The JSON payload of :func:`run_nightly_job` (Issue #1722): :func:`run_nightly`'s arguments with the two callables
+    as data (``sleep_window`` = ``[sleep, wake]`` "HH:MM" or None).
+
+    Runs in the EXECUTOR, never on the event loop: it windows the chart rows and reads the forecast archive."""
+    horizon_days = nightly_horizon_days(train_days, nights)
+    return {
+        "chart_entries": v4_shadow.rows_in_window(chart_entries, now, horizon_days),
+        "snapshots": v4_shadow.prefetch_snapshots(
+            snapshots_fn, nightly_snapshot_window(now, horizon_days), "night replay"
+        ),
+        "tz": v4_shadow.encode_tz(tz, now),
+        "now": now.isoformat(),
+        "primary": primary,
+        "sensors": list(sensors),
+        "primary_aliases": list(primary_aliases),
+        "sleep_window": v4_shadow.jsonable_window(sleep_window),
+        "bed": list(bed),
+        "wake": list(wake),
+        "train_days": train_days,
+        "nights": nights,
+        "model_fitted_at": model_fitted_at,
+        "previous": dict(previous) if previous else None,
+    }
+
+
+def run_nightly_job(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """:func:`run_nightly` from JSON data only (Issue #1722; the worker process calls this). ``run_nightly`` is resolved
+    at call time, so a monkeypatch of it holds."""
+    tz, now, snapshots_fn = v4_shadow.job_clock_and_archive(payload)
+    bed, wake = payload.get("bed") or (22, 30), payload.get("wake") or (6, 30)
+    kwargs: dict[str, Any] = {}
+    if payload.get("train_days") is not None:
+        kwargs["train_days"] = int(payload["train_days"])
+    if payload.get("nights") is not None:
+        kwargs["nights"] = int(payload["nights"])
+    return run_nightly(
+        chart_entries=payload.get("chart_entries") or [],
+        snapshots_fn=snapshots_fn,
+        tz=tz,
+        now=now,
+        primary=payload["primary"],
+        sensors=list(payload.get("sensors") or []),
+        primary_aliases=tuple(payload.get("primary_aliases") or ()),
+        in_sleep=v4_shadow.sleep_predicate(payload.get("sleep_window")),
+        bed=(int(bed[0]), int(bed[1])),
+        wake=(int(wake[0]), int(wake[1])),
+        model_fitted_at=payload.get("model_fitted_at"),
+        previous=payload.get("previous"),
+        **kwargs,
+    )
+
+
 def run_nightly(
     *,
     chart_entries: Sequence[Mapping[str, Any]],
@@ -474,12 +554,12 @@ def run_nightly(
     run it on an executor thread, after the v4 fit, under the same domain lock. Raises on failure (the caller keeps
     the previous record)."""
     p = v4_shadow._predictor()
-    horizon_days = float(train_days + nights * 1.1 + NIGHT_REPLAY_EXTRA_DAYS)
+    horizon_days = nightly_horizon_days(train_days, nights)
     entries = v4_shadow.rows_in_window(chart_entries, now, horizon_days)
     snapshots: list[dict] = []
     if snapshots_fn is not None:
         try:
-            snapshots = snapshots_fn(now - timedelta(days=horizon_days + 1), now + timedelta(hours=1))
+            snapshots = snapshots_fn(*nightly_snapshot_window(now, horizon_days))
         except Exception:  # noqa: BLE001 - a bad forecast archive degrades to chart-log-only samples
             snapshots = []
     samples, prim, ordered = v4_shadow.build_samples(

@@ -1577,3 +1577,29 @@ def coarse_sensor_notice(
         "rate_in_use": in_use,
         "text": text,
     }
+
+
+# ---------------------------------------------------------------------------------------------------- worker job
+def refit_job_payload(
+    cycles: Sequence[dict[str, Any]], mode: str, snap: dict[str, Any], now_ts: float
+) -> dict[str, Any]:
+    """The JSON payload of :func:`refit_job` (Issue #1722): the mode's stored cycles (``CycleStore.cycles(mode)``, built
+    in the executor), the cache parts ``prior_from_cache`` reads (the coordinator's ``_cycle_prior_snapshot``) and the
+    refit time. Plain data only: lists, dicts, str and numbers."""
+    return {"cycles": list(cycles), "mode": mode, "snap": snap, "now_ts": now_ts}
+
+
+def refit_job(payload: dict[str, Any]) -> dict[str, Any]:
+    """The pooled refit of one mode from JSON data only (Issue #1722; the worker process calls this).
+
+    Exactly the coordinator's ``_cycle_refit`` job body: the prior from the cache snapshot and the pool, the other
+    mode's fit as the pooled sensor-lag evidence, then ``fit_cycles``. Returns the result dict including ``w_by_id``
+    (cycle id -> weight; the ids are ``str`` already, JSON keys survive); the coordinator applies
+    ``store.set_weights`` itself."""
+    cycles = payload["cycles"]
+    mode = payload["mode"]
+    snap = payload.get("snap") or {}
+    now_ts = payload["now_ts"]
+    prior = prior_from_cache(snap, mode, now_ts, cycles=cycles)
+    other = snap.get("cycle_fit_cool" if mode == "heat" else "cycle_fit_heat")
+    return fit_cycles(cycles, mode, prior, now_ts=now_ts, lag_evidence=other if isinstance(other, dict) else None)

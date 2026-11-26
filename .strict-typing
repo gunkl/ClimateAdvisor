@@ -55,6 +55,7 @@ custom_components.climate_advisor.override_match
 custom_components.climate_advisor.override_orphaned_grace
 custom_components.climate_advisor.override_supersession
 custom_components.climate_advisor.own_write_echo
+custom_components.climate_advisor.process_offload
 custom_components.climate_advisor.reauth
 custom_components.climate_advisor.record_text
 custom_components.climate_advisor.remote_offset

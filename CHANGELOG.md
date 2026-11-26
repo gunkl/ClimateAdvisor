@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.85] — 2026-11-26
+
+### Fixed
+- Fix #1722: on slower hardware like a Raspberry Pi 4, Home Assistant no longer freezes for a minute or more while Climate Advisor learns. Before, the freeze could reset a Zigbee stick and raise false "entity not responding" alerts. The long learning work (the prediction model's fit, the night check and the heating and cooling rate refit) now runs in a separate short-lived process, so Home Assistant keeps answering while it runs. New installs no longer run the long learning fit during their first 3 days, when it could never produce a model, and a restart within 6 hours of the last attempt no longer starts one again at once. Thanks to Jeffrey Sica (@jeefy) for the report, the diagnosis and the first implementation (#1723).
+
 ## [0.9.84] — 2026-11-23
 
 ### Fixed

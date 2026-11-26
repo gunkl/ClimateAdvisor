@@ -10,6 +10,8 @@ Allowed to mention v4 (anything named ``v4``/``predictor_v4``):
 * the ADVISORY module ``night_strategy.py`` (Issue #1230 R4): it reads v4 to rank bedroom options for the occupant
   to read, never to command anything; ``test_advisory_modules_command_nothing`` pins that it imports nothing that
   decides or calls a service;
+* the generic worker runner ``process_offload.py`` (Issue #1722): it may name the v4 jobs only as string entries of
+  its ``JOBS`` allowlist, never import or read v4 (``test_the_worker_runner_names_v4_only_in_its_job_allowlist``);
 * ``const.py`` (``V4_*`` constants), ``api.py`` (the read-only endpoint
   and the Debug ``engines`` field);
 * ``coordinator.py``, only in ``_v4*``/``v4_*`` methods and in fixed wiring points that never feed v4 back: the
@@ -41,6 +43,7 @@ _SHADOW_MODULES = {"v4_shadow.py", "v4_archive.py", "prediction_accuracy.py", "p
 _DISPLAY_MODULES = {"prediction_engines.py"}
 _ADVISORY_MODULES = {"night_strategy.py"}  # advise only (DP-7): see test_advisory_modules_command_nothing
 _DATA_MODULES = {"const.py", "api.py"}  # fields/constants/endpoint only; checked below
+_RUNNER_MODULES = {"process_offload.py"}  # job names in JOBS only; checked below (Issue #1722)
 _COORDINATOR_WIRING = {
     "__init__",
     "async_setup",
@@ -147,11 +150,37 @@ def _tree(path: Path) -> ast.AST:
 def test_no_module_outside_the_shadow_wiring_mentions_v4() -> None:
     offenders = []
     for path in sorted(_PKG.glob("*.py")):
-        if path.name in _SHADOW_MODULES | _ADVISORY_MODULES | _DATA_MODULES | _DISPLAY_MODULES | {"coordinator.py"}:
+        if path.name in (
+            _SHADOW_MODULES
+            | _ADVISORY_MODULES
+            | _DATA_MODULES
+            | _DISPLAY_MODULES
+            | _RUNNER_MODULES
+            | {"coordinator.py"}
+        ):
             continue
         for node, name, where in _references(_tree(path)):
             offenders.append(f"{path.name}:{getattr(node, 'lineno', '?')} {name} in {'.'.join(where) or '<module>'}")
     assert offenders == [], "decision-path code references v4:\n" + "\n".join(offenders)
+
+
+def test_the_worker_runner_names_v4_only_in_its_job_allowlist() -> None:
+    """Issue #1722: the generic worker runner may name the v4 jobs, but only as string entries of ``JOBS``.
+
+    It runs whatever allowlisted job it is handed and returns the job's own result; it never imports, reads or
+    interprets v4, and imports no sibling module at all at load time (the job's module is imported in the worker).
+    """
+    tree = _tree(_PKG / "process_offload.py")
+    jobs = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == "JOBS"
+    )
+    inside = {id(n) for n in ast.walk(jobs)}
+    stray = [f"line {getattr(n, 'lineno', '?')} {name}" for n, name, _w in _references(tree) if id(n) not in inside]
+    assert stray == []
+    relative = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.level >= 1]
+    assert [f"line {n.lineno}" for n in relative if n.col_offset == 0] == []
 
 
 def test_shadow_modules_import_nothing_that_decides() -> None:

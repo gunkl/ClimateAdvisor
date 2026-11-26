@@ -23,7 +23,7 @@ import math
 import time
 import zlib
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from datetime import time as dtime
 from typing import Any, NamedTuple
 
@@ -103,6 +103,203 @@ def build_samples(
     return samples, primary, list(ordered)
 
 
+def snapshot_window(now: datetime, history_days: float) -> tuple[datetime, datetime]:
+    """The forecast-archive window for rows ``history_days`` back: a day more before ``now``, to one hour ahead.
+
+    The one formula behind both :func:`fit_snapshot_window` and ``night_replay.nightly_snapshot_window``."""
+    return now - timedelta(days=history_days + 1), now + timedelta(hours=1)
+
+
+def fit_snapshot_window(now: datetime, train_days: float | None) -> tuple[datetime, datetime]:
+    """The forecast-archive window a v4 fit reads: ``train_days`` (400 when unbounded) plus a day back from ``now``, to
+    one hour ahead. The one definition: :func:`run_fit` asks its ``snapshots_fn`` for it and :func:`fit_job_payload`
+    prefetches it, so the offloaded fit sees the same snapshots as the in-process one (Issue #1722)."""
+    return snapshot_window(now, train_days or 400)
+
+
+def encode_tz(tz: tzinfo | None, now: datetime) -> dict[str, Any] | None:
+    """A timezone as JSON for the worker process (Issue #1722): ``{"key": IANA, "offset_s": n}`` when ``tz`` is a zone
+    with a key (the offset at ``now`` is the worker's fallback when it cannot load the key), else ``{"offset_s": n}``,
+    else UTC as ``{"offset_s": 0}``. :func:`decode_tz` inverts it."""
+    try:
+        off = tz.utcoffset(now) if tz is not None else None
+    except Exception:  # noqa: BLE001 - an odd tzinfo falls back to UTC
+        off = None
+    offset_s = int(off.total_seconds()) if off is not None else 0
+    key = getattr(tz, "key", None)
+    if isinstance(key, str) and key:
+        return {"key": key, "offset_s": offset_s}
+    return {"offset_s": offset_s}
+
+
+def decode_tz(raw: Mapping[str, Any] | None) -> tzinfo:
+    """The timezone :func:`encode_tz` described: ``ZoneInfo(key)``, else a fixed offset (logged at WARNING when a key
+    could not be loaded, as the fixed offset ignores daylight saving), else UTC."""
+    if isinstance(raw, Mapping):
+        key = raw.get("key")
+        if isinstance(key, str) and key:
+            try:
+                from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+                return ZoneInfo(key)
+            except Exception:  # noqa: BLE001 - tzdata missing or a bad key: fall through to the offset
+                _LOGGER.warning("v4 job: time zone key not available in the worker; using a fixed offset: key=%s", key)
+        off = raw.get("offset_s")
+        if isinstance(off, int | float) and not isinstance(off, bool):
+            return timezone(timedelta(seconds=float(off)))
+    return UTC
+
+
+def sleep_predicate(sleep_window: Sequence[Any] | None) -> Callable[[datetime], bool] | None:
+    """``in_sleep`` rebuilt from the configured ``[sleep, wake]`` "HH:MM" strings (Issue #1722), or ``None`` when no
+    window is set. The rule is ``predictor_v4.in_sleep_window`` (hass-free): the same answer as
+    ``automation._in_sleep_window`` for the HH:MM / HH:MM:SS times the config flow accepts; malformed times read as
+    awake. A test pins the two together."""
+    if not sleep_window:
+        return None
+    sleep, wake = sleep_window[0], sleep_window[1]
+    p = _predictor()
+    return lambda dt: p.in_sleep_window(dt, sleep, wake)
+
+
+def jsonable_window(sleep_window: Sequence[Any] | None) -> list[str | None] | None:
+    """``[sleep, wake]`` as JSON strings (``None`` stays ``None``), or ``None`` when no window is set."""
+    return [None if v is None else str(v) for v in sleep_window[:2]] if sleep_window else None
+
+
+def prefetch_snapshots(
+    snapshots_fn: Callable[[datetime, datetime], list[dict]] | None, window: tuple[datetime, datetime], what: str
+) -> list[dict] | None:
+    """The archive read the job cannot do (the archive lives in the parent): ``None`` = no archive; an unreadable
+    archive degrades to ``[]`` exactly as the in-process fit does."""
+    if snapshots_fn is None:
+        return None
+    try:
+        return list(snapshots_fn(*window))
+    except Exception:  # noqa: BLE001 - a bad forecast archive degrades the fit to chart-log-only, not to no fit
+        _LOGGER.warning("%s: forecast archive unreadable; fitting from the chart log alone", what, exc_info=True)
+        return []
+
+
+def fit_job_payload(
+    *,
+    chart_entries: Sequence[Mapping[str, Any]],
+    snapshots_fn: Callable[[datetime, datetime], list[dict]] | None,
+    tz: tzinfo,
+    now: datetime,
+    primary: str,
+    sensors: Sequence[str],
+    previous_model: Mapping[str, Any] | None = None,
+    primary_aliases: Sequence[str] = (),
+    sleep_window: Sequence[Any] | None = None,
+    train_days: float | None = None,
+    sleep_sensor: str | None = None,
+    climate_entity: str | None = None,
+) -> dict[str, Any]:
+    """The JSON payload of :func:`run_fit_job` (Issue #1722): :func:`run_fit`'s arguments, callables as data.
+
+    Runs in the EXECUTOR, never on the event loop: it windows the chart rows (``rows_in_window``) and reads the forecast
+    archive through ``fit_snapshot_window``. ``sleep_window`` is ``[sleep, wake]`` ("HH:MM") or ``None`` (the
+    coordinator passes it only while a separate sleep sensor is configured)."""
+    entries = list(chart_entries)
+    if train_days:
+        entries = rows_in_window(entries, now, train_days)
+    return {
+        "chart_entries": entries,
+        "snapshots": prefetch_snapshots(snapshots_fn, fit_snapshot_window(now, train_days), "v4 fit"),
+        "tz": encode_tz(tz, now),
+        "now": now.isoformat(),
+        "primary": primary,
+        "sensors": list(sensors),
+        "previous_model": dict(previous_model) if previous_model else None,
+        "primary_aliases": list(primary_aliases),
+        "sleep_window": jsonable_window(sleep_window),
+        "train_days": train_days,
+        "sleep_sensor": sleep_sensor,
+        "climate_entity": climate_entity,
+    }
+
+
+def job_clock_and_archive(
+    payload: Mapping[str, Any],
+) -> tuple[tzinfo, datetime, Callable[[datetime, datetime], list[dict]] | None]:
+    """``(tz, now, snapshots_fn)`` of a job payload: ``now`` expressed in ``tz`` (the coordinator passes
+    ``tz = now.tzinfo``) and a ``snapshots_fn`` that returns the prefetched archive rows (``None`` when the payload has
+    no archive). The three job functions share it (Issue #1722)."""
+    tz = decode_tz(payload.get("tz"))
+    now = datetime.fromisoformat(str(payload["now"])).astimezone(tz)
+    snaps = payload.get("snapshots")
+    return tz, now, ((lambda _a, _b: snaps) if isinstance(snaps, list) else None)
+
+
+def run_fit_job(payload: Mapping[str, Any]) -> list:
+    """:func:`run_fit` from JSON data only (Issue #1722; the worker process calls this). Returns
+    ``[model_dict, seconds, summary_line]``. ``run_fit`` is resolved at call time, so a monkeypatch of it holds."""
+    tz, now, snapshots_fn = job_clock_and_archive(payload)
+    out = run_fit(
+        chart_entries=payload.get("chart_entries") or [],
+        snapshots_fn=snapshots_fn,
+        tz=tz,
+        now=now,
+        primary=payload["primary"],
+        sensors=list(payload.get("sensors") or []),
+        previous_model=payload.get("previous_model"),
+        primary_aliases=tuple(payload.get("primary_aliases") or ()),
+        in_sleep=sleep_predicate(payload.get("sleep_window")),
+        train_days=payload.get("train_days"),
+        sleep_sensor=payload.get("sleep_sensor"),
+        climate_entity=payload.get("climate_entity"),
+    )
+    return list(out)
+
+
+def display_fit_job_payload(
+    *,
+    chart_entries: Sequence[Mapping[str, Any]],
+    tz: tzinfo,
+    now: datetime,
+    primary: str,
+    sensors: Sequence[str],
+    model_dict: Mapping[str, Any],
+    primary_aliases: Sequence[str] = (),
+    sleep_window: Sequence[Any] | None = None,
+    train_days: float | None = None,
+) -> dict[str, Any]:
+    """The JSON payload of :func:`run_display_fit_job` (Issue #1722). Runs in the EXECUTOR, never on the event loop (it
+    windows the chart rows)."""
+    entries = list(chart_entries)
+    if train_days:
+        entries = rows_in_window(entries, now, train_days)
+    return {
+        "chart_entries": entries,
+        "tz": encode_tz(tz, now),
+        "now": now.isoformat(),
+        "primary": primary,
+        "sensors": list(sensors),
+        "model_dict": dict(model_dict),
+        "primary_aliases": list(primary_aliases),
+        "sleep_window": jsonable_window(sleep_window),
+        "train_days": train_days,
+    }
+
+
+def run_display_fit_job(payload: Mapping[str, Any]) -> list:
+    """:func:`run_display_fit` from JSON data only (Issue #1722). Returns ``[model_dict, seconds, line]``."""
+    tz, now, _ = job_clock_and_archive(payload)
+    out = run_display_fit(
+        chart_entries=payload.get("chart_entries") or [],
+        tz=tz,
+        now=now,
+        primary=payload["primary"],
+        sensors=list(payload.get("sensors") or []),
+        model_dict=payload["model_dict"],
+        primary_aliases=tuple(payload.get("primary_aliases") or ()),
+        in_sleep=sleep_predicate(payload.get("sleep_window")),
+        train_days=payload.get("train_days"),
+    )
+    return list(out)
+
+
 def run_fit(
     *,
     chart_entries: Sequence[Mapping[str, Any]],
@@ -144,7 +341,7 @@ def run_fit(
     snapshots: list[dict] = []
     if snapshots_fn is not None:
         try:
-            snapshots = snapshots_fn(now - timedelta(days=(train_days or 400) + 1), now + timedelta(hours=1))
+            snapshots = snapshots_fn(*fit_snapshot_window(now, train_days))
         except Exception:  # noqa: BLE001 - a bad forecast archive degrades the fit to chart-log-only, not to no fit
             _LOGGER.warning("v4 fit: forecast archive unreadable; fitting from the chart log alone", exc_info=True)
             snapshots = []

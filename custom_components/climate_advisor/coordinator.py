@@ -45,7 +45,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from . import cycle_model, i18n, log_capture, prediction_engines, v4_shadow, window_span
+from . import cycle_model, i18n, log_capture, prediction_engines, process_offload, v4_shadow, window_span
 from . import zone_capability as zc
 from .ai_settings_sync import is_ai_configured, provider_of
 from .automation import (
@@ -342,6 +342,10 @@ from .const import (
     WAKE_STEP_GRACE_S,
     WINDOW_OPPORTUNITY_MAX_LOW_F,
     WINDOWS_RECOMMENDED_HYSTERESIS_F,
+    WORKER_TIMEOUT_CYCLE_REFIT_S,
+    WORKER_TIMEOUT_V4_DISPLAY_FIT_S,
+    WORKER_TIMEOUT_V4_FIT_S,
+    WORKER_TIMEOUT_V4_NIGHT_REPLAY_S,
     is_availability_recovery,
     is_unavailable_state,
 )
@@ -575,6 +579,7 @@ from .whf_safety_decision import (
 
 _LOGGER = logging.getLogger(__name__)
 _V4_FIT_LOCK_KEY = "climate_advisor_v4_fit_lock"  # hass.data key of the domain-wide v4 fit lock (Issue #1230 R1b, M5)
+_CYCLE_FIT_LOCK_KEY = "climate_advisor_cycle_fit_lock"  # hass.data key: domain-wide cycle refit worker lock (#1722)
 # Issue #1422: the off-cycle fit that only folds newly qualified display-only sensor nodes into the stored model.
 V4_DISPLAY_FIT_REASON = "display_nodes"
 # Issue #1415: the one-time split of the old shared investigation-reports file runs in executor threads; two zones
@@ -1516,6 +1521,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._timeline_night_failed_logged = False
         self._v4_night_replay_failed_logged = False
         self._v4_night_replay_running = False
+        self._v4_night_replay_task_handle: asyncio.Task[Any] | None = None  # Issue #1722: unload cancels it
+        self._cycle_refit_task: asyncio.Task[Any] | None = None  # Issue #1722: the running cycle refit's task
         self.learning = LearningEngine(
             Path(hass.config.config_dir),
             entry_id=self._entry_id,
@@ -2778,6 +2785,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         return self.hass.async_add_executor_job(log_capture.bind_zone_for_executor(fn), *args)
 
+    async def _process_job(self, job: str, payload_fn: Callable[[], dict[str, Any]], timeout_s: float) -> Any:
+        """Run one heavy CPU job in a worker PROCESS and return its JSON-able result (Issue #1722).
+
+        Why: a fit or refit is pure-Python number crunching. In an executor THREAD it still holds the GIL, so the whole
+        Home Assistant event loop stalls for it (the v4 fit starved the loop for seconds on a Raspberry Pi although it
+        "ran off the loop"). A child process has its own GIL: the loop keeps its latency. ``payload_fn`` builds the
+        JSON payload (row windowing, forecast-archive prefetch) and runs in the EXECUTOR, so none of that touches the
+        loop either; capture every ``self.*`` read in it as ``functools.partial`` arguments on the loop first.
+
+        Call from inside ``log_capture.zone_scope`` so the child's relayed log lines are zone-tagged. A failed, killed
+        or timed-out worker raises ``process_offload.ProcessJobError``: the caller's existing ``except Exception``
+        keeps the previous model or rates exactly as a fit that raised in the executor did. Cancelling the awaiting
+        task kills the worker (unload).
+        """
+        started = _monotonic()
+        payload = await self._executor_job(payload_fn)
+        _LOGGER.debug("Worker job started: job=%s zone=%s timeout_s=%g", job, self._zone_log_id(), timeout_s)
+        result = await process_offload.async_run_job(
+            job, payload, executor_job=self._executor_job, logger=_LOGGER, timeout_s=timeout_s
+        )
+        _LOGGER.debug(
+            "Worker job returned: job=%s zone=%s seconds=%.1f", job, self._zone_log_id(), _monotonic() - started
+        )
+        return result
+
     def _spawn(self, coro: Coroutine[Any, Any, Any], *, background: bool = False) -> asyncio.Task[Any]:
         """Start ``coro`` as a task tied to this zone's config entry (Issue #1113).
 
@@ -2861,6 +2893,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if getattr(self, "_v4_store", None) is not None:
             await self._executor_job(self._v4_store.load)
             self._v4_last_fit = dict(self._v4_store.last_fit or {})
+            self._v4_restore_attempt_throttle()  # Issue #1722: a restart does not refit at once
         await self._executor_job(self.learning.load_state)
         # Restore rejection_log from LearningState (load_state() already validated and capped it)
         loaded_rl = self.learning._state.rejection_log
@@ -7744,8 +7777,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         The check-and-set of ``_v4_fit_running`` happens on the event loop, so two fits can never overlap.
         """
-        if getattr(self, "_shut_down", False) is True:
-            return False
+        if getattr(self, "_shut_down", False) is True or getattr(self, "_ha_stopping", False) is True:
+            return False  # Issue #1722: no worker is started once Home Assistant is stopping (``_persist_on_ha_stop``)
         if not self.engine_running("v4"):
             _LOGGER.debug("v4 fit (%s): skipped, v4 is neither the primary nor the comparison engine", reason)
             return False
@@ -7757,6 +7790,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return False
         self._v4_fit_running = True
         self._v4_last_fit_attempt = _monotonic()
+        self._v4_stamp_attempt()
         # background=True: HA cancels it on unload instead of waiting up to a minute for the fit.
         coro = self._v4_run_fit(reason)
         try:
@@ -7774,12 +7808,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return self.hass.data.setdefault(_V4_FIT_LOCK_KEY, asyncio.Lock())
 
     def _v4_cancel_fit(self) -> None:
-        """Cancel a running fit task (unload). The executor thread cannot be interrupted; its result is dropped."""
+        """Cancel the running fit and night-replay tasks (unload). Cancelling kills the worker process (Issue #1722)."""
         task = getattr(self, "_v4_fit_task", None)
         if task is not None and not task.done():
             task.cancel()
         self._v4_fit_task = None
         self._v4_fit_running = False
+        # Issue #1722: the standalone night replay is a worker process now; cancelling its task kills the worker
+        replay = getattr(self, "_v4_night_replay_task_handle", None)
+        if replay is not None and not replay.done():
+            replay.cancel()
+        self._v4_night_replay_task_handle = None
+        self._v4_night_replay_running = False
 
     def _v4_node_inputs(self) -> dict[str, Any]:
         """What ``v4_shadow.build_samples`` needs, captured on the event loop: the fit's node choice and row mapping.
@@ -7792,7 +7832,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # rows are skipped for the primary node.
         aliases = tuple(c for c in (self.config.get("climate_entity"),) if c)
         cfg = dict(self.config)
-        in_sleep = (lambda dt, _cfg=cfg: _in_sleep_window(dt, _cfg)) if cfg.get("sleep_indoor_temp_entity") else None
+        # Issue #1722: the sleep rule travels to the worker as data ([sleep, wake]; the worker applies the same
+        # hass-free rule), under the same condition the in-process predicate was built.
+        sleep_window = [cfg.get("sleep_time"), cfg.get("wake_time")] if cfg.get("sleep_indoor_temp_entity") else None
         # Issue #1432: the separate sleep sensor (None: none configured, or it is the primary): the per-room model
         # needs it modelled before it is used, so sleep hours are never forecast from the thermostat's room.
         sleep = cfg.get("sleep_indoor_temp_entity") or None
@@ -7801,15 +7843,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "primary": primary,
             "sensors": sensors,
             "aliases": aliases,
-            "in_sleep": in_sleep,
+            "sleep_window": sleep_window,
             "sleep_sensor": sleep_sensor,
         }
 
     async def _v4_run_night_replay(self, reason: str) -> None:
         """The nightly recorded-night replay behind the night-strategy gate (Issue #1230 R6). Never raises.
 
-        Runs in the executor, after the v4 fit and serialised with every zone's fit under the same domain lock, and
-        stores its record next to the model (``night_validation``). A failure keeps the previous record."""
+        Runs in a worker process (Issue #1722), after the v4 fit and serialised with every zone's fit under the same
+        domain lock, and stores its record next to the model (``night_validation``). A failure (including a failed or
+        timed-out worker) keeps the previous record."""
         state = getattr(self, "_v4_store", None)
         model_dict = state.v4_model if state is not None else None
         if state is None or not isinstance(model_dict, dict) or model_dict.get("confidence", "none") == "none":
@@ -7823,9 +7866,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             sleep_t = _parse_time(self.config.get("sleep_time", "22:30"))
             wake_t = _parse_time(self.config.get("wake_time", "06:30"))
             async with self._v4_fit_lock():
-                record = await self._executor_job(
+                record = await self._process_job(
+                    "v4_night_replay",
                     functools.partial(
-                        night_replay.run_nightly,
+                        night_replay.nightly_job_payload,
                         chart_entries=self._chart_log.raw_entries(),
                         snapshots_fn=self._forecast_archive.get_snapshots,
                         tz=now.tzinfo,
@@ -7833,14 +7877,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         primary=node["primary"],
                         sensors=node["sensors"],
                         primary_aliases=node["aliases"],
-                        in_sleep=node["in_sleep"],
+                        sleep_window=node["sleep_window"],
                         bed=(sleep_t.hour, sleep_t.minute),
                         wake=(wake_t.hour, wake_t.minute),
                         train_days=V4_FIT_TRAIN_DAYS,
                         model_fitted_at=str(model_dict.get("fitted_at") or ""),
                         # Issue #1525: what newer nights have not displaced carries over (never fades with time)
                         previous=state.night_validation if isinstance(state.night_validation, dict) else None,
-                    )
+                    ),
+                    WORKER_TIMEOUT_V4_NIGHT_REPLAY_S,
                 )
             if getattr(self, "_shut_down", False) is True:
                 return
@@ -7872,6 +7917,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Its own running flag, so it never makes a nightly fit skip; the domain lock serialises it with every fit."""
         if (
             getattr(self, "_shut_down", False) is True
+            or getattr(self, "_ha_stopping", False) is True  # Issue #1722: no worker once Home Assistant is stopping
             or getattr(self, "_v4_night_replay_running", False)
             or not self.engine_running("v4")
         ):
@@ -7880,45 +7926,89 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return False
         self._v4_night_replay_running = True
         self._v4_last_fit_attempt = _monotonic()
+        self._v4_stamp_attempt()
         coro = self._v4_night_replay_task(reason)
         try:
-            self._spawn(coro, background=True)
+            # Issue #1722: the handle lets unload cancel it (cancelling kills the worker process)
+            self._v4_night_replay_task_handle = self._spawn(coro, background=True)
         except Exception:
             coro.close()
             self._v4_night_replay_running = False
             raise
         return True
 
+    def _v4_stamp_attempt(self) -> None:
+        """Remember in the model store that a fit or night replay is starting now (Issue #1722).
+
+        Wall clock, so it survives a restart: ``async_restore_state`` seeds the 6 h retry throttle from it, and a
+        restart within the retry interval no longer refits at once (a fit the restart killed wrote no ``last_fit``).
+        Persisted by ``_v4_persist_attempt`` as the first step of the task, before any work starts."""
+        store = getattr(self, "_v4_store", None)
+        if store is not None:
+            store.fit_attempt_at = dt_util.now().isoformat()
+            store.dirty = True
+
+    async def _v4_persist_attempt(self) -> None:
+        """Save the attempt stamp before the fit work starts (the start methods are sync). Never raises."""
+        try:
+            if getattr(self, "_v4_store", None) is not None and getattr(self, "_shut_down", False) is not True:
+                await self._executor_job(self._v4_store.save)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - save() never raises; this only guards a closing executor
+            _LOGGER.debug("v4 fit: could not save the attempt stamp", exc_info=True)
+
+    def _v4_restore_attempt_throttle(self) -> None:
+        """Seed the 6 h fit-retry throttle from the stored attempt stamp after a restart (Issue #1722).
+
+        A stamp younger than ``V4_FIT_RETRY_MIN_INTERVAL_S`` makes ``_v4_last_fit_attempt`` that old, so the cycle's
+        first/retry fit and night replay wait out the rest of the interval. A future-dated, naive or unparseable
+        stamp is ignored. The 03:15 nightly fit never reads ``_v4_last_fit_attempt``: it is unaffected."""
+        raw = getattr(getattr(self, "_v4_store", None), "fit_attempt_at", None)
+        if not isinstance(raw, str):
+            return
+        try:
+            age_s = seconds_since(datetime.fromisoformat(raw), now=dt_util.now())  # naive stamp: TypeError, ignored
+        except TypeError, ValueError:
+            return
+        if 0 <= age_s < V4_FIT_RETRY_MIN_INTERVAL_S:
+            self._v4_last_fit_attempt = _monotonic() - age_s
+            _LOGGER.info("v4 fit retry throttled after restart: last attempt %d min ago", int(age_s // 60))
+
     async def _v4_night_replay_task(self, reason: str) -> None:
         try:
             with log_capture.zone_scope(self.zone_label):
+                await self._v4_persist_attempt()
                 await self._v4_run_night_replay(reason)
         finally:
             self._v4_night_replay_running = False
+            self._v4_night_replay_task_handle = None
 
     async def _v4_run_fit(self, reason: str) -> None:
         """Fit off the event loop and store the model; on any failure the previous model is kept."""
         started = _monotonic()
         try:
             with log_capture.zone_scope(self.zone_label):
+                await self._v4_persist_attempt()  # Issue #1722: before any work; a restart then does not refit at once
                 now = dt_util.now()
                 tz = now.tzinfo
                 node = self._v4_node_inputs()
-                primary, sensors, aliases, in_sleep = (
+                primary, sensors, aliases, sleep_window = (
                     node["primary"],
                     node["sensors"],
                     node["aliases"],
-                    node["in_sleep"],
+                    node["sleep_window"],
                 )
                 # Captured on the loop (rule: no self.* reads inside the executor job); the row copy is shallow.
                 # One fit at a time across ALL zones (M5): several zones fitting at once starve the event loop (GIL).
                 if reason == V4_DISPLAY_FIT_REASON:
-                    await self._v4_run_display_fit(now, primary, sensors, aliases, in_sleep)
+                    await self._v4_run_display_fit(now, primary, sensors, aliases, sleep_window)
                     return
                 async with self._v4_fit_lock():
-                    model_dict, seconds, fit_line = await self._executor_job(
+                    model_dict, seconds, fit_line = await self._process_job(
+                        "v4_fit",
                         functools.partial(
-                            v4_shadow.run_fit,
+                            v4_shadow.fit_job_payload,
                             chart_entries=self._chart_log.raw_entries(),
                             snapshots_fn=self._forecast_archive.get_snapshots,
                             tz=tz,
@@ -7927,11 +8017,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             sensors=sensors,
                             previous_model=self._v4_store.v4_model,
                             primary_aliases=aliases,
-                            in_sleep=in_sleep,
+                            sleep_window=sleep_window,
                             train_days=V4_FIT_TRAIN_DAYS,
                             sleep_sensor=node.get("sleep_sensor"),
                             climate_entity=self.config.get("climate_entity") or None,
-                        )
+                        ),
+                        WORKER_TIMEOUT_V4_FIT_S,
                     )
                 if getattr(self, "_shut_down", False) is True:
                     return  # unloaded while fitting: drop the result
@@ -8080,7 +8171,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("v4 node-choice note failed", exc_info=True)
 
     async def _v4_run_display_fit(
-        self, now: datetime, primary: str, sensors: list[str], aliases: tuple[str, ...], in_sleep: Any
+        self, now: datetime, primary: str, sensors: list[str], aliases: tuple[str, ...], sleep_window: Any
     ) -> None:
         """Fold newly qualified display-only sensor nodes into the stored model (Issue #1422, option b). Never raises.
 
@@ -8095,9 +8186,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         try:
             async with self._v4_fit_lock():
-                new_dict, seconds, line = await self._executor_job(
+                new_dict, seconds, line = await self._process_job(
+                    "v4_display_fit",
                     functools.partial(
-                        v4_shadow.run_display_fit,
+                        v4_shadow.display_fit_job_payload,
                         chart_entries=self._chart_log.raw_entries(),
                         tz=now.tzinfo,
                         now=now,
@@ -8105,9 +8197,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         sensors=sensors,
                         model_dict=model_dict,
                         primary_aliases=aliases,
-                        in_sleep=in_sleep,
+                        sleep_window=sleep_window,
                         train_days=V4_FIT_TRAIN_DAYS,
-                    )
+                    ),
+                    WORKER_TIMEOUT_V4_DISPLAY_FIT_S,
                 )
         except asyncio.CancelledError:
             raise
@@ -17578,6 +17671,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             lock = self._cycle_fit_lock = asyncio.Lock()
         return lock
 
+    def _cycle_refit_worker_lock(self) -> asyncio.Lock:
+        """The lock every zone's cycle-refit WORKER takes (one per Home Assistant instance, in ``hass.data``).
+
+        Issue #1722: at most one refit worker process runs at a time, whatever the number of zones (each worker is a
+        whole interpreter; every zone refits at startup). Taken inside the zone's ``_cycle_lock`` and held only for
+        the worker job, never for the store/apply steps, so a zone waiting here keeps no one else but itself out of its
+        own cycle lock (unload cancels the waiting refit)."""
+        return self.hass.data.setdefault(_CYCLE_FIT_LOCK_KEY, asyncio.Lock())
+
     def _cycle_refit_due_modes(self, now_ts: float) -> list[str]:
         """Modes whose waiting cycles are due a full refit (Issue #1512 finding 7: Pi CPU).
 
@@ -17612,8 +17714,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _cycle_spawn_refit(self, *, startup: bool = False) -> None:
         """Schedule the due refits / save (``_cycle_process`` with no new cycle). Never raises."""
-        if not self._cycles_enabled():
-            return
+        if (
+            not self._cycles_enabled()
+            or getattr(self, "_ha_stopping", False) is True
+            or getattr(self, "_shut_down", False) is True
+        ):
+            return  # Issue #1722: no refit worker is started once Home Assistant is stopping
         coro = self._cycle_process([], startup=startup)
         try:
             self._spawn(coro)
@@ -17649,6 +17755,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if startup:
                     due.update(m for m in ("heat", "cool") if self._cycle_store.has_cycles(m))
                 for mode in sorted(due):
+                    if getattr(self, "_ha_stopping", False) is True or getattr(self, "_shut_down", False) is True:
+                        break  # Issue #1722: a cycle that closed during the stop/unload is stored; no worker starts
                     await self._cycle_refit(mode, now_ts)
                     pending.pop(mode, None)
                     self._cycle_last_refit[mode] = now_ts
@@ -17700,30 +17808,45 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._cycle_record_rejection(mode, cycle, code, _cycle_values(cycle, res_f))
         return eligible
 
+    def _cycle_cancel_refit(self) -> None:
+        """Unload (Issue #1722): cancel a cycle refit waiting on its worker process (cancelling kills the worker).
+
+        The refit holds the cycle lock for up to ``WORKER_TIMEOUT_CYCLE_REFIT_S``, and ``_persist_cycles`` (shutdown)
+        needs that lock. The previous rates stay; the next refit (startup) redoes it."""
+        refit = getattr(self, "_cycle_refit_task", None)
+        if refit is not None and not refit.done():
+            refit.cancel()
+
     async def _cycle_refit(self, mode: str, now_ts: float) -> None:
         """Refit ``mode`` from its stored cycles and apply it (v3 primary: the decisions' rate).
 
         The pool is every stored cycle of the mode (the store keeps CYCLE_RETENTION_DAYS back from the mode's newest
         cycle, not from today: a quiet season removes nothing, owner decision 2026-11-11). Built, prior computed and
         fitted in the executor (finding 7: nothing heavy on the event loop); the prior sees the pool, so a held fit
-        is its prior only when its cycles left it (finding 4)."""
+        is its prior only when its cycles left it (finding 4).
+
+        Issue #1722: the fit itself runs in a worker process (``cycle_refit``: a pooled fit over every stored cycle is
+        seconds of GIL-holding Python on a Pi); the cycles are copied out of the store in the executor and the weights
+        are applied after the job returns. A failed or timed-out worker raises into ``_cycle_process``'s handler,
+        which keeps the previous rates."""
         snap = self._cycle_prior_snapshot(mode)
         store = self._cycle_store
 
-        def _job() -> dict:
-            cycles = store.cycles(mode)
-            prior = cycle_model.prior_from_cache(snap, mode, now_ts, cycles=cycles)
-            # Issue #1512 reopened: the sensor's lag is pooled over heating and cooling (the other mode's own lag
-            # profile on the same sensor; fit_cycles ignores it for another sensor)
-            other = snap.get("cycle_fit_cool" if mode == "heat" else "cycle_fit_heat")
-            out = cycle_model.fit_cycles(
-                cycles, mode, prior, now_ts=now_ts, lag_evidence=other if isinstance(other, dict) else None
-            )
-            # Issue #1512 reopened: the store keeps cycles by their weight in this fit, not by their age
-            store.set_weights(out.get("w_by_id") or {})
-            return out
+        def _payload() -> dict:
+            return cycle_model.refit_job_payload(store.cycles(mode), mode, snap, now_ts)
 
-        result = await self._executor_job(_job)
+        self._cycle_refit_task = asyncio.current_task()  # async_shutdown cancels it (kills the worker)
+        try:
+            with log_capture.zone_scope(self.zone_label):  # the cycle task starts outside one; tags the relayed logs
+                async with self._cycle_refit_worker_lock():  # one refit worker at a time across zones (Issue #1722)
+                    result = await self._process_job("cycle_refit", _payload, WORKER_TIMEOUT_CYCLE_REFIT_S)
+        finally:
+            self._cycle_refit_task = None
+        # Issue #1512 reopened: the store keeps cycles by their weight in this fit, not by their age (set_weights
+        # takes the store's lock, which a save holds during its write: executor)
+        if getattr(self, "_shut_down", False) is True:
+            return  # Issue #1722: unloaded while the worker ran: drop the result, as the v4 fits do
+        await self._executor_job(store.set_weights, result.get("w_by_id") or {})
         applied = self.learning.apply_cycle_fit(mode, result, self._cycle_primary_is_v3())
         _LOGGER.info(
             "Cycle model fit: zone=%s mode=%s q=%s sd=%s k_p_cycle=%s coast=%sF grade=%s eligible=%s/%s prior=%s "
@@ -21694,6 +21817,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Idempotent with ``async_shutdown``: the runtime flush resets the on-since time to now, so a later flush adds
         only the seconds since; the saves are atomic rewrites of the same state. Each step is guarded on its own, so
         one failure cannot stop the others or raise into HA's stop."""
+        self._cycle_cancel_refit()  # Issue #1722: a worker refit holds the cycle lock the cycle save below waits on
+        self._v4_cancel_fit()  # Issue #1722: a v4 fit or replay worker is killed now, not left to HA's final cancel
         steps: list[tuple[str, Any]] = [
             ("runtime and state", self._persist_runtime_and_state),
             ("chart log", self._persist_chart_log),
@@ -21757,6 +21882,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if getattr(self, "_ha_stopping", False) is not True:
             await self._release_command_adjustments("unload")
         self._shut_down = True
+        self._cycle_cancel_refit()  # before ``_persist_cycles`` waits on the cycle lock the refit holds
         engine = getattr(self, "automation_engine", None)
         if engine is not None:
             engine.latch_shutdown()

@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.84"
+VERSION = "0.9.85"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -647,6 +647,13 @@ V4_FIT_MINUTE = 15
 V4_FIT_TRAIN_DAYS = 30
 V4_FIT_STAGGER_S = 30 * 60  # each zone fits at 03:15 + a stable per-entry offset in [0, this) (Issue #1230 R1b, M5)
 V4_FIT_RETRY_MIN_INTERVAL_S = 6 * 3600  # a first fit that failed is retried by the cycle at most this often
+# Issue #1722: the heavy fits run in a worker process; a hung worker is killed after this long so it cannot hold the
+# domain-wide v4 fit lock forever. Estimated Pi times (about 5x x86; the reported Pi fit took 99 s): a fit about
+# 120 s, a night replay about 3 min. These leave headroom.
+WORKER_TIMEOUT_V4_FIT_S = 900  # the nightly / first / retry v4 fit
+WORKER_TIMEOUT_V4_DISPLAY_FIT_S = 600  # the display-only node fit (cheaper than the full fit)
+WORKER_TIMEOUT_V4_NIGHT_REPLAY_S = 1800  # the recorded-night replay behind the night-strategy gate
+WORKER_TIMEOUT_CYCLE_REFIT_S = 600  # the pooled heat/cool cycle refit
 # Issue #1529: after this many unusable refits in a row (nightly and the 6 h retries) while a usable model stays in use,
 # the log WARNs and the Status tab and the AI context say so (one bad night is only on the Debug tab). Three refits is
 # the 03:15 refit plus two 6 h retries, about 12 h: long enough that a brief outage stays quiet, short enough to surface

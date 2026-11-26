@@ -140,6 +140,25 @@ def auto_enable_custom_integrations(enable_custom_integrations):
 
 
 @pytest.fixture(autouse=True)
+def _worker_jobs_in_thread(monkeypatch):
+    """Run Climate Advisor's worker jobs (v4 fit, night replay, cycle refit; Issue #1722) in an executor thread.
+
+    Production runs them in a child process. This tier drives a SIMULATED clock, and two things about a child
+    process are invisible to it: ``settle.quiesce`` / ``async_block_till_done`` track executor futures but not
+    subprocess pipes, so a step is "settled" while the worker still runs and the simulated clock moves on (a fit
+    that ends 3 s of real time later lands as many simulated minutes late, decisions a step late, an unload
+    still ``UNLOAD_IN_PROGRESS`` when the test looks); and the worker's timeout runs on the loop clock, which here
+    is the simulated one, so 600 simulated seconds kill a worker that has run for 20 real milliseconds. A thread job
+    costs zero loop time under ``settle.track_executor``, exactly as before the offload, so this tier keeps the old
+    deterministic timeline. The process path is exercised on purpose, with the clock held still, in
+    ``test_process_offload_realha_1722.py`` (it overrides this per test).
+    """
+    from custom_components.climate_advisor import process_offload
+
+    monkeypatch.setattr(process_offload, "default_mode", "thread")
+
+
+@pytest.fixture(autouse=True)
 def _fixed_ha_timer_jitter(monkeypatch):
     """Home Assistant offsets its time-change listeners and every coordinator's refresh by a RANDOM 0.05-0.5 s
     (``randint(RANDOM_MICROSECOND_MIN, RANDOM_MICROSECOND_MAX)``) so real installs do not fire together. On the

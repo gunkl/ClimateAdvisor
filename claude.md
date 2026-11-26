@@ -117,6 +117,7 @@ The briefing is the main way users interact with Climate Advisor. When making ch
   - the per-zone files whose base names are listed in `const.py` `ENTRY_SCOPED_FILES`, the single source of truth (today: state, chart log, learning DB, forecast archive, v4 archive, v4 backtest, v4 model, AI investigation history). Each is stored per zone as `<stem>_<entry_id>.json` and deleted when the zone is deleted; `tests/test_zone_removal_cleanup.py` fails if the package writes a per-zone file that is not listed. The v4 backtest file is read-only to the integration (`tools/predict_backtest.py --publish` writes it)
   - the old one-per-install `climate_advisor_investigation_reports.json` (`INVESTIGATION_REPORTS_FILE`), only until it is split once into every zone's own copy and removed (Issue #1415)
   - the short-lived temp files the atomic writes of those files create and rename into place
+- Short-lived worker processes of the same Python interpreter for long pure-Python jobs (Issue #1722, owner-approved 2026-11-26): `sys.executable -I -B` with an environment stripped of secrets (`SUPERVISOR_TOKEN`, `*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `*_PASSWD`, `*_PASS`), one at a time per job kind across all zones, running only functions on the `process_offload.JOBS` allowlist from this package, talking only through stdin/stdout pipes, writing no files (not even bytecode) and making no network or HA calls. See `docs/HA-BOUNDARY-EXCEPTIONS.md` §4 and `docs/process-offload-brief.md`
 - Approved exceptions logged in `docs/HA-BOUNDARY-EXCEPTIONS.md` (today: the dev-only test integrations, which Climate Advisor's own code never touches, and the `ai_task` call above)
 
 **Everything else is OUT OF SCOPE.** This includes but is not limited to:
@@ -206,7 +207,7 @@ Any automation phase that changes the thermostat setpoint (even temporarily) MUS
 
 ### Thread-Safety Requirements (CRITICAL)
 
-**Decision**: Any blocking work called from an `async` method MUST be offloaded to a thread-pool executor via `await hass.async_add_executor_job()`. This covers two distinct hazards, both of which stall the HA event loop for the entire Home Assistant instance (not just this integration) and can trigger HA watchdog restarts: **heavy synchronous computation** (CPU-bound work) and **blocking I/O** (file reads/writes, `os.replace`/`os.chmod`, `tempfile`, sockets, subprocess calls). Treat both as equally in scope — do not read this section as "CPU work only."
+**Decision**: Any blocking work called from an `async` method MUST be offloaded to a thread-pool executor via `await hass.async_add_executor_job()`. This covers three distinct hazards, all of which stall the HA event loop for the entire Home Assistant instance (not just this integration) and can trigger HA watchdog restarts: **heavy synchronous computation** (CPU-bound work), **blocking I/O** (file reads/writes, `os.replace`/`os.chmod`, `tempfile`, sockets, subprocess calls) and **long pure-Python CPU work**, which the executor does not fix (see the third hazard below, Issue #1722). Treat all three as equally in scope — do not read this section as "CPU work only."
 
 #### Rule
 
@@ -229,10 +230,28 @@ For a plain bound method with no extra arguments, `functools.partial` isn't need
 
 **Capture all arguments in the event loop thread** (i.e., evaluate `self.*` attributes and helper calls like `self._get_indoor_temp()` before `functools.partial`, not inside the executor). The executor runs the partial with no additional arguments.
 
+#### Third hazard: long pure-Python CPU work needs a worker process (Issue #1722)
+
+The executor does **not** protect the event loop from pure-Python CPU work. An executor thread that runs Python bytecode holds the GIL, and the event loop thread needs the GIL to run. Measured on x86: loop I/O round-trips fell from about 64k/s to about 72/s while a v4 fit ran in an executor thread. Issue #1722 reported 90 s Home Assistant freezes on a Raspberry Pi 4, with Zigbee coordinator resets and false "entity not responding" alerts.
+
+**Rule:** CPU work that can run longer than about 0.5 s on x86 (several seconds on a Pi) goes through `coordinator._process_job(job, payload_fn, timeout_s)`:
+
+- `job` is a name on the `process_offload.JOBS` allowlist. It maps to a JSON-in, JSON-out function in a hass-free module of this package. No callables, no objects, no Home Assistant types cross the boundary.
+- `payload_fn` builds the JSON payload and runs in the executor. Capture every `self.*` read as `functools.partial` arguments on the loop first, as above.
+- `timeout_s` is a `WORKER_TIMEOUT_*` constant in `const.py`. A worker that fails, times out or dies raises `process_offload.ProcessJobError` into the caller's existing failure handling.
+- Apply the result (store writes, `set_weights`, entity state) in the coordinator after the job returns, never in the worker.
+
+Short work (under about 0.5 s on x86) stays in `_executor_job`. To add a job, follow `docs/process-offload-brief.md`. Running worker processes is an approved boundary exception: `docs/HA-BOUNDARY-EXCEPTIONS.md` §4.
+
+**Root cause of this rule**: the v4 fit (21-24 s on x86), the night replay (34 s) and the cycle-model refit (1.2-1.5 s) all "ran off the event loop" in the executor and still froze Home Assistant on a Pi, because a thread does not give up the GIL while it runs Python. The first rule (executor) was read as "offloaded means safe". It is not, for pure-Python CPU work.
+
+**Guards**: `tests/test_executor_offload.py::TestHeavyFitsRunInWorkerProcess` fails if any coordinator method calls `v4_shadow.run_fit`, `run_display_fit`, `night_replay.run_nightly` or `cycle_model.fit_cycles` directly instead of through `_process_job` (`_cycle_judge` is allowlisted: one cycle, about 26 ms). The import-closure guard in `tests/test_process_offload_1722.py` (`test_import_closure_of_job_modules_is_hass_free`) fails if an allowlisted job module imports any `homeassistant` module beyond `homeassistant.util.dt`.
+
 #### Canonical Examples
 
 - `_build_predicted_indoor_future()` in `coordinator.py` — ODE integration + OLS math (~400 lines). Called from `_async_update_data()` and `_async_send_briefing()` via executor. Fixed in Issue #376 (the CPU-bound case this section was originally written for).
 - OLS regression functions in `learning.py` (`compute_k_passive`, `compute_k_active`, etc.) — called from synchronous commit helpers that are themselves invoked via `async_add_executor_job`. Already correct.
+- `_v4_run_fit()`, `_v4_run_display_fit()`, `_v4_run_night_replay()` and `_cycle_refit()` in `coordinator.py` — the **long pure-Python case**. Each builds its payload in the executor and runs the fit through `_process_job()` in a worker process (`process_offload.py`). Fixed in Issue #1722; a thread-based version of the same fit had frozen Home Assistant for up to 90 s on a Raspberry Pi 4.
 - `ChartStateLog.load()`/`save()` in `chart_log.py` — plain synchronous `tempfile`/`os.replace`/`os.chmod`/`Path.read_text` calls, zero CPU-bound math. Called from `coordinator.py`'s `__init__` (moved to `async_restore_state()`) and two `async` methods. Fixed in Issue #543 — this is the **I/O case**, and it shipped unwrapped and passed review for months precisely because nothing about it looked like "heavy computation": no loop, no math, just `self._chart_log.save()`. If you're checking whether your code needs offloading, don't just ask "is this slow" — ask "does the thing I'm calling touch disk."
 
 #### What Does NOT Need Offloading
@@ -241,7 +260,7 @@ For a plain bound method with no extra arguments, `functools.partial` isn't need
 - Coroutine calls (`await some_async_fn()`) — already non-blocking by definition.
 - I/O that is *already* wrapped in `async_add_executor_job` at its call site — do not double-wrap. This is the only I/O exemption; it is not a blanket "I/O is handled elsewhere" pass. New I/O you're adding is your responsibility to wrap.
 
-**Violation protocol**: Same as Security — stop, flag, and ask before shipping new CPU-heavy or blocking-I/O code that runs synchronously inside an `async` method.
+**Violation protocol**: Same as Security — stop, flag, and ask before shipping new CPU-heavy or blocking-I/O code that runs synchronously inside an `async` method, or long pure-Python CPU work that runs in the executor instead of a worker process.
 
 **Enforcement**: This rule is checked, not just asserted. Ruff's `ASYNC` lint category (enabled in `pyproject.toml`) catches a blocking call written literally inline in an async function (e.g. `open()`, a `Path` method, `time.sleep`). `tests/test_executor_offload.py` catches known blocking sub-component methods (see its `_BLOCKING_METHODS` registry) called unwrapped from any async method in `coordinator.py` — the pattern that actually bit Issue #543, since ruff's `ASYNC` rules don't see through a method call into another module. If you introduce a new I/O sub-component (a new `chart_log.py`/`state.py`/`learning.py`-shaped class), add its blocking methods to that registry.
 
@@ -1267,5 +1286,5 @@ An override is never an exemption from rules 1-2; stops go through `enforce_whf_
 
 ---
 
-**Last Updated**: 2026-11-03
+**Last Updated**: 2026-11-26
 **For**: Climate Advisor — Home Assistant Integration

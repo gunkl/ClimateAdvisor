@@ -13,6 +13,7 @@
 | What does `simulator_support: false` mean now? | The real engine CAN evaluate these once the scenario supplies the needed inputs (e.g. `predicted_indoor`). Not skipped in Tier A. Previously marked phantom because the legacy simulator had no ODE. | [Scope](#scope) |
 | Where is the full Tier 3 spec covering each harness module? | Covers `fake_hass.py`, `fake_scheduler.py`, `build_engine.py`, `run_production.py`, `outcomes.py`, and `ha_stubs.py` with module-level Anchors. | [sim-harness-spec.md](sim-harness-spec.md) |
 | What is the Session seam? | `session.py` defines one runner protocol; `FakeHassSession` (fast default) and `RealHASession` (real HA, `tests_ha/`) implement it; generated days, promises and surface checks run on top. | [sim-harness-spec.md](sim-harness-spec.md#session-seam-generated-days-and-promises-issues-1127-1128) |
+| What does the perf probe record? | `tools/sim_harness/perf_probe.py` (run through `simulate.py --perf-report [PATH]`) records thread CPU per executor callable, per loop callback and per scheduler task, wall time per worker job, and optional line counts (`--perf-lines`). GC is excluded. Report only: it never changes results or exit status. | [Perf probe](#perf-probe-report-only-issue-1728) |
 
 ---
 
@@ -89,6 +90,23 @@ Goldens that fail on real HA are recorded in `tools/sim_harness/realha_ledger.js
 Assertions tagged `track: "integration"` are skipped in Tier A without causing a failure; they need the coordinator's listener layer, which Tier B provides.
 
 ---
+
+## Perf probe (report only, Issue #1728)
+
+`tools/sim_harness/perf_probe.py` measures how much CPU the code under simulation takes, so a slow job shows up before it reaches a home. Run it with `python tools/simulate.py --generate N --seeds S --perf-report [PATH]` (default `perf_report.json`). The nightly `generated-days` job does this and uploads the JSON as the `perf-report` artifact.
+
+**What it records** (rows sorted by max CPU):
+- `executor`: thread CPU and wall per callable handed to `FakeHass.async_add_executor_job`. The harness runs these inline, so thread CPU is the job's own cost. Flagged `OVER_BUDGET` above 500 ms.
+- `loop`: thread CPU per event-loop callback step, hooked at `asyncio.events.Handle._run` (an asyncio internal, restored on exit). Flagged above 10 ms, highlighted above 20 ms.
+- `task`: the same per `FakeScheduler.enqueue_task` coroutine.
+- `worker`: wall time per `process_offload.async_run_job` call (inline in the sim).
+- `lines`: optional (`--perf-lines`), line counts for a few hot functions through `sys.monitoring`. It roughly doubles CPU time.
+
+**Overlap of the loop and task rows.** The harness runs a whole scheduler task inside one loop step, so a task's time is also inside a loop row. Do not add the two kinds together. Read `task` for the useful granularity and `loop` for the asyncio view.
+
+**GC handling.** The GC is disabled for the run and restored on exit. Every pause is timed through `gc.callbacks` and subtracted from any span it falls inside, so a collection is never blamed on a job (pauses of 200-400 ms were seen in the prototype). The probe collects between top-level spans, at most once per interval, and books that time as GC too. Deferring GC raises resident memory: `peak_rss` read about 370-450 MB with the probe against about 150 MB without (it levels off), so judge memory from a run without `--perf-report`. A full collection can pause for up to about 1.4 s; that time is excluded from every row.
+
+**Report-only status.** Budgets only flag rows. No threshold fails the run, and a reporting error is printed and ignored. A fault in the probe's own per-span bookkeeping is counted in `probe_errors` and never raised into the run. A ratchet against a baseline is a later step, once the numbers are stable. Memory is bounded: count, total and max are exact, percentiles come from a 2048-sample reservoir per name. Unit tests: `tests/test_perf_probe_1728.py`.
 
 ## Disclosure Path
 

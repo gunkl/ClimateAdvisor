@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.86] — 2026-11-26
+
+### Internal
+- #1728 (tests and test harness only, nothing changes in your house): new checks that stop background work from freezing Home Assistant the way #1722 did. Every job Climate Advisor hands to a background thread must now be listed with a measured cost, and anything that can take over half a second must run in its own process. A real Home Assistant test confirms the model fits keep Home Assistant responding while they run. The nightly simulation also writes a report of how much processor time each job and each loop step used, for the maintainers to read. It never fails a run.
+
 ## [0.9.85] — 2026-11-26
 
 ### Fixed

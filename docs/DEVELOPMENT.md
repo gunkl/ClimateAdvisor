@@ -17,6 +17,7 @@ Home Assistant is covered in [SSH Setup](SSH-SETUP.md).
 | Which CI checks must pass to merge to `main`? | Branch protection requires `validate-and-test` and `ha-real` (both in `validate.yml`) and `validate` (Hassfest). | [§CI](DEVELOPMENT.md#ci) |
 | How do I run the real-Home-Assistant tier, build the house fixture, prove a test fails without the fix, or update snapshots? | `python scripts/test.py ha` (WSL on Windows). Use the `make_house` fixture in `tests_ha/house/`. `scripts/revert_proof.py` proves an escaped-bug test fails on the pre-fix commit. | [Real-HA tier](DEVELOPMENT.md#real-ha-tier-the-house-markers-revert-proof-snapshots-step-2-issue-1127) |
 | How do I run the simulator and its goldens? | `python tools/simulate.py` drives the real `AutomationEngine` (single-engine harness, #236). Goldens are locked by `MANIFEST.json`, and only `--sign` after human review changes them. | [§Simulator](DEVELOPMENT.md#simulator) |
+| How do I check that background work cannot freeze Home Assistant? | Classify every new executor job in `tests/test_executor_job_registry_1728.py`. Run the loop-lag test with `python3 scripts/test.py ha tests_ha/test_loop_responsiveness_1728.py -n 0 -s -o log_level=WARNING`. Run `python tools/simulate.py --generate 5 --seeds 1 --perf-report` for the CPU report. Issue #1728. | [§Freeze guards](DEVELOPMENT.md#freeze-guards-issue-1728) |
 | What does the nightly run, and how do I hear about a failure? | It runs fresh-seed generated days (P1-P7, then P8) and the full real-HA tier. Each seed prints its timing and `peak_rss`. When any job fails, `report-failure` files an issue for that failure (label `nightly-failure`; a repeat of the same failure comments on it), and `nightly-autofix.yml` has Claude diagnose it and, when it can show a fix, open a draft PR for review. | [§Nightly](DEVELOPMENT.md#nightly) |
 | Where do the README's test badges come from? | `badges.yml` runs both tiers with coverage and JUnit XML once a day (07:37 UTC) and by hand; `tools/badges.py` turns the reports and the real-HA ledger into shields.io endpoint JSON on the `badges` branch. The nightly badge is GitHub's workflow status. Issue #1343. | [§Test badges](DEVELOPMENT.md#test-badges) |
 | How do I keep a module's coverage from failing the coverage ratchet? | CI job `coverage` combines both tiers' coverage and fails when a module drops below its floor in `tools/coverage_floors.json` (or a new module is under 95 %). Raise floors with `python tools/coverage_ratchet.py update reports/coverage.json`. Issue #1644. | [§Coverage and typing ratchets](DEVELOPMENT.md#coverage-and-typing-ratchets) |
@@ -146,6 +147,40 @@ CI never passes `--snapshot-update`. To update the snapshots on purpose, run
 `python scripts/test.py ha --snapshot-update tests_ha/test_snapshots.py`. Then paste the before and after text in the
 PR and say why the occupant is better off.
 
+### Freeze guards (Issue #1728)
+
+Three checks stop background work from freezing Home Assistant (the #1722 problem). They test and report only. Production does not change.
+
+**Classify a new executor job.** `tests/test_executor_job_registry_1728.py` fails the unit tier when a callable handed to `_executor_job`, `async_add_executor_job` or `_process_job` has no entry in its `REGISTRY`, or when an entry is stale. The failure message names the missing id. Add an entry keyed `"<file>:<callable>"` (for example `"coordinator.py:self._chart_log.save"`), built with one of the helpers `io(...)`, `short_cpu(...)`, `worker(...)`, `forwarder(...)`, `over_budget(...)` or `worker_fallback(...)`:
+
+- `io`: file, network or client work. Say why in `reason`.
+- `short_cpu`: pure Python CPU. Give `ms`, the measured worst case on x86 (thread CPU, GC off), and `at`, the input size you measured on. It must be under 0.5 s. If it can run longer, make it a worker job instead: see [process-offload-brief.md](process-offload-brief.md#adding-a-job).
+- `worker`: a `process_offload.JOBS` name run through `_process_job`.
+- `forwarder`: a wrapper that only passes its parameter on. Nothing to cost.
+- `over_budget`: known debt. Only `V4Archive.load` is pinned here. Do not add to it.
+- `worker_fallback`: the thread fallback that runs a whole worker job when a worker process cannot start. Only `process_offload._thread_run` is pinned here.
+
+An `io` entry with `cpu_ms`, or a `short_cpu` entry, above 60% of the budget must carry `near_budget=True` and say it is tracked for moving to a worker. Costs are measured with GC off; GC is a process-wide cost, reported by the perf probe.
+
+A local `def` or `lambda` entry also lists `calls`. If the job starts calling something heavier, the entry goes stale and you must re-read and re-measure.
+
+**Run the loop-responsiveness test** (real Home Assistant, needs WSL on Windows):
+
+```bash
+python3 scripts/test.py ha tests_ha/test_loop_responsiveness_1728.py -n 0 -s -o log_level=WARNING
+```
+
+`-s` shows the measured lag. Each test prints one line per job: `[loop-lag] <label>: idle[...] busy[...] loss=N% allowed_p99=N ms`. `idle` is the baseline measured in the same test, `busy` is the loop while the job runs. A worker test passes when busy p99 lag is at most max(15 ms, 4 x idle p99) (25 ms on a one-core runner) and at most 15% of ticks are lost. Each job also has a thread-mode control. It runs the same job in a real executor thread and must fail the same limits. That proves the probe would have caught #1722. If a control passes, the test history is too small or the probe is broken. Do not loosen the thresholds to make a worker test pass: a worker test that fails means real loop starvation.
+
+**Run the CPU report** (report only, never fails):
+
+```bash
+python tools/simulate.py --generate 5 --seeds 1 --perf-report            # writes perf_report.json
+python tools/simulate.py --generate 5 --seeds 1 --perf-report out.json --perf-lines
+```
+
+It prints a table at the end of the run and writes JSON. The tables are executor jobs (thread CPU, flagged over 500 ms), loop callbacks (flagged over 10 ms, highlighted over 20 ms), scheduler tasks and worker jobs. GC pauses are excluded. `--perf-lines` also counts lines run in a few hot functions (slower). The probe defers GC, so with `--perf-report` the run's `peak_rss` reads about 300 MB high: read memory from a run without it. The nightly `generated-days` job uploads the file as the `perf-report` artifact. See the [Sim Harness Brief](sim-harness-brief.md#perf-probe-report-only-issue-1728).
+
 ## Simulator
 
 `tools/simulate.py` is a report and CLI shell over `tools/sim_harness/`, which drives the **real** production
@@ -209,7 +244,7 @@ regenerated, because CI uses `--locked`.
 | Job | What it does |
 |---|---|
 | `seeds` | Picks fresh master seeds once and prints them, so every job judges the same seeds and a failure can be replayed. |
-| `generated-days` | Runs `simulate.py --generate <days> --seeds ...`, judged by the household promises P1-P7 and the waiver ledger (`--issue-state github`). It prints each seed's timing and `peak_rss`: read these before raising the 120-minute cap. Failing scenarios are uploaded as the `generated-failures` artifact. |
+| `generated-days` | Runs `simulate.py --generate <days> --seeds ...`, judged by the household promises P1-P7 and the waiver ledger (`--issue-state github`). It prints each seed's timing and `peak_rss`: read these before raising the 120-minute cap. Failing scenarios are uploaded as the `generated-failures` artifact. It also writes `perf_report.json` and uploads it as the `perf-report` artifact (report only, #1728). The probe defers GC, so this job's `peak_rss` reads about 300 MB high; to judge memory, run a seed without `--perf-report`. |
 | `surfaces` | Runs `simulate.py --surfaces --generate 50` on the same seeds (P8, ratcheted by `tools/simulations/surface_divergences.json`). |
 | `ha-lifecycle` | Runs the full real-HA tier. |
 | `report-failure` | Runs when any job failed or was cancelled. It files one issue per distinct failure: title "Nightly failure <date>: <jobs>", labels `bug`, `nightly-failure`, `severity: medium`, the failing tests (pytest `FAILED`/`ERROR` lines) and broken household promises (`UNWAIVED <promise> day_seed=<n>`). The signature is the failing tests plus the promise NAMES (seeds change every night), so the same failure on a later night comments on the open issue instead of filing a new one. Hidden markers `nightly-signature` and `nightly-run` tie the issue to the run. |

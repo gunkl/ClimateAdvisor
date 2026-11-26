@@ -709,8 +709,54 @@ def main() -> int:
         "days) for status/chart/briefing/next-action agreement with the armed band; ratcheted by "
         "tools/simulations/surface_divergences.json",
     )
+    parser.add_argument(
+        "--perf-report",
+        nargs="?",
+        const="perf_report.json",
+        default=None,
+        metavar="PATH",
+        help="Issue #1728: report only. Record thread CPU per executor job and loop callback during the run "
+        "(GC excluded), print a table at the end and write JSON to PATH (default perf_report.json). "
+        "Never changes results or the exit status",
+    )
+    parser.add_argument(
+        "--perf-lines",
+        action="store_true",
+        help="with --perf-report: also count lines executed in a few hot functions (sys.monitoring; slower)",
+    )
     args = parser.parse_args()
+    if args.perf_report is None:
+        return _run(args)
 
+    # Report only: a probe that cannot start (import, construction or install) must never take the gating nightly
+    # step with it. One warning, then the plain run.
+    probe = None
+    try:
+        _repo_root = str(Path(__file__).resolve().parent.parent)
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
+        from tools.sim_harness import perf_probe  # noqa: PLC0415
+
+        probe = perf_probe.PerfProbe(lines=args.perf_lines)
+        probe.__enter__()
+    except Exception as exc:  # noqa: BLE001
+        print(f"perf probe unavailable, running without it (ignored): {type(exc).__name__}: {exc}")
+        return _run(args)
+    try:
+        rc = _run(args)
+    finally:
+        probe.__exit__(None, None, None)
+    try:
+        report = probe.report()
+        print("\n" + perf_probe.format_table(report))
+        perf_probe.write_json(report, args.perf_report)
+        print(f"\nperf report written to {args.perf_report}")
+    except Exception as exc:  # noqa: BLE001 - report only: a reporting problem must never change the run's result
+        print(f"perf report failed (ignored): {exc}")
+    return rc
+
+
+def _run(args: argparse.Namespace) -> int:
     # Issue #1341: simulate.py renders catalog messages (event_log text, reports); read the translation catalogs
     # once up front (the same single headless entry the harness uses; never raises, no-op afterwards).
     _root = str(Path(__file__).resolve().parent.parent)

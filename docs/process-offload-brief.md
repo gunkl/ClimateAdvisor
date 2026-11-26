@@ -164,7 +164,7 @@ If the process cannot be spawned (`OSError`), `async_run_job` logs one WARNING (
 4. Add a `WORKER_TIMEOUT_*` constant to `const.py`, about five times the longest measured time on a Pi.
 5. Call it from the coordinator with `await self._process_job("my_job", functools.partial(my_job_payload, ...), WORKER_TIMEOUT_...)`, inside `log_capture.zone_scope`, under the lock that serialises the work. Apply the result in the coordinator. Let `ProcessJobError` reach the site's existing failure handler.
 6. Cancel it on unload: keep the task handle and cancel it from `_v4_cancel_fit` or an equivalent.
-7. Add the function name to `_HEAVY_FIT_FUNCS` in `tests/test_executor_offload.py` if a direct in-process call would be a mistake, add the module to the import-closure test, and add a wiring test (see `tests/test_process_offload_wiring_1722.py`) and a job test (see `tests/test_offload_jobs_1722.py`).
+7. Classify any new executor callable in `tests/test_executor_job_registry_1728.py`. Add the function name to `_HEAVY_FIT_FUNCS` in `tests/test_executor_offload.py` if a direct in-process call would be a mistake, add the module to the import-closure test, and add a wiring test (see `tests/test_process_offload_wiring_1722.py`) and a job test (see `tests/test_offload_jobs_1722.py`).
 8. Update this brief's job table and the [HA Boundary Exceptions §4](HA-BOUNDARY-EXCEPTIONS.md#4-worker-processes-for-long-pure-python-jobs-issue-1722) scope list.
 
 ## Guards
@@ -180,6 +180,8 @@ If the process cannot be spawned (`OSError`), `async_run_job` logs one WARNING (
 | `tests_ha/test_process_offload_realha_1722.py` | On real Home Assistant: a refit that does not run in a child, or an unload, reload or HA stop that leaves the worker running or hangs on it. |
 | `tests/test_v4_shadow_structural.py` | The runner naming a v4 job outside its `JOBS` allowlist. |
 | `tests/test_process_offload_wiring_1722.py` | A call site that stops using `_process_job` with its payload built in the executor, a failed worker that does not keep the previous model, record or rates, or an unload that does not cancel a running replay or refit. |
+| `tests/test_executor_job_registry_1728.py` | A callable handed to `_executor_job`, `async_add_executor_job` or `_process_job` that is not classified in the registry (`io`, `short_cpu` under 0.5 s on x86, `worker`, `forwarder`, `over_budget`, `worker_fallback`), a stale entry, or a `worker` entry that is not a `JOBS` name. Add a new job here too. |
+| `tests_ha/test_loop_responsiveness_1728.py` | On real Home Assistant: a v4 fit, night replay or cycle refit that makes the event loop lag (p99 above max(15 ms, 4 x idle p99), 25 ms on one core, or over 15% ticks lost). Thread-mode controls prove the probe sees the #1722 starvation. |
 
 ## Disclosure Path
 

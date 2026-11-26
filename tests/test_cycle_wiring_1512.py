@@ -444,6 +444,7 @@ class _Rig:
         c._cycle_recorder = CycleRecorder(True)
         c._cycle_store = CycleStore(tmp_path / "cycles.json")
         c._cycle_fit_lock = None
+        c.hass = SimpleNamespace(data={})  # the domain-wide refit worker lock lives in hass.data (Issue #1722)
         c._cycle_pending = {}
         c._cycle_last_refit = {}
         c._cycle_last_save = None

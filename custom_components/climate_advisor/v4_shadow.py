@@ -103,11 +103,18 @@ def build_samples(
     return samples, primary, list(ordered)
 
 
+def snapshot_window(now: datetime, history_days: float) -> tuple[datetime, datetime]:
+    """The forecast-archive window for rows ``history_days`` back: a day more before ``now``, to one hour ahead.
+
+    The one formula behind both :func:`fit_snapshot_window` and ``night_replay.nightly_snapshot_window``."""
+    return now - timedelta(days=history_days + 1), now + timedelta(hours=1)
+
+
 def fit_snapshot_window(now: datetime, train_days: float | None) -> tuple[datetime, datetime]:
     """The forecast-archive window a v4 fit reads: ``train_days`` (400 when unbounded) plus a day back from ``now``, to
     one hour ahead. The one definition: :func:`run_fit` asks its ``snapshots_fn`` for it and :func:`fit_job_payload`
     prefetches it, so the offloaded fit sees the same snapshots as the in-process one (Issue #1722)."""
-    return now - timedelta(days=(train_days or 400) + 1), now + timedelta(hours=1)
+    return snapshot_window(now, train_days or 400)
 
 
 def encode_tz(tz: tzinfo | None, now: datetime) -> dict[str, Any] | None:

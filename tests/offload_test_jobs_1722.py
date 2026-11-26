@@ -93,3 +93,8 @@ def fd_garbage(payload: dict[str, Any]) -> Any:
     """Write straight to fd 1 (a C extension would), then return a normal result."""
     os.write(1, b"garbage written to fd 1\n")
     return "ok"
+
+
+def env_report(payload: dict[str, Any]) -> Any:
+    """Report the value (or None) of each named environment variable the child sees."""
+    return {name: os.environ.get(name) for name in payload["names"]}

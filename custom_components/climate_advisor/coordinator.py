@@ -579,6 +579,7 @@ from .whf_safety_decision import (
 
 _LOGGER = logging.getLogger(__name__)
 _V4_FIT_LOCK_KEY = "climate_advisor_v4_fit_lock"  # hass.data key of the domain-wide v4 fit lock (Issue #1230 R1b, M5)
+_CYCLE_FIT_LOCK_KEY = "climate_advisor_cycle_fit_lock"  # hass.data key: domain-wide cycle refit worker lock (#1722)
 # Issue #1422: the off-cycle fit that only folds newly qualified display-only sensor nodes into the stored model.
 V4_DISPLAY_FIT_REASON = "display_nodes"
 # Issue #1415: the one-time split of the old shared investigation-reports file runs in executor threads; two zones
@@ -7776,8 +7777,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         The check-and-set of ``_v4_fit_running`` happens on the event loop, so two fits can never overlap.
         """
-        if getattr(self, "_shut_down", False) is True:
-            return False
+        if getattr(self, "_shut_down", False) is True or getattr(self, "_ha_stopping", False) is True:
+            return False  # Issue #1722: no worker is started once Home Assistant is stopping (``_persist_on_ha_stop``)
         if not self.engine_running("v4"):
             _LOGGER.debug("v4 fit (%s): skipped, v4 is neither the primary nor the comparison engine", reason)
             return False
@@ -7916,6 +7917,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Its own running flag, so it never makes a nightly fit skip; the domain lock serialises it with every fit."""
         if (
             getattr(self, "_shut_down", False) is True
+            or getattr(self, "_ha_stopping", False) is True  # Issue #1722: no worker once Home Assistant is stopping
             or getattr(self, "_v4_night_replay_running", False)
             or not self.engine_running("v4")
         ):
@@ -7939,8 +7941,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Remember in the model store that a fit or night replay is starting now (Issue #1722).
 
         Wall clock, so it survives a restart: ``async_restore_state`` seeds the 6 h retry throttle from it, and a
-        restart no longer refits at once (a fit the restart killed wrote no ``last_fit``). Persisted by
-        ``_v4_persist_attempt`` as the first step of the task, before any work starts."""
+        restart within the retry interval no longer refits at once (a fit the restart killed wrote no ``last_fit``).
+        Persisted by ``_v4_persist_attempt`` as the first step of the task, before any work starts."""
         store = getattr(self, "_v4_store", None)
         if store is not None:
             store.fit_attempt_at = dt_util.now().isoformat()
@@ -7966,7 +7968,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not isinstance(raw, str):
             return
         try:
-            age_s = (dt_util.now() - datetime.fromisoformat(raw)).total_seconds()
+            age_s = seconds_since(datetime.fromisoformat(raw), now=dt_util.now())  # naive stamp: TypeError, ignored
         except TypeError, ValueError:
             return
         if 0 <= age_s < V4_FIT_RETRY_MIN_INTERVAL_S:
@@ -17669,6 +17671,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             lock = self._cycle_fit_lock = asyncio.Lock()
         return lock
 
+    def _cycle_refit_worker_lock(self) -> asyncio.Lock:
+        """The lock every zone's cycle-refit WORKER takes (one per Home Assistant instance, in ``hass.data``).
+
+        Issue #1722: at most one refit worker process runs at a time, whatever the number of zones (each worker is a
+        whole interpreter; every zone refits at startup). Taken inside the zone's ``_cycle_lock`` and held only for
+        the worker job, never for the store/apply steps, so a zone waiting here keeps no one else but itself out of its
+        own cycle lock (unload cancels the waiting refit)."""
+        return self.hass.data.setdefault(_CYCLE_FIT_LOCK_KEY, asyncio.Lock())
+
     def _cycle_refit_due_modes(self, now_ts: float) -> list[str]:
         """Modes whose waiting cycles are due a full refit (Issue #1512 finding 7: Pi CPU).
 
@@ -17703,8 +17714,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _cycle_spawn_refit(self, *, startup: bool = False) -> None:
         """Schedule the due refits / save (``_cycle_process`` with no new cycle). Never raises."""
-        if not self._cycles_enabled():
-            return
+        if not self._cycles_enabled() or getattr(self, "_ha_stopping", False) is True:
+            return  # Issue #1722: no refit worker is started once Home Assistant is stopping
         coro = self._cycle_process([], startup=startup)
         try:
             self._spawn(coro)
@@ -17740,6 +17751,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if startup:
                     due.update(m for m in ("heat", "cool") if self._cycle_store.has_cycles(m))
                 for mode in sorted(due):
+                    if getattr(self, "_ha_stopping", False) is True:
+                        break  # Issue #1722: a cycle that closed during the stop is stored; no refit worker starts
                     await self._cycle_refit(mode, now_ts)
                     pending.pop(mode, None)
                     self._cycle_last_refit[mode] = now_ts
@@ -17821,7 +17834,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._cycle_refit_task = asyncio.current_task()  # async_shutdown cancels it (kills the worker)
         try:
             with log_capture.zone_scope(self.zone_label):  # the cycle task starts outside one; tags the relayed logs
-                result = await self._process_job("cycle_refit", _payload, WORKER_TIMEOUT_CYCLE_REFIT_S)
+                async with self._cycle_refit_worker_lock():  # one refit worker at a time across zones (Issue #1722)
+                    result = await self._process_job("cycle_refit", _payload, WORKER_TIMEOUT_CYCLE_REFIT_S)
         finally:
             self._cycle_refit_task = None
         # Issue #1512 reopened: the store keeps cycles by their weight in this fit, not by their age (set_weights

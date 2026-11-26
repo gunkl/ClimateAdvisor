@@ -459,7 +459,7 @@ def nightly_horizon_days(train_days: int, nights: int) -> float:
 def nightly_snapshot_window(now: datetime, horizon_days: float) -> tuple[datetime, datetime]:
     """The forecast-archive window the replay reads. The one definition: :func:`run_nightly` asks its ``snapshots_fn``
     for it and :func:`nightly_job_payload` prefetches it (Issue #1722)."""
-    return now - timedelta(days=horizon_days + 1), now + timedelta(hours=1)
+    return v4_shadow.snapshot_window(now, horizon_days)
 
 
 def nightly_job_payload(

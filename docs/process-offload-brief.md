@@ -9,10 +9,10 @@ Issue #1722. Credit: Jeffrey Sica (@jeefy) reported the freeze, diagnosed the GI
 | Question | Short answer | → Full answer |
 |---|---|---|
 | Why does Climate Advisor start worker processes? | Pure-Python CPU work in an executor thread holds the GIL and stalls the Home Assistant event loop. The v4 fit took 21-24 s on x86 and froze a Raspberry Pi 4 for up to 90 s. A child process has its own GIL. | [Purpose](#purpose) |
-| Which jobs run in a worker? | Four, on the fixed allowlist `process_offload.JOBS` (`process_offload.py#L29`): `v4_fit`, `v4_display_fit`, `v4_night_replay`, `cycle_refit`. Nothing else can be named. | [Job allowlist](#job-allowlist) |
-| How does the coordinator run one? | `coordinator._process_job(job, payload_fn, timeout_s)` (`coordinator.py#L2787`): the payload is built in the executor, `process_offload.async_run_job` (`process_offload.py#L146`) runs the worker, the caller applies the result. | [Interfaces](#interfaces) |
-| What goes over the pipe? | stdin: `{"job", "payload"}`. stdout: `{"ok": true, "result"}` or `{"ok": false, "error"}`. JSON both ways; stderr carries log lines. | [Wire format](#wire-format) |
-| What does the worker know about Home Assistant? | Only a stub of `homeassistant.util.dt` (`now`, `utcnow`, `as_utc`), installed by `_install_ha_stub()` (`process_offload.py#L238`). A guard test fails if a job module imports any other `homeassistant` module. | [Bootstrap](#bootstrap) |
+| Which jobs run in a worker? | Four, on the fixed allowlist `process_offload.JOBS`: `v4_fit`, `v4_display_fit`, `v4_night_replay`, `cycle_refit`. Nothing else can be named. | [Job allowlist](#job-allowlist) |
+| How does the coordinator run one? | `coordinator._process_job(job, payload_fn, timeout_s)`: the payload is built in the executor, `process_offload.async_run_job` runs the worker, the caller applies the result. | [Interfaces](#interfaces) |
+| What goes over the pipe? | stdin: `{"job", "payload", "log_level"}`. stdout: `{"ok": true, "result"}` or `{"ok": false, "error"}`. JSON both ways; stderr carries log lines. | [Wire format](#wire-format) |
+| What does the worker know about Home Assistant? | Only a stub of `homeassistant.util.dt` (`now`, `utcnow`, `as_utc`), installed by `process_offload._install_ha_stub()`. A guard test fails if a job module imports any other `homeassistant` module. | [Bootstrap](#bootstrap) |
 | What happens when a worker fails, hangs or cannot start? | Failed, killed or timed out: `ProcessJobError`, the caller keeps the previous model or rates. Cannot start (`OSError`): the same job runs in a thread, one WARNING. Unload or HA stop kills the worker. | [Timeouts](#timeouts-and-cancel), [Fallback](#fallback) |
 | How do I add a job? | A JSON-in, JSON-out function in a hass-free module, a `*_job_payload` builder, an entry in `JOBS`, a `WORKER_TIMEOUT_*` constant, a coordinator call through `_process_job`, and the guard tests. | [Adding a job](#adding-a-job) |
 | What stops someone running a heavy fit in the executor again? | `tests/test_executor_offload.py::TestHeavyFitsRunInWorkerProcess` (AST: no coordinator method names `run_fit`, `run_display_fit`, `run_nightly` or `fit_cycles`) and `tests/test_process_offload_1722.py::test_import_closure_of_job_modules_is_hass_free`. | [Guards](#guards) |
@@ -44,12 +44,12 @@ The rule for new code is in [claude.md, Thread-Safety Requirements](../claude.md
 **Explicitly does NOT own:**
 - The fit math: `predictor_v4.py`, `cycle_model.fit_cycles`. The worker calls them; it does not change them.
 - What happens with a result: the coordinator stores the model, applies cycle weights (`store.set_weights`) and writes files. The worker never writes anything.
-- The locks that serialise jobs: the domain-wide v4 fit lock and the cycle lock stay in the coordinator.
+- The locks that serialise jobs: the domain-wide v4 fit lock, the domain-wide cycle-refit worker lock and the per-zone cycle lock stay in the coordinator.
 - Short work. Under about 0.5 s on x86 stays in `_executor_job`.
 
 ## Responsibilities
 
-- Run an allowlisted job in a short-lived `sys.executable -I` child and return its decoded JSON result.
+- Run an allowlisted job in a short-lived `sys.executable -I -B` child, with an environment stripped of secrets, and return its decoded JSON result.
 - Refuse any job name that is not on the allowlist, in both modes, before anything starts.
 - Kill and reap the child on timeout and on cancel (unload, HA stop), even when cancelled twice.
 - Relay the child's log records to the caller's logger at their own level.
@@ -72,15 +72,15 @@ async def _process_job(self, job: str, payload_fn: Callable[[], dict], timeout_s
 
 | Symbol | Caller(s) | Purpose |
 |---|---|---|
-| `coordinator._process_job()` (`coordinator.py#L2787`) | `_v4_run_fit`, `_v4_run_display_fit`, `_v4_run_night_replay`, `_cycle_refit` | Builds the payload in the executor, runs the worker, returns the result. Call it inside `log_capture.zone_scope` so relayed log lines carry the zone. |
+| `coordinator._process_job()` | `_v4_run_fit`, `_v4_run_display_fit`, `_v4_run_night_replay`, `_cycle_refit` | Builds the payload in the executor, runs the worker, returns the result. Call it inside `log_capture.zone_scope` so relayed log lines carry the zone. |
 | `process_offload.async_run_job()` | `_process_job` | Spawn, pipe, wait with a timeout, relay logs, decode. |
 | `process_offload.run_job()` | the child, `_thread_run` | Resolve the job from `JOBS` and call it. Looks the function up by attribute at call time, so monkeypatches work in thread mode. |
-| `coordinator._v4_cancel_fit()` (`coordinator.py#L7809`) | unload, HA stop | Cancels the fit task and the night-replay task (its handle is kept); cancelling kills the worker. |
-| `coordinator._cycle_cancel_refit()` (`coordinator.py#L17794`) | unload, HA stop | Cancels a running cycle refit, so the stop-time save is not blocked on the cycle lock. |
+| `coordinator._v4_cancel_fit()` | unload, HA stop | Cancels the fit task and the night-replay task (its handle is kept); cancelling kills the worker. |
+| `coordinator._cycle_cancel_refit()` | unload, HA stop | Cancels a running cycle refit, so the stop-time save is not blocked on the cycle lock. |
 
 ## Job allowlist
 
-`JOBS` (`process_offload.py#L29`) maps a name to `module:function` in this package. The module is resolved lazily with `importlib` as `custom_components.climate_advisor.<module>`.
+`JOBS` maps a name to `module:function` in this package. The module is resolved lazily with `importlib` as `custom_components.climate_advisor.<module>`.
 
 | Job | Function | Payload builder (runs in the executor) | Timeout constant | Coordinator call site |
 |---|---|---|---|---|
@@ -97,7 +97,7 @@ async def _process_job(self, job: str, payload_fn: Callable[[], dict], timeout_s
 
 One request, one response, per process.
 
-- **stdin:** `{"job": "<name>", "payload": {...}}`, UTF-8 JSON, written once and closed.
+- **stdin:** `{"job": "<name>", "payload": {...}, "log_level": <int>}`, UTF-8 JSON, written once and closed. `log_level` is the caller logger's effective level; the child logs at it (a missing or non-integer value means INFO).
 - **stdout:** `{"ok": true, "result": <json>}` or `{"ok": false, "error": "<Type>: <message>"}` (error capped at 500 characters). Exit code 0 in both cases.
 - **stderr:** one JSON object per line, `{"level": <int>, "name": <logger>, "msg": <text>}`; tracebacks are folded into `msg`.
 - **Payloads are data only.** The callables the in-process fits took are rebuilt in the child from data:
@@ -112,16 +112,19 @@ One request, one response, per process.
 
 ### Bootstrap
 
-The child is started as `sys.executable -I -c <_BOOTSTRAP> <package dir> <its parent>` (no shell). `-I` keeps `/config`, the working directory and `PYTHON*` variables off the import path.
+The child is started as `sys.executable -I -B -c <_BOOTSTRAP> <package dir> <its parent>` (no shell). `-I` keeps `/config`, the working directory and `PYTHON*` variables off the import path. `-B` is needed as well: `-I` also ignores `PYTHONDONTWRITEBYTECODE`, so without it the child would write `__pycache__` files into the integration folder.
 
-`_BOOTSTRAP` (`process_offload.py#L51`) builds two namespace modules, `custom_components` and `custom_components.climate_advisor`, with their `__path__` set, so the package `__init__` (which needs Home Assistant) never runs. It then imports `_child_main` and exits with its return code.
+**Environment.** The child gets a copy of Home Assistant's environment from `process_offload._child_env()`, without anything secret-shaped: `SUPERVISOR_TOKEN`, `HASSIO_TOKEN` and every name ending in `_TOKEN`, `_KEY`, `_SECRET` or `_PASSWORD` (case-insensitive). Everything else (`PATH`, `LANG`, `TZ`, `PYTHONTZPATH`, ...) is kept, because the job needs the time-zone data.
 
-`_child_main()` (`process_offload.py#L261`):
+`_BOOTSTRAP` (in `process_offload.py`) builds two namespace modules, `custom_components` and `custom_components.climate_advisor`, with their `__path__` set, so the package `__init__` (which needs Home Assistant) never runs. It then imports `_child_main` and exits with its return code.
 
-1. Installs the `homeassistant.util.dt` stub (`_install_ha_stub`, `process_offload.py#L238`): `now`, `utcnow` and `as_utc`, which `time_utils` imports. Nothing else of Home Assistant exists in the child.
+`_child_main()`:
+
+1. Installs the `homeassistant.util.dt` stub (`_install_ha_stub`): `now`, `utcnow` and `as_utc`, which `time_utils` imports. Nothing else of Home Assistant exists in the child.
 2. Calls `os.nice(10)`; failure (no `nice` on the platform) is ignored.
-3. Adds the stderr JSON log handler (INFO and above) and points `sys.stdout` at stderr, so a stray `print` cannot corrupt the reply.
-4. Reads stdin, runs `run_job`, writes the envelope on the real stdout.
+3. Reads stdin, then points fd 1 and `sys.stdout` at stderr (the real stdout is kept for the envelope), so a stray `print` or a write straight to fd 1 cannot corrupt the reply.
+4. Adds the stderr JSON log handler at INFO, then sets handler and root logger to the request's `log_level` (INFO when it is missing), so DEBUG lines are relayed exactly when the parent would show them.
+5. Runs `run_job` and writes the envelope on the real stdout.
 
 ### Timeouts and cancel
 
@@ -139,16 +142,17 @@ If the process cannot be spawned (`OSError`), `async_run_job` logs one WARNING (
 
 ### Thread mode (unit tier)
 
-`process_offload.default_mode` is `"process"` in production. `tests/conftest.py` sets it to `"thread"` so unit tests run the same job in an executor thread. Thread mode sends the payload and the result through a JSON round trip (`_thread_run`), so tests see the same data types as the real worker. Production code never checks for test doubles. Real workers are exercised explicitly in `tests/test_process_offload_1722.py`, using test-only jobs registered with `_register_job_for_tests` (production never sends that registry).
+`process_offload.default_mode` is `"process"` in production. `tests/conftest.py` sets it to `"thread"` so unit tests run the same job in an executor thread. Thread mode sends the payload and the result through a JSON round trip (`_thread_run`), so tests see the same data types as the real worker. Production code never checks for test doubles. The real-HA tier (`tests_ha/conftest.py`) is in thread mode too: a simulated clock cannot see a subprocess pipe, and the worker timeout would run on the simulated clock. `tests_ha/test_process_offload_realha_1722.py` switches to process mode for its own tests and holds the clock still. Real workers are exercised explicitly in `tests/test_process_offload_1722.py`, using test-only jobs registered with `_register_job_for_tests` (production never sends that registry).
 
 ## Invariants
 
 1. Only names in `JOBS` can run. An unknown name raises `ValueError` before any process starts, in both modes.
-2. The child gets no Home Assistant objects, no callables and no file paths to write: JSON data in, JSON data out. It writes no files and makes no network or HA calls.
+2. The child gets no Home Assistant objects, no callables and no file paths to write: JSON data in, JSON data out. It writes no files (not even bytecode) and makes no network or HA calls.
 3. The only `homeassistant` module the child can import is the `homeassistant.util.dt` stub (guarded).
 4. Every result is applied by the coordinator, after the job returns and after the `_shut_down` check.
 5. A failed, killed or timed-out worker never replaces a model or rates: the caller's existing failure handling keeps the previous ones.
-6. At most one worker per job kind runs at a time: the v4 jobs hold the domain-wide v4 fit lock; the cycle refit holds the cycle lock.
+6. At most one worker per job kind runs at a time, across all zones: the v4 jobs hold the domain-wide v4 fit lock; the cycle refit holds the domain-wide cycle-refit worker lock (`coordinator._cycle_refit_worker_lock`, key `_CYCLE_FIT_LOCK_KEY` in `hass.data`), taken inside the zone's cycle lock and held only while the worker runs.
+6a. No worker starts once Home Assistant is stopping (`_ha_stopping`): `_v4_start_fit`, `_v4_start_night_replay`, `_cycle_spawn_refit` and the refit step of `_cycle_process` check it.
 7. A worker never outlives its task: cancel and timeout kill and reap it.
 8. Payload building (row windowing, forecast-archive reads, JSON encoding) and result decoding run in the executor, never on the event loop.
 
@@ -171,6 +175,9 @@ If the process cannot be spawned (`OSError`), `async_run_job` logs one WARNING (
 | `tests/test_process_offload_1722.py::test_import_closure_of_job_modules_is_hass_free` | A job module whose import closure reaches any `homeassistant` module other than `homeassistant.util.dt`. |
 | `tests/test_process_offload_1722.py::test_child_homeassistant_stub_is_minimal` | A stub that grows beyond `now`, `utcnow`, `as_utc`. |
 | `tests/test_process_offload_1722.py` (timeout, cancel, double cancel, spawn failure, isolation tests) | A worker that is not killed and reaped, a spawn failure that does not fall back once, or a child that sees the working directory or `PYTHONPATH`. |
+| `tests/test_process_offload_1722.py` (bytecode, environment tests) | A child that writes `__pycache__` into the folder it imports from (no `-B`), or that sees a planted `*_TOKEN` / `SUPERVISOR_TOKEN`, or loses `TZ`. |
+| `tests/test_worker_gates_1722.py` | A worker started after the HA stop began (each start path), or two zones' cycle refit workers running at once. |
+| `tests_ha/test_process_offload_realha_1722.py` | On real Home Assistant: a refit that does not run in a child, or an unload, reload or HA stop that leaves the worker running or hangs on it. |
 | `tests/test_v4_shadow_structural.py` | The runner naming a v4 job outside its `JOBS` allowlist. |
 | `tests/test_process_offload_wiring_1722.py` | A call site that stops using `_process_job` with its payload built in the executor, a failed worker that does not keep the previous model, record or rates, or an unload that does not cancel a running replay or refit. |
 

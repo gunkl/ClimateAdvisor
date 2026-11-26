@@ -45,6 +45,9 @@ _WHERE_CAP: Final = 300  # the "(at file:line in func)" suffix of a job error
 _LOG_LINE_CAP: Final = 8000
 _LOG_HEAD_KEEP: Final = 500
 _CHILD_NICE: Final = 10
+#: Environment names the child never sees (compared upper-cased): the Supervisor/Hassio tokens, any secret-shaped name.
+_SECRET_NAMES: Final = frozenset({"SUPERVISOR_TOKEN", "HASSIO_TOKEN"})
+_SECRET_SUFFIXES: Final = ("_TOKEN", "_KEY", "_SECRET", "_PASSWORD")
 
 # Test-only registry. Production never populates these (see _register_job_for_tests).
 _TEST_JOBS: dict[str, tuple[str, str]] = {}
@@ -66,6 +69,22 @@ raise SystemExit(_child_main())
 
 class ProcessJobError(RuntimeError):
     """A worker job failed, timed out, or its process died."""
+
+
+def _child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment the worker child inherits: ``environ`` (default ``os.environ``) minus anything secret-shaped.
+
+    Home Assistant OS runs the core with ``SUPERVISOR_TOKEN`` in its environment; a job has no use for it, so the
+    child never receives it. Dropped (case-insensitive): ``SUPERVISOR_TOKEN``, ``HASSIO_TOKEN`` and every name ending in
+    ``_TOKEN``, ``_KEY``, ``_SECRET`` or ``_PASSWORD``. Everything else (``PATH``, ``LANG``, ``TZ``, ``PYTHONTZPATH``,
+    ...) is kept: the job needs the time zone data and the interpreter's own settings.
+    """
+    source = os.environ if environ is None else environ
+    return {
+        k: v
+        for k, v in source.items()
+        if (name := k.upper()) not in _SECRET_NAMES and not name.endswith(_SECRET_SUFFIXES)
+    }
 
 
 def _register_job_for_tests(name: str, module: str, function: str, path: str | None = None) -> None:
@@ -196,7 +215,9 @@ async def async_run_job(
 
     started = time.monotonic()
     raw = await executor_job(_encode, job, payload, logger.getEffectiveLevel())
-    args = [sys.executable, "-I", "-c", _BOOTSTRAP, str(_PKG_DIR), str(_PKG_DIR.parent)]
+    # -I: isolated (no /config, cwd or PYTHON* on the import path); -B: it also ignores PYTHONDONTWRITEBYTECODE, so
+    # without -B the child would write __pycache__ files into the integration folder.
+    args = [sys.executable, "-I", "-B", "-c", _BOOTSTRAP, str(_PKG_DIR), str(_PKG_DIR.parent)]
     if _TEST_JOBS or _TEST_PATHS:
         args.append(json.dumps({"jobs": _TEST_JOBS, "paths": _TEST_PATHS}))
     try:
@@ -205,6 +226,7 @@ async def async_run_job(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_child_env(),
         )
     except OSError:
         logger.warning("Worker process unavailable; running in a thread: job=%s", job)

@@ -38,6 +38,7 @@ def _jobs():
         "debug_line",
         "long_message",
         "fd_garbage",
+        "env_report",
     ):
         po._register_job_for_tests(f"t_{name}", _MOD, name, _TESTS_DIR)
     yield
@@ -485,3 +486,51 @@ def test_corrupt_envelope_is_process_job_error(monkeypatch: pytest.MonkeyPatch, 
     _spawn_printing(monkeypatch, code)
     with pytest.raises(po.ProcessJobError, match="unreadable result"):
         _run("t_echo", {"xs": [1]}, "process")
+
+
+def test_child_writes_no_bytecode_into_the_folder_it_imports_from(tmp_path: Path) -> None:
+    """``-I`` ignores ``PYTHONDONTWRITEBYTECODE``; only ``-B`` keeps the child from writing ``__pycache__`` (in
+    production: into the integration folder)."""
+    import shutil
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    shutil.copy(Path(_TESTS_DIR) / f"{_MOD}.py", fresh / "fresh_jobs_1722.py")
+    po._register_job_for_tests("t_fresh_echo", "fresh_jobs_1722", "echo", str(fresh))
+    assert _run("t_fresh_echo", {"xs": [1, 2]}, "process")["sum"] == 3  # the child really imported the fresh copy
+    assert not (fresh / "__pycache__").exists(), sorted(p.name for p in fresh.rglob("*"))
+
+
+def test_child_env_drops_secrets_and_keeps_the_rest() -> None:
+    env = {
+        "SUPERVISOR_TOKEN": "a",
+        "hassio_token": "b",
+        "FOO_TOKEN": "c",
+        "x_key": "d",
+        "MY_SECRET": "e",
+        "DB_PASSWORD": "f",
+        "PATH": "/bin",
+        "LANG": "C.UTF-8",
+        "TZ": "UTC",
+        "PYTHONTZPATH": "/tz",
+        "TOKENIZER": "kept",  # not a suffix match
+        "KEYBOARD": "kept",
+    }
+    assert po._child_env(env) == {
+        "PATH": "/bin",
+        "LANG": "C.UTF-8",
+        "TZ": "UTC",
+        "PYTHONTZPATH": "/tz",
+        "TOKENIZER": "kept",
+        "KEYBOARD": "kept",
+    }
+
+
+def test_real_child_does_not_see_a_planted_token_but_keeps_the_time_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOO_TOKEN", "planted-secret")
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "planted-supervisor")
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    seen = _run("t_env_report", {"names": ["FOO_TOKEN", "SUPERVISOR_TOKEN", "TZ", "PATH"]}, "process")
+    assert seen["FOO_TOKEN"] is None and seen["SUPERVISOR_TOKEN"] is None
+    assert seen["TZ"] == "Europe/Berlin"
+    assert seen["PATH"]

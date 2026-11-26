@@ -79,6 +79,20 @@ jobs:
           --seeds ${{ needs.seeds.outputs.list }}
           --waiver-ledger tools/sim_harness/nightly_waivers.json
           --issue-state github
+          --perf-report perf_report.json
+
+      # Issue #1728: report only. The step above also records thread CPU per executor job and loop callback (GC
+      # excluded) and prints the table at the end of its log; this uploads the JSON. It never fails the job, and
+      # the probe never changes the run's results or exit status. No budget is enforced yet.
+      - name: Upload performance report (report only)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: perf-report
+          path: perf_report.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Upload failing scenarios
         if: failure()

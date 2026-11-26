@@ -47,7 +47,7 @@ _LOG_HEAD_KEEP: Final = 500
 _CHILD_NICE: Final = 10
 #: Environment names the child never sees (compared upper-cased): the Supervisor/Hassio tokens, any secret-shaped name.
 _SECRET_NAMES: Final = frozenset({"SUPERVISOR_TOKEN", "HASSIO_TOKEN"})
-_SECRET_SUFFIXES: Final = ("_TOKEN", "_KEY", "_SECRET", "_PASSWORD")
+_SECRET_SUFFIXES: Final = ("_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PASSWD", "_PASS")
 
 # Test-only registry. Production never populates these (see _register_job_for_tests).
 _TEST_JOBS: dict[str, tuple[str, str]] = {}
@@ -76,8 +76,8 @@ def _child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
 
     Home Assistant OS runs the core with ``SUPERVISOR_TOKEN`` in its environment; a job has no use for it, so the
     child never receives it. Dropped (case-insensitive): ``SUPERVISOR_TOKEN``, ``HASSIO_TOKEN`` and every name ending in
-    ``_TOKEN``, ``_KEY``, ``_SECRET`` or ``_PASSWORD``. Everything else (``PATH``, ``LANG``, ``TZ``, ``PYTHONTZPATH``,
-    ...) is kept: the job needs the time zone data and the interpreter's own settings.
+    ``_TOKEN``, ``_KEY``, ``_SECRET``, ``_PASSWORD``, ``_PASSWD`` or ``_PASS``. Everything else (``PATH``, ``LANG``,
+    ``TZ``, ``PYTHONTZPATH``, ...) is kept: the job needs the time zone data and the interpreter's own settings.
     """
     source = os.environ if environ is None else environ
     return {
@@ -215,8 +215,8 @@ async def async_run_job(
 
     started = time.monotonic()
     raw = await executor_job(_encode, job, payload, logger.getEffectiveLevel())
-    # -I: isolated (no /config, cwd or PYTHON* on the import path); -B: it also ignores PYTHONDONTWRITEBYTECODE, so
-    # without -B the child would write __pycache__ files into the integration folder.
+    # -I: isolated (no /config, cwd or PYTHON* on the import path). -I also ignores PYTHONDONTWRITEBYTECODE, so -B
+    # is needed or the child would write __pycache__ files into the integration folder.
     args = [sys.executable, "-I", "-B", "-c", _BOOTSTRAP, str(_PKG_DIR), str(_PKG_DIR.parent)]
     if _TEST_JOBS or _TEST_PATHS:
         args.append(json.dumps({"jobs": _TEST_JOBS, "paths": _TEST_PATHS}))

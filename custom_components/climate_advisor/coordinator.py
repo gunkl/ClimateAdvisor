@@ -17714,7 +17714,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def _cycle_spawn_refit(self, *, startup: bool = False) -> None:
         """Schedule the due refits / save (``_cycle_process`` with no new cycle). Never raises."""
-        if not self._cycles_enabled() or getattr(self, "_ha_stopping", False) is True:
+        if (
+            not self._cycles_enabled()
+            or getattr(self, "_ha_stopping", False) is True
+            or getattr(self, "_shut_down", False) is True
+        ):
             return  # Issue #1722: no refit worker is started once Home Assistant is stopping
         coro = self._cycle_process([], startup=startup)
         try:
@@ -17751,8 +17755,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if startup:
                     due.update(m for m in ("heat", "cool") if self._cycle_store.has_cycles(m))
                 for mode in sorted(due):
-                    if getattr(self, "_ha_stopping", False) is True:
-                        break  # Issue #1722: a cycle that closed during the stop is stored; no refit worker starts
+                    if getattr(self, "_ha_stopping", False) is True or getattr(self, "_shut_down", False) is True:
+                        break  # Issue #1722: a cycle that closed during the stop/unload is stored; no worker starts
                     await self._cycle_refit(mode, now_ts)
                     pending.pop(mode, None)
                     self._cycle_last_refit[mode] = now_ts
@@ -17840,6 +17844,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._cycle_refit_task = None
         # Issue #1512 reopened: the store keeps cycles by their weight in this fit, not by their age (set_weights
         # takes the store's lock, which a save holds during its write: executor)
+        if getattr(self, "_shut_down", False) is True:
+            return  # Issue #1722: unloaded while the worker ran: drop the result, as the v4 fits do
         await self._executor_job(store.set_weights, result.get("w_by_id") or {})
         applied = self.learning.apply_cycle_fit(mode, result, self._cycle_primary_is_v3())
         _LOGGER.info(

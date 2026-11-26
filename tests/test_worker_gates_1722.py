@@ -68,26 +68,31 @@ def test_night_replay_does_not_start_once_ha_is_stopping(fake: FakePredictor, mo
     assert spy.jobs == ["v4_night_replay"]  # only the control started one
 
 
-def test_cycle_refit_does_not_start_once_ha_is_stopping(tmp_path) -> None:
+@pytest.mark.parametrize("flag", ["_ha_stopping", "_shut_down"])
+def test_cycle_refit_does_not_start_once_ha_is_stopping(tmp_path, flag: str) -> None:
+    """Neither an HA stop nor an unload (``_shut_down``) lets a new cycle refit worker start."""
     rig = _Rig(tmp_path)
     try:
-        rig.c._ha_stopping = True
+        setattr(rig.c, flag, True)
         rig.c._cycle_spawn_refit(startup=True)
         assert rig.tasks == []  # nothing scheduled
-        rig.c._ha_stopping = False  # control
+        setattr(rig.c, flag, False)  # control
         rig.c._cycle_spawn_refit(startup=True)
         assert len(rig.tasks) == 1
     finally:
         rig.close()
 
 
-def test_a_cycle_closed_during_the_stop_is_stored_but_not_refitted(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """The other refit start path: ``_cycle_collect`` -> ``_cycle_process`` of a just-closed cycle."""
+@pytest.mark.parametrize("flag", ["_ha_stopping", "_shut_down"])
+def test_a_cycle_closed_during_the_stop_is_stored_but_not_refitted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, flag: str
+) -> None:
+    """The other refit start path: ``_cycle_collect`` -> ``_cycle_process`` of a just-closed cycle (stop or unload)."""
     rig = _Rig(tmp_path)
     try:
         spy = Spy(cycle_refit=RuntimeError("must not start"))
         monkeypatch.setattr(process_offload, "async_run_job", spy)
-        rig.c._ha_stopping = True
+        setattr(rig.c, flag, True)
         _heat_cycle(rig)  # the cycle closes and is processed
         assert len(rig.c._cycle_store.cycles("heat")) == 1
         assert spy.calls == [], "a refit worker was started while Home Assistant was stopping"
@@ -134,3 +139,26 @@ def test_two_zones_cycle_refit_workers_run_one_after_the_other(monkeypatch: pyte
         assert state["max"] == 1, "two cycle refit workers ran at once"
     finally:
         rig2.close()
+
+
+def test_a_cycle_refit_result_that_returns_after_unload_is_dropped(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Issue #1722: unloaded while the refit worker ran: neither the weights nor the rates are applied."""
+    import time  # noqa: PLC0415
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    rig = _Rig(tmp_path)
+    try:
+        _heat_cycle(rig)
+
+        async def _job(job: str, payload: dict, **_kw: Any) -> dict:
+            rig.c._shut_down = True  # the zone unloads while the worker runs
+            return {"q": 1.0, "ne": 1, "w_by_id": {"x": 1.0}}
+
+        monkeypatch.setattr(process_offload, "async_run_job", _job)
+        rig.c.learning.apply_cycle_fit = MagicMock()
+        rig.c._cycle_store.set_weights = MagicMock()
+        run_coro(rig.c._cycle_refit("heat", time.time()))
+        rig.c.learning.apply_cycle_fit.assert_not_called()
+        rig.c._cycle_store.set_weights.assert_not_called()
+    finally:
+        rig.close()

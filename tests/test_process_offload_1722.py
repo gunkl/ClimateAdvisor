@@ -509,6 +509,8 @@ def test_child_env_drops_secrets_and_keeps_the_rest() -> None:
         "x_key": "d",
         "MY_SECRET": "e",
         "DB_PASSWORD": "f",
+        "MQTT_PASS": "g",
+        "api_passwd": "h",
         "PATH": "/bin",
         "LANG": "C.UTF-8",
         "TZ": "UTC",

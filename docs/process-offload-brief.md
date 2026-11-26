@@ -114,7 +114,7 @@ One request, one response, per process.
 
 The child is started as `sys.executable -I -B -c <_BOOTSTRAP> <package dir> <its parent>` (no shell). `-I` keeps `/config`, the working directory and `PYTHON*` variables off the import path. `-B` is needed as well: `-I` also ignores `PYTHONDONTWRITEBYTECODE`, so without it the child would write `__pycache__` files into the integration folder.
 
-**Environment.** The child gets a copy of Home Assistant's environment from `process_offload._child_env()`, without anything secret-shaped: `SUPERVISOR_TOKEN`, `HASSIO_TOKEN` and every name ending in `_TOKEN`, `_KEY`, `_SECRET` or `_PASSWORD` (case-insensitive). Everything else (`PATH`, `LANG`, `TZ`, `PYTHONTZPATH`, ...) is kept, because the job needs the time-zone data.
+**Environment.** The child gets a copy of Home Assistant's environment from `process_offload._child_env()`, without anything secret-shaped: `SUPERVISOR_TOKEN`, `HASSIO_TOKEN` and every name ending in `_TOKEN`, `_KEY`, `_SECRET`, `_PASSWORD`, `_PASSWD` or `_PASS` (case-insensitive). Everything else (`PATH`, `LANG`, `TZ`, `PYTHONTZPATH`, ...) is kept, because the job needs the time-zone data.
 
 `_BOOTSTRAP` (in `process_offload.py`) builds two namespace modules, `custom_components` and `custom_components.climate_advisor`, with their `__path__` set, so the package `__init__` (which needs Home Assistant) never runs. It then imports `_child_main` and exits with its return code.
 
@@ -128,7 +128,7 @@ The child is started as `sys.executable -I -B -c <_BOOTSTRAP> <package dir> <its
 
 ### Timeouts and cancel
 
-The timeouts are in `const.py` (`WORKER_TIMEOUT_V4_FIT_S` 900, `WORKER_TIMEOUT_V4_DISPLAY_FIT_S` 600, `WORKER_TIMEOUT_V4_NIGHT_REPLAY_S` 1800, `WORKER_TIMEOUT_CYCLE_REFIT_S` 600). They are set well above the measured Pi times (a fit about 120 s, a replay about 3 min) so only a hung worker reaches them. A hung worker would otherwise hold the domain-wide v4 fit lock forever.
+The timeouts are in `const.py` (`WORKER_TIMEOUT_V4_FIT_S` 900, `WORKER_TIMEOUT_V4_DISPLAY_FIT_S` 600, `WORKER_TIMEOUT_V4_NIGHT_REPLAY_S` 1800, `WORKER_TIMEOUT_CYCLE_REFIT_S` 600). They are set well above the estimated Pi times (about 5x the x86 measurements: a fit about 120 s, a replay about 3 min; the reported Pi fit took 99 s) so only a hung worker reaches them. A hung worker would otherwise hold the domain-wide v4 fit lock forever.
 
 On timeout, `_kill_and_reap` kills the child and waits for it, and `ProcessJobError("... timed out after N s")` is raised. On cancel (unload, HA stop) the child is killed and reaped and the cancel propagates; a second cancel during the reap is held until the child is gone, so no zombie is left. The timeout applies in process mode only.
 

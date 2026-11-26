@@ -19,7 +19,12 @@ install_ha_stubs()
 # Now safe to import Climate Advisor modules
 import pytest  # noqa: E402
 
+from custom_components.climate_advisor import process_offload  # noqa: E402
 from custom_components.climate_advisor.classifier import ForecastSnapshot  # noqa: E402
+
+# The unit tier runs worker jobs in a thread for speed and determinism; test_process_offload_1722.py
+# exercises real processes explicitly via mode="process".
+process_offload.default_mode = "thread"
 
 
 @pytest.fixture(autouse=True)

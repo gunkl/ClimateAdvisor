@@ -96,6 +96,7 @@ NODE_START: dict[str, float] = {"b_h": 0.4, "b_o": 0.02, "b_w": 0.10, "s_b": 0.1
 
 # confidence gates (documented in docs/predictor-v4-spec.md)
 GATE_MIN_DAYS_NONE = 3.0  # < 3 days of samples -> "none"
+REASON_UNDER_MIN_DAYS = "under 3 days of samples"  # the one reason string for that gate (early return and full path)
 GATE_MIN_DAYS_OK = 10.0  # < 10 days of samples -> "low"
 GATE_MIN_ANCHORS = 12
 GATE_MIN_SKILL = 0.10  # must beat "no change" at 4 h on the training data by >= 10 %
@@ -1637,6 +1638,75 @@ def _default_model(
     )
 
 
+def _no_data_params(prob: _Problem, n_extra: int, heat_seen: bool, cool_seen: bool) -> set[tuple[Any, ...]]:
+    """The parameters the window holds no data for (they stay at their start value; ``fit["frozen"]`` before pins)."""
+    frozen: set[tuple[Any, ...]] = set()
+    if prob.win_steps < GATE_MIN_MODE_STEPS:
+        frozen.add(("h", "a_w"))
+        for j in range(n_extra):
+            frozen.add(("n", j, "b_w"))
+    if prob.fan_steps < GATE_MIN_MODE_STEPS:
+        frozen.add(("h", "a_f"))
+    # heat and cool gains are tied by the production ratio when only one mode is observed
+    if not heat_seen:
+        frozen.add(("h", "q_h"))
+    if not cool_seen:
+        frozen.add(("h", "q_c"))
+    if not heat_seen and not cool_seen:
+        for j in range(n_extra):
+            frozen.add(("n", j, "q_b"))
+    return frozen
+
+
+def _under_min_days_model(
+    base: V4Model, prob: _Problem, tstats: _ThermostatStats, sample_days: float
+) -> V4Model | None:
+    """The "none" model for a window under ``GATE_MIN_DAYS_NONE`` days, without running the search (Issue #1722).
+
+    ``None`` when the window is long enough (the search runs).
+
+    Same Debug fields the full path fills for a "none" fit (``n_anchors``, ``heat_seen`` / ``cool_seen``, ``modes``,
+    ``reason``) and the same thermostat default substitution for a mode without enough accepted starts; the closed-loop
+    calibration is the only thermostat step skipped."""
+    if sample_days >= GATE_MIN_DAYS_NONE:
+        return None
+    heat_seen = prob.heat_steps >= GATE_MIN_MODE_STEPS
+    cool_seen = prob.cool_steps >= GATE_MIN_MODE_STEPS
+    thermostat = base.thermostat
+    heat_known = heat_seen and tstats.heat_accepted >= GATE_MIN_ACCEPTED_STARTS
+    cool_known = cool_seen and tstats.cool_accepted >= GATE_MIN_ACCEPTED_STARTS
+    if not heat_known:
+        thermostat = dataclasses.replace(
+            thermostat, on_below_f=THERMOSTAT_DEFAULT_ON_F, off_above_f=THERMOSTAT_DEFAULT_OFF_F
+        )
+    if not cool_known:
+        thermostat = dataclasses.replace(
+            thermostat, on_above_f=THERMOSTAT_DEFAULT_ON_F, off_below_f=THERMOSTAT_DEFAULT_OFF_F
+        )
+    info = dict(base.fit)
+    info.update(
+        n_anchors=len(prob.anchors),
+        heat_seen=heat_seen,
+        cool_seen=cool_seen,
+        reason=REASON_UNDER_MIN_DAYS,
+        thermostat_defaults_used=(heat_seen and not heat_known) or (cool_seen and not cool_known),
+        # no pins: the house stays at its defaults, so what has no data behind it is exactly the unobserved terms
+        frozen=sorted(
+            "/".join(str(p) for p in f) for f in _no_data_params(prob, len(base.sensors) - 1, heat_seen, cool_seen)
+        ),
+        modes=_mode_grades(
+            prob,
+            (),
+            confidence="none",
+            sample_days=0.0,
+            seen={"heat": heat_seen, "cool": cool_seen},
+            accepted={},
+            step=16,
+        ),
+    )
+    return dataclasses.replace(base, thermostat=thermostat, fit=info)
+
+
 def fit(
     samples: Sequence[V4Sample],
     *,
@@ -1712,6 +1782,11 @@ def fit(
             base.fit["n_anchors"] = len(prob.anchors)
             base.fit["reason"] = "too few anchors"
             return _keep_carry_source(base, source)
+        # Issue #1722: the "under 3 days" gate reads ``sample_days`` alone, so the search below (LM, thermostat
+        # calibration, MAE pass; over 98 % of the cost) could only end in "none". Return that model now.
+        early = _under_min_days_model(base, prob, tstats, sample_days)
+        if early is not None:
+            return _keep_carry_source(early, source)
         model = _fit_problem(
             prob,
             base,
@@ -1799,21 +1874,7 @@ def _fit_problem(
         if last is not None:
             rec["counted_through"] = last
     # parameters with no data behind them stay at their start value
-    frozen: set[tuple[Any, ...]] = set()
-    if prob.win_steps < GATE_MIN_MODE_STEPS:
-        frozen.add(("h", "a_w"))
-        for j in range(len(extra)):
-            frozen.add(("n", j, "b_w"))
-    if prob.fan_steps < GATE_MIN_MODE_STEPS:
-        frozen.add(("h", "a_f"))
-    # heat and cool gains are tied by the production ratio when only one mode is observed
-    if not heat_seen:
-        frozen.add(("h", "q_h"))
-    if not cool_seen:
-        frozen.add(("h", "q_c"))
-    if not heat_seen and not cool_seen:
-        for j in range(len(extra)):
-            frozen.add(("n", j, "q_b"))
+    frozen = _no_data_params(prob, len(extra), heat_seen, cool_seen)
     # A frozen parameter the previous model had learned is pinned at that value (Issue #1525): an unseen mode's gain
     # (not re-derived by the ratio), and the window / fan / node rates. Pinned values hold through the restart too.
     pinned: dict[tuple[Any, ...], float] = {
@@ -2074,7 +2135,7 @@ def _fit_problem(
     info["thermostat_defaults_used"] = any(seen[m] and not known[m] for m in _MODE_GAIN)
     info["carried"] = {m: {k: v for k, v in rec.items() if k != "pin"} for m, rec in carried.items()}
     if sample_days < GATE_MIN_DAYS_NONE:
-        confidence, info["reason"] = "none", "under 3 days of samples"
+        confidence, info["reason"] = "none", REASON_UNDER_MIN_DAYS
     elif not values_ok or not math.isfinite(cost):
         confidence, info["reason"] = "none", "fit diverged"
     elif not skill_ok:

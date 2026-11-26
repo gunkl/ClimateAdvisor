@@ -58,8 +58,13 @@ Classes (``REGISTRY[id]["cls"]``):
 * ``worker_fallback``: ``process_offload._thread_run``, the whole worker job run in an executor thread. It can exceed
   the budget BY DESIGN, and only when a worker process cannot start (``OSError`` from the spawn, a degraded host); the
   production path is the process. The set of ids with this class is pinned (``_ALLOWED_FALLBACK``).
-* ``short_cpu`` may carry ``near_budget=True`` when ``ms`` is above ``_NEAR_BUDGET_FRACTION`` of the budget: tracked
-  for moving into a worker (the test lists the set and forces the marker both ways).
+* ``short_cpu`` (by ``ms``) and ``io`` (by ``cpu_ms``) carry ``near_budget=True`` when the cost is above
+  ``_NEAR_BUDGET_FRACTION`` of the budget: tracked for moving into a worker (the test lists the set and forces the
+  marker both ways).
+
+Costs are thread CPU with GC off. A GC pass can land inside any job; it is a process-wide cost, not charged to the job
+it interrupts, and the perf probe (``tools/sim_harness/perf_probe.py``) reports it separately. Where a GC-on run of a
+job was seen far above its GC-off cost, the entry's text says so.
 
 To add a callable: classify it. If it can run longer than 0.5 s on x86 it must be a worker job (claude.md Thread-Safety,
 third hazard; docs/process-offload-brief.md), not a ``short_cpu`` entry.
@@ -231,10 +236,12 @@ def scan_package() -> dict[str, Found]:
 # --------------------------------------------------------------------------------------------------------------------
 
 
-def io(reason: str, *, cpu_ms: float | None = None, at: str | None = None) -> dict[str, Any]:
+def io(reason: str, *, cpu_ms: float | None = None, at: str | None = None, near_budget: bool = False) -> dict[str, Any]:
     entry: dict[str, Any] = {"cls": "io", "reason": reason}
     if cpu_ms is not None:
         entry |= {"cpu_ms": cpu_ms, "at": at}
+    if near_budget:
+        entry["near_budget"] = True
     return entry
 
 
@@ -315,20 +322,25 @@ REGISTRY: dict[str, dict[str, Any]] = {
         "v3 archive atomic JSON write", cpu_ms=70, at="1 sensor x 4 leads x 400 days"
     ),
     "coordinator.py:self._v4_archive.save": io(
-        "v4 archive atomic JSON write (rebuilds the dict of every slot first; hourly at most)",
+        "v4 archive atomic JSON write (rebuilds the dict of every slot first; hourly at most). NEAR BUDGET (64%): a Pi "
+        "holds the GIL ~1.6 s. Tracked for moving to a worker",
         cpu_ms=322,
         at="3 sensors x 7 leads x 400 days (2 sensors: 224 ms)",
+        near_budget=True,
     ),
     "coordinator.py:self._cycle_store.load": io("cycle store JSON read"),
     "coordinator.py:self._cycle_store.save": io(
-        "cycle store atomic JSON write (compacts every cycle)",
+        "cycle store atomic JSON write (compacts every cycle). NEAR BUDGET (93%, worst case): a Pi holds the GIL "
+        "~2.3 s. Tracked for moving to a worker",
         cpu_ms=464,
         at="3,000 cycles x 400 samples = the store cap with every cycle at the sample cap (72-150 samples: 84-161 ms)",
+        near_budget=True,
     ),
     "coordinator.py:store.save": io(
-        "cycle store atomic JSON write at shutdown (see self._cycle_store.save)",
+        "cycle store atomic JSON write at shutdown (see self._cycle_store.save). Tracked for moving to a worker",
         cpu_ms=464,
         at="store cap, 400 samples",
+        near_budget=True,
     ),
     "coordinator.py:store.set_weights": io(
         "waits for the cycle store lock a running save holds during its write; 0.7 ms of work for 1,500 weights"
@@ -371,7 +383,8 @@ REGISTRY: dict[str, dict[str, Any]] = {
     ),
     "coordinator.py:ClimateAdvisorCoordinator._cycle_refit._payload": short_cpu(
         195,
-        "1,500 cycles x 400 samples (the per-mode store cap; GC off). With GC on a first call reached 380-730 ms",
+        "1,500 cycles x 400 samples (the per-mode store cap; GC off). With GC on a first call reached 380-730 ms: "
+        "that is a GC pass over the allocation, a process-wide cost the budget does not charge here (module docstring)",
         "builds the public dict of every stored cycle of one mode for the cycle_refit worker; 36 ms at 72 samples",
         calls=("cycle_model.refit_job_payload", "store.cycles"),
     ),
@@ -439,7 +452,7 @@ REGISTRY: dict[str, dict[str, Any]] = {
 
 _CLASSES = {"io", "short_cpu", "worker", "forwarder", "over_budget", "worker_fallback"}
 _BUDGET_MS = _EXECUTOR_CPU_BUDGET_S * 1000
-_NEAR_BUDGET_FRACTION = 0.6  # a short_cpu entry above this share of the budget carries near_budget=True
+_NEAR_BUDGET_FRACTION = 0.6  # a short_cpu (ms) or io (cpu_ms) entry above this share carries near_budget=True
 
 # Pinned sets: adding to either is a reviewed decision in THIS file, never a side effect of adding a registry entry.
 _ALLOWED_OVER_BUDGET = frozenset({"coordinator.py:self._v4_archive.load"})  # known debt; do not add to it
@@ -449,6 +462,9 @@ _EXPECTED_NEAR_BUDGET = frozenset(
         "api.py:ClimateAdvisorPredictionAccuracyView.get._build",
         "coordinator.py:ClimateAdvisorCoordinator._cycle_judge._job",
         "coordinator.py:night_replay.nightly_job_payload",
+        "coordinator.py:self._cycle_store.save",
+        "coordinator.py:self._v4_archive.save",
+        "coordinator.py:store.save",
     }
 )
 
@@ -495,15 +511,16 @@ def budget_problems(found: dict[str, Found], registry: dict[str, dict[str, Any]]
             problems.append(f"{ident}: io cpu_ms must be under {_BUDGET_MS:.0f} ms and say what it was measured on")
         if cls == "over_budget" and not (isinstance(entry.get("ms"), int | float) and entry["ms"] >= _BUDGET_MS):
             problems.append(f"{ident}: over_budget but measured under the budget: reclassify it")
-        if cls == "short_cpu" and isinstance(entry.get("ms"), int | float):
-            near = entry["ms"] > _NEAR_BUDGET_FRACTION * _BUDGET_MS
+        cost = entry.get("ms") if cls == "short_cpu" else entry.get("cpu_ms") if cls == "io" else None
+        if isinstance(cost, int | float):
+            near = cost > _NEAR_BUDGET_FRACTION * _BUDGET_MS
             if near != bool(entry.get("near_budget")):
                 problems.append(
-                    f"{ident}: {entry['ms']} ms is {'above' if near else 'under'} {_NEAR_BUDGET_FRACTION:.0%} of the "
+                    f"{ident}: {cost} ms is {'above' if near else 'under'} {_NEAR_BUDGET_FRACTION:.0%} of the "
                     f"budget, so near_budget must be {near} (tracked for moving to a worker)"
                 )
-        if entry.get("near_budget") and cls != "short_cpu":
-            problems.append(f"{ident}: near_budget belongs on short_cpu entries only")
+        elif entry.get("near_budget"):
+            problems.append(f"{ident}: near_budget belongs on a costed short_cpu or io entry only")
         if cls == "worker":
             job = ident.partition(":process_job:")[2]
             if job not in process_offload.JOBS:
@@ -664,7 +681,7 @@ def test_ids_are_package_relative_paths_so_modules_cannot_collide() -> None:
 
 
 def test_near_budget_entries_are_listed_and_marked_both_ways() -> None:
-    """Every short_cpu entry above 60% of the budget carries near_budget (and says it is tracked for a worker)."""
+    """Every short_cpu (ms) or io (cpu_ms) entry above 60% of the budget carries near_budget, and says it is tracked."""
     near = {i for i, e in REGISTRY.items() if e.get("near_budget")}
     assert near == _EXPECTED_NEAR_BUDGET, sorted(near)
     assert all("tracked for moving to a worker" in REGISTRY[i]["reason"].lower() for i in near)
@@ -673,3 +690,9 @@ def test_near_budget_entries_are_listed_and_marked_both_ways() -> None:
     assert any("near_budget must be True" in p for p in budget_problems(scan_package(), unmarked))
     overmarked = {**REGISTRY, "fix_history.py:search_records": short_cpu(9, "x", "r", near_budget=True)}
     assert any("near_budget must be False" in p for p in budget_problems(scan_package(), overmarked))
+    io_unmarked = {**REGISTRY, "coordinator.py:store.save": io("r", cpu_ms=464, at="x")}
+    assert any("near_budget must be True" in p for p in budget_problems(scan_package(), io_unmarked))
+    io_overmarked = {**REGISTRY, "coordinator.py:self._v3_archive.save": io("r", cpu_ms=70, at="x", near_budget=True)}
+    assert any("near_budget must be False" in p for p in budget_problems(scan_package(), io_overmarked))
+    uncosted = {**REGISTRY, "coordinator.py:self._v4_store.load": io("r", near_budget=True)}
+    assert any("costed short_cpu or io" in p for p in budget_problems(scan_package(), uncosted))

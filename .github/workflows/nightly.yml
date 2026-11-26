@@ -49,6 +49,7 @@ jobs:
   # Issue #1278: 12 x 250 days took 76 min on a hosted runner (about 1.5 s/day). P8 used to run after it in the
   # same job and would have pushed the job past its cap, so it is its own job now (run in parallel), and the cap
   # leaves headroom. If a run nears it, read the per-seed timings and peak_rss in the log; do not just raise it.
+  # Issue #1728: --perf-report defers GC, so peak_rss here reads about 300 MB high; judge memory from a plain run.
   generated-days:
     needs: seeds
     runs-on: ubuntu-latest

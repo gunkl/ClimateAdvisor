@@ -405,3 +405,31 @@ def test_collections_between_spans_are_young_unless_the_full_interval_elapsed(mo
     assert calls, "no collection ran"
     assert (2 in calls) == expect_full
     assert (1 in calls) == (not expect_full)
+
+
+def test_a_fault_in_span_bookkeeping_never_reaches_the_run(monkeypatch):
+    """A naming or booking fault inside a patched call's finally is counted, never raised (pass-2 finding)."""
+    hass = _hass()
+
+    def boom(_obj):
+        raise RuntimeError("namer fault")
+
+    monkeypatch.setattr(perf_probe, "callable_name", boom)
+    monkeypatch.setattr(PerfProbe, "_handle_name", staticmethod(boom))
+
+    async def go():
+        return await hass.async_add_executor_job(slow_executor_job)
+
+    with PerfProbe() as probe:
+        assert _loop.run_coro(go()) == 7  # the result still passes through
+        assert probe._depth == 0  # the span depth stays balanced, so between-span collection still runs
+    report = probe.report()
+    assert report["probe_errors"] >= 1
+    assert "Probe errors:" in perf_probe.format_table(report)
+    assert gc.isenabled()
+
+
+def test_table_warns_that_peak_rss_is_inflated():
+    with PerfProbe() as probe:
+        pass
+    assert "peak_rss reads about 300 MB high" in perf_probe.format_table(probe.report())

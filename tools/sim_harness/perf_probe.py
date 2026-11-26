@@ -20,7 +20,9 @@ without bound over a long run, the probe collects explicitly between top-level s
 (``gc.collect(1)``) at most once per ``collect_interval_s`` and a full one at most once per ``full_collect_interval_s``
 (a forced full collection every second cost about 10% of a ``--generate 20`` run); that time is booked as GC too.
 
-Memory is bounded: per name, count / total / max are exact and percentiles come from a 2048-sample reservoir.
+Memory is bounded: per name, count / total / max are exact and percentiles come from a 2048-sample reservoir. Deferring
+GC does raise the process's resident memory: ``peak_rss`` read about 370-450 MB with the probe against about 150 MB
+without (it levels off), so read memory from a run without ``--perf-report``.
 
 Nothing here changes simulation results or exit status; budgets only flag rows in the report.
 """
@@ -132,6 +134,7 @@ class PerfProbe:
         self._tool: int | None = None
         self.started_wall = 0.0
         self.total_wall = 0.0
+        self.probe_errors = 0  # faults inside the probe's own bookkeeping (never raised into the run)
 
     # -- GC accounting -------------------------------------------------
     def _gc_callback(self, phase: str, info: dict) -> None:
@@ -150,12 +153,21 @@ class PerfProbe:
         self._depth += 1
         return time.thread_time(), time.perf_counter(), self._gc_cum_cpu, self._gc_cum_wall
 
-    def _end(self, kind: str, name: str, token: tuple[float, float, float, float]) -> None:
-        c0, w0, gc_c0, gc_w0 = token
-        cpu = time.thread_time() - c0 - (self._gc_cum_cpu - gc_c0)
-        wall = time.perf_counter() - w0 - (self._gc_cum_wall - gc_w0)
-        self.samples[kind][name].add(max(cpu, 0.0), max(wall, 0.0))
+    def _end(self, kind: str, name: Any, token: tuple[float, float, float, float], namer: Any = None) -> None:
+        """Book one span. Runs in the ``finally`` of every patched call, so it never raises: a fault here is
+        counted in ``probe_errors`` and the simulated call's own result or exception goes through unchanged."""
         self._depth -= 1
+        try:
+            c0, w0, gc_c0, gc_w0 = token
+            cpu = time.thread_time() - c0 - (self._gc_cum_cpu - gc_c0)
+            wall = time.perf_counter() - w0 - (self._gc_cum_wall - gc_w0)
+            label = namer(name) if namer is not None else name
+            self.samples[kind][label].add(max(cpu, 0.0), max(wall, 0.0))
+            self._maybe_collect()
+        except Exception:  # noqa: BLE001 - the probe must never change the run
+            self.probe_errors += 1
+
+    def _maybe_collect(self) -> None:
         if self._depth == 0 and self.collect_interval_s is not None:
             now = time.perf_counter()
             if now - self._last_collect >= self.collect_interval_s:
@@ -205,7 +217,7 @@ class PerfProbe:
             try:
                 return orig_exec(hass_self, fn, *args)
             finally:
-                probe._end("executor", callable_name(fn), tok)
+                probe._end("executor", fn, tok, callable_name)
 
         self._patch(fh.FakeHass, "async_add_executor_job", executor_job)
 
@@ -233,7 +245,7 @@ class PerfProbe:
             try:
                 return orig_run(handle)
             finally:
-                probe._end("loop", probe._handle_name(handle), tok)
+                probe._end("loop", handle, tok, probe._handle_name)
 
         self._patch(asyncio.events.Handle, "_run", handle_run)
 
@@ -244,8 +256,11 @@ class PerfProbe:
             try:
                 return await orig_run_job(job, payload, **kw)
             finally:
-                wall = time.perf_counter() - w0
-                probe.samples["worker"][job].add(wall, wall)  # wall time stands in for CPU
+                try:
+                    wall = time.perf_counter() - w0
+                    probe.samples["worker"][job].add(wall, wall)  # wall time stands in for CPU
+                except Exception:  # noqa: BLE001 - the probe must never change the run
+                    probe.probe_errors += 1
 
         self._patch(po, "async_run_job", run_job)
 
@@ -359,6 +374,7 @@ class PerfProbe:
                 "loop_callback_highlight": LOOP_HIGHLIGHT_MS,
             },
             "total_wall_s": round(self.total_wall, 3),
+            "probe_errors": self.probe_errors,
             "gc": {
                 "disabled_during_run": True,
                 "pauses": len(pauses),
@@ -397,6 +413,9 @@ def format_table(report: dict, top: int = 15) -> str:
     out.append(
         f"GC disabled during run; {g['pauses']} pauses, {g['total_ms']} ms total, max {g['max_ms']} ms (excluded)"
     )
+    out.append("Memory: with GC deferred, peak_rss reads about 300 MB high; use a run without --perf-report for memory")
+    if report.get("probe_errors"):
+        out.append(f"Probe errors: {report['probe_errors']} span(s) not booked (the run itself is unaffected)")
     for kind in ("executor", "loop", "task", "worker"):
         rows = report["kinds"].get(kind)
         if not rows:

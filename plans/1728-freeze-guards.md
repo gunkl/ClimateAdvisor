@@ -7,7 +7,9 @@ Production behaviour does not change.
 
 ## Budgets (owner-approved recommendations, 2026-11-26; two-way: constants, easy to change)
 - Executor job: 0.5 s CPU on x86. A Pi is about 5x slower (estimate; #1722: 99 s Pi vs 21-24 s x86).
-- Loop lag while a heavy job runs: p99 at most 3 ms, and at most 15% of ticks lost against an idle baseline.
+- Loop lag while a heavy job runs: p99 at most max(15 ms, 4x the idle p99), 25 ms on one core, and at most 15% of
+  ticks lost. The first draft said p99 3 ms; it flaked (4.20 ms on 2 busy cores), so it was loosened during review.
+  Tick loss is the main discriminator (process mode at most 3%, the thread controls 49% or more).
 - Loop callback (report only in phase 2): 10 ms flagged, 20 ms highlighted.
 
 ## Phase 1

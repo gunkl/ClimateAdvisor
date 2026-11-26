@@ -40,10 +40,12 @@ pytestmark = pytest.mark.house
 
 # ---- budgets (Issue #1728 plan: two-way constants) ------------------------------------------------------------------
 _TICK_S = 0.005  # the probe's period
-# Why 15 / 25 ms: the worst PROCESS-mode p99 seen anywhere (2 busy cores, 2 CPU hogs, one pinned core) was 7.29 ms, so
-# these have 2x or more headroom; 3 ms flaked (4.20 ms measured on 2 busy cores). The real-GIL thread controls
-# (`real_executor` fixture) lose 52-87% of their ticks, far above _MAX_TICK_LOSS, which is the primary discriminator. Do
-# not raise the p99 floors above 20 ms: the night-replay control's own p99 is about 16 ms and must stay detectable.
+# Why 15 / 25 ms: 3 ms flaked (4.20 ms measured on 2 busy cores). Across 36 process-mode runs (inside a full 4-worker
+# HA tier, and pinned to 2 cores with and without CPU hogs) the worst p99 was 10.15 ms (1.48x headroom) and the worst
+# tick loss 3%. The real-GIL thread controls (`real_executor` fixture) lost 49-94% of their ticks, far above
+# _MAX_TICK_LOSS, which is the primary discriminator: under a loaded tier some controls' p99 sat at or under the limit
+# and only tick loss caught them. With about 160 ticks in a short window p99 is roughly the second-worst tick. Do not
+# raise the p99 floors above 20 ms: the night-replay control's own p99 is about 16 ms and must stay detectable.
 _P99_LAG_BUDGET_MS = 15.0  # p99 wake-up lateness while a heavy job runs, at most ...
 _P99_IDLE_FACTOR = 4.0  # ... or this many times the idle p99, whichever is larger (a noisy runner)
 # On ONE usable core a worker process shares the loop's core, so the loop waits for scheduler time slices. That is the

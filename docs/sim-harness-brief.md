@@ -104,9 +104,9 @@ Assertions tagged `track: "integration"` are skipped in Tier A without causing a
 
 **Overlap of the loop and task rows.** The harness runs a whole scheduler task inside one loop step, so a task's time is also inside a loop row. Do not add the two kinds together. Read `task` for the useful granularity and `loop` for the asyncio view.
 
-**GC handling.** The GC is disabled for the run and restored on exit. Every pause is timed through `gc.callbacks` and subtracted from any span it falls inside, so a collection is never blamed on a job (pauses of 200-400 ms were seen in the prototype). The probe collects between top-level spans, at most once per interval, and books that time as GC too.
+**GC handling.** The GC is disabled for the run and restored on exit. Every pause is timed through `gc.callbacks` and subtracted from any span it falls inside, so a collection is never blamed on a job (pauses of 200-400 ms were seen in the prototype). The probe collects between top-level spans, at most once per interval, and books that time as GC too. Deferring GC raises resident memory: `peak_rss` read about 370-450 MB with the probe against about 150 MB without (it levels off), so judge memory from a run without `--perf-report`. A full collection can pause for up to about 1.4 s; that time is excluded from every row.
 
-**Report-only status.** Budgets only flag rows. No threshold fails the run, and a reporting error is printed and ignored. A ratchet against a baseline is a later step, once the numbers are stable. Memory is bounded: count, total and max are exact, percentiles come from a 2048-sample reservoir per name. Unit tests: `tests/test_perf_probe_1728.py`.
+**Report-only status.** Budgets only flag rows. No threshold fails the run, and a reporting error is printed and ignored. A fault in the probe's own per-span bookkeeping is counted in `probe_errors` and never raised into the run. A ratchet against a baseline is a later step, once the numbers are stable. Memory is bounded: count, total and max are exact, percentiles come from a 2048-sample reservoir per name. Unit tests: `tests/test_perf_probe_1728.py`.
 
 ## Disclosure Path
 

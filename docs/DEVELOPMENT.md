@@ -151,13 +151,16 @@ PR and say why the occupant is better off.
 
 Three checks stop background work from freezing Home Assistant (the #1722 problem). They test and report only. Production does not change.
 
-**Classify a new executor job.** `tests/test_executor_job_registry_1728.py` fails the unit tier when a callable handed to `_executor_job`, `async_add_executor_job` or `_process_job` has no entry in its `REGISTRY`, or when an entry is stale. The failure message names the missing id. Add an entry keyed `"<file>:<callable>"` (for example `"coordinator.py:self._chart_log.save"`), built with one of the helpers `io(...)`, `short_cpu(...)`, `worker(...)`, `forwarder(...)` or `over_budget(...)`:
+**Classify a new executor job.** `tests/test_executor_job_registry_1728.py` fails the unit tier when a callable handed to `_executor_job`, `async_add_executor_job` or `_process_job` has no entry in its `REGISTRY`, or when an entry is stale. The failure message names the missing id. Add an entry keyed `"<file>:<callable>"` (for example `"coordinator.py:self._chart_log.save"`), built with one of the helpers `io(...)`, `short_cpu(...)`, `worker(...)`, `forwarder(...)`, `over_budget(...)` or `worker_fallback(...)`:
 
 - `io`: file, network or client work. Say why in `reason`.
 - `short_cpu`: pure Python CPU. Give `ms`, the measured worst case on x86 (thread CPU, GC off), and `at`, the input size you measured on. It must be under 0.5 s. If it can run longer, make it a worker job instead: see [process-offload-brief.md](process-offload-brief.md#adding-a-job).
 - `worker`: a `process_offload.JOBS` name run through `_process_job`.
 - `forwarder`: a wrapper that only passes its parameter on. Nothing to cost.
 - `over_budget`: known debt. Only `V4Archive.load` is pinned here. Do not add to it.
+- `worker_fallback`: the thread fallback that runs a whole worker job when a worker process cannot start. Only `process_offload._thread_run` is pinned here.
+
+An `io` entry with `cpu_ms`, or a `short_cpu` entry, above 60% of the budget must carry `near_budget=True` and say it is tracked for moving to a worker. Costs are measured with GC off; GC is a process-wide cost, reported by the perf probe.
 
 A local `def` or `lambda` entry also lists `calls`. If the job starts calling something heavier, the entry goes stale and you must re-read and re-measure.
 
@@ -176,7 +179,7 @@ python tools/simulate.py --generate 5 --seeds 1 --perf-report            # write
 python tools/simulate.py --generate 5 --seeds 1 --perf-report out.json --perf-lines
 ```
 
-It prints a table at the end of the run and writes JSON. The tables are executor jobs (thread CPU, flagged over 500 ms), loop callbacks (flagged over 10 ms, highlighted over 20 ms), scheduler tasks and worker jobs. GC pauses are excluded. `--perf-lines` also counts lines run in a few hot functions (slower). The nightly `generated-days` job uploads the file as the `perf-report` artifact. See the [Sim Harness Brief](sim-harness-brief.md#perf-probe-report-only-issue-1728).
+It prints a table at the end of the run and writes JSON. The tables are executor jobs (thread CPU, flagged over 500 ms), loop callbacks (flagged over 10 ms, highlighted over 20 ms), scheduler tasks and worker jobs. GC pauses are excluded. `--perf-lines` also counts lines run in a few hot functions (slower). The probe defers GC, so with `--perf-report` the run's `peak_rss` reads about 300 MB high: read memory from a run without it. The nightly `generated-days` job uploads the file as the `perf-report` artifact. See the [Sim Harness Brief](sim-harness-brief.md#perf-probe-report-only-issue-1728).
 
 ## Simulator
 
@@ -241,7 +244,7 @@ regenerated, because CI uses `--locked`.
 | Job | What it does |
 |---|---|
 | `seeds` | Picks fresh master seeds once and prints them, so every job judges the same seeds and a failure can be replayed. |
-| `generated-days` | Runs `simulate.py --generate <days> --seeds ...`, judged by the household promises P1-P7 and the waiver ledger (`--issue-state github`). It prints each seed's timing and `peak_rss`: read these before raising the 120-minute cap. Failing scenarios are uploaded as the `generated-failures` artifact. It also writes `perf_report.json` and uploads it as the `perf-report` artifact (report only, #1728). |
+| `generated-days` | Runs `simulate.py --generate <days> --seeds ...`, judged by the household promises P1-P7 and the waiver ledger (`--issue-state github`). It prints each seed's timing and `peak_rss`: read these before raising the 120-minute cap. Failing scenarios are uploaded as the `generated-failures` artifact. It also writes `perf_report.json` and uploads it as the `perf-report` artifact (report only, #1728). The probe defers GC, so this job's `peak_rss` reads about 300 MB high; to judge memory, run a seed without `--perf-report`. |
 | `surfaces` | Runs `simulate.py --surfaces --generate 50` on the same seeds (P8, ratcheted by `tools/simulations/surface_divergences.json`). |
 | `ha-lifecycle` | Runs the full real-HA tier. |
 | `report-failure` | Runs when any job failed or was cancelled. It files one issue per distinct failure: title "Nightly failure <date>: <jobs>", labels `bug`, `nightly-failure`, `severity: medium`, the failing tests (pytest `FAILED`/`ERROR` lines) and broken household promises (`UNWAIVED <promise> day_seed=<n>`). The signature is the failing tests plus the promise NAMES (seeds change every night), so the same failure on a later night comments on the open issue instead of filing a new one. Hidden markers `nightly-signature` and `nightly-run` tie the issue to the run. |

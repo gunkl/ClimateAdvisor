@@ -215,11 +215,13 @@ Occupant view: per-sensor logging (`indoor_sensors`) began on a known day, so ju
 
 | Confidence | Condition | `predict()` |
 |---|---|---|
-| `none` | fewer than 3 days of samples that carry a primary reading (`sample_days < 3`), or fewer than 12 anchors, or a non-finite fit, or training MAE at 4 h not at least 10 % below "no change" | returns `None` |
+| `none` | fewer than 3 days of samples that carry a primary reading (`sample_days < 3`; `fit()` returns this model before the search runs, see below), or fewer than 12 anchors, or a non-finite fit, or training MAE at 4 h not at least 10 % below "no change" | returns `None` |
 | `low` | otherwise, but fewer than 10 days of samples, or heating or cooling not yet observed (at least 2 h of duty each, or carried: Issue #1525), or a used mode with fewer than 5 accepted thermostat starts (a carried mode's carried thermostat counts) | predicts |
 | `ok` | at least 10 days, both modes observed, skill gate passed | predicts |
 
 `predict()` also returns `None` when the primary reading is missing or `inputs` is empty.
+
+**Early return under 3 days (Issue #1722).** The "under 3 days" gate depends on `sample_days` alone, and `sample_days` is known before the search. `fit()` therefore returns the `none` model right after the anchor count and `sample_days` checks (`_under_min_days_model`), without the Levenberg-Marquardt search, the thermostat calibration or the MAE pass (over 98 % of the cost of a fit). The model is the default one with `fit["reason"] = "under 3 days of samples"` (`REASON_UNDER_MIN_DAYS`), the same Debug fields the full path fills (`n_anchors`, `heat_seen`, `cool_seen`, `modes`, `frozen`, `thermostat_defaults_used`), the thermostat default substitution for a mode without enough accepted starts, and the carry source kept (`_keep_carry_source`). Only the closed-loop thermostat calibration is skipped. The result is the same confidence as before, only reached without the search.
 
 ### Per-mode grades (Issue #1469)
 
@@ -262,7 +264,7 @@ An anchor counts for a mode when that mode had any duty in its first 16 steps (`
 
 | Failure | Handling | Caller receives |
 |---|---|---|
-| Too little data / under 3 days / no skill | `confidence = "none"`, `fit["reason"]` set; the last usable model kept in `fit["carry_source"]` (Issue #1525) | model, `predict()` -> `None` |
+| Too little data / under 3 days (early return, Issue #1722) / no skill | `confidence = "none"`, `fit["reason"]` set; the last usable model kept in `fit["carry_source"]` (Issue #1525) | model, `predict()` -> `None` |
 | Numeric failure in the fit | caught, reason `fit failed: <type>` | model with `confidence = "none"` and default parameters |
 | Unknown schema or malformed dict | `from_dict` -> `None` | `None` (callers refit) |
 | Missing primary reading | `predict` -> `None` | `None` |
@@ -298,7 +300,7 @@ An anchor counts for a mode when that mode had any duty in its first 16 steps (`
 
 ## Performance
 
-Measured on the development machine (CPython 3.14, one core): 30 days of 15-min samples, two sensors, 160 anchors, 12 h horizon: 0.2-1.5 s typical (5-40 iterations), 3.3 s for 60 iterations (about 55 ms per iteration). A Raspberry Pi 4 is roughly 4-6x slower: about 5-8 s typical, 15-25 s worst case, inside the 60 s budget. `predict()` for 96 steps and 2 sensors costs about 1 ms. A nightly refit with `warm_start` converges in a few iterations.
+Measured on the development machine (CPython 3.14, one core): 30 days of 15-min samples, two sensors, 160 anchors, 12 h horizon: 0.2-1.5 s typical (5-40 iterations), 3.3 s for 60 iterations (about 55 ms per iteration). A Raspberry Pi 4 is roughly 4-6x slower: about 5-8 s typical, 15-25 s worst case, inside the 60 s budget. `predict()` for 96 steps and 2 sensors costs about 1 ms. A nightly refit with `warm_start` converges in a few iterations. Since Issue #1722 the coordinator runs the fit in a worker process ([v4 Shadow Spec: Worker process](v4-shadow-spec.md#worker-process-issue-1722)), because a fit in an executor thread starved the event loop through the GIL (measured on x86: loop I/O round-trips fell from about 64k/s to about 72/s; a Pi 4 froze for up to 90 s); a 4-sensor fit measured 21-24 s on x86 and about 120 s on a Pi, so the worker timeout is 900 s. A window under 3 days skips the search altogether (above).
 
 R1b cost (7 zones, 60 days of 30-min rows, `_ca` primary, same machine): per fit the baseline took a mean 10.3 s (max 15.3 s) and R1b 8.9 s (max 14.7 s) with six backtests running in parallel on the box, i.e. no increase - the thermostat calibration adds about 0.3 s per mode (36 emulated candidates x up to 100 anchors) and the `c_mh` bound makes the fits converge in fewer iterations (COOL zone 24 -> 8). Uncontended, a 60-day fit is 0.6-0.8 s (Zone 1) to 3.6-6 s (the 38-51-iteration simulated zones). All seven fits converged (`fit["converged"]`) inside the new 100-iteration cap; a fit that does not converge, or a warm-started one, runs a second start, so a nightly warm refit costs up to twice a cold fit.
 

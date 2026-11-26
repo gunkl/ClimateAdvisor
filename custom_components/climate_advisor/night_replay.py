@@ -484,21 +484,17 @@ def nightly_job_payload(
 
     Runs in the EXECUTOR, never on the event loop: it windows the chart rows and reads the forecast archive."""
     horizon_days = nightly_horizon_days(train_days, nights)
-    snapshots: list[dict] | None = None
-    if snapshots_fn is not None:
-        try:
-            snapshots = list(snapshots_fn(*nightly_snapshot_window(now, horizon_days)))
-        except Exception:  # noqa: BLE001 - a bad forecast archive degrades to chart-log-only samples
-            snapshots = []
     return {
         "chart_entries": v4_shadow.rows_in_window(chart_entries, now, horizon_days),
-        "snapshots": snapshots,
+        "snapshots": v4_shadow.prefetch_snapshots(
+            snapshots_fn, nightly_snapshot_window(now, horizon_days), "night replay"
+        ),
         "tz": v4_shadow.encode_tz(tz, now),
         "now": now.isoformat(),
         "primary": primary,
         "sensors": list(sensors),
         "primary_aliases": list(primary_aliases),
-        "sleep_window": [None if v is None else str(v) for v in sleep_window[:2]] if sleep_window else None,
+        "sleep_window": v4_shadow.jsonable_window(sleep_window),
         "bed": list(bed),
         "wake": list(wake),
         "train_days": train_days,
@@ -511,8 +507,7 @@ def nightly_job_payload(
 def run_nightly_job(payload: Mapping[str, Any]) -> dict[str, Any]:
     """:func:`run_nightly` from JSON data only (Issue #1722; the worker process calls this). ``run_nightly`` is resolved
     at call time, so a monkeypatch of it holds."""
-    tz, now = v4_shadow._job_clock(payload)
-    snaps = payload.get("snapshots")
+    tz, now, snapshots_fn = v4_shadow.job_clock_and_archive(payload)
     bed, wake = payload.get("bed") or (22, 30), payload.get("wake") or (6, 30)
     kwargs: dict[str, Any] = {}
     if payload.get("train_days") is not None:
@@ -521,7 +516,7 @@ def run_nightly_job(payload: Mapping[str, Any]) -> dict[str, Any]:
         kwargs["nights"] = int(payload["nights"])
     return run_nightly(
         chart_entries=payload.get("chart_entries") or [],
-        snapshots_fn=(lambda _a, _b: snaps) if isinstance(snaps, list) else None,
+        snapshots_fn=snapshots_fn,
         tz=tz,
         now=now,
         primary=payload["primary"],

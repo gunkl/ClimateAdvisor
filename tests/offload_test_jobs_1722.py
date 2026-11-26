@@ -72,3 +72,24 @@ def not_json(payload: dict[str, Any]) -> Any:
 def hard_exit(payload: dict[str, Any]) -> Any:
     """Die without writing an envelope."""
     os._exit(3)
+
+
+def debug_line(payload: dict[str, Any]) -> Any:
+    """Log one line at each of DEBUG, INFO and WARNING on a sub-logger (the relayed record keeps this name)."""
+    sub = logging.getLogger("offload_test_jobs.sub")
+    sub.debug("debug line")
+    sub.info("info line")
+    sub.warning("warning line")
+    return "ok"
+
+
+def long_message(payload: dict[str, Any]) -> Any:
+    """Log one huge ERROR message whose last words are the failing frame."""
+    _LOG.error("%s%s", "head-" + "x" * 20000, "-LAST-FRAME-MARKER")
+    return "ok"
+
+
+def fd_garbage(payload: dict[str, Any]) -> Any:
+    """Write straight to fd 1 (a C extension would), then return a normal result."""
+    os.write(1, b"garbage written to fd 1\n")
+    return "ok"

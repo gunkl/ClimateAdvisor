@@ -10,6 +10,7 @@ function called directly with the callables. Nothing here re-implements the code
 from __future__ import annotations
 
 import json
+import logging
 import math
 import random
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
@@ -155,7 +156,7 @@ def test_fit_job_equals_run_fit_with_archive_sleep_sensor_and_tz_key() -> None:
     fn = archive_fn(ARCHIVE)
     kw = fit_kwargs(snapshots_fn=fn, sleep_window=list(WRAP), sleep_sensor="sensor.b", climate_entity="climate.a")
     payload = vs.fit_job_payload(**kw)
-    assert payload["tz"] == {"key": "America/Chicago"}
+    assert payload["tz"] == {"key": "America/Chicago", "offset_s": -21600}
     assert payload["snapshots"], "the archive must reach the worker as data"
     got = vs.run_fit_job(wire(payload))
     want = json.loads(json.dumps(direct_fit(**kw)))
@@ -236,7 +237,7 @@ def test_fit_job_equals_run_fit_when_the_archive_raises() -> None:
 
 # --------------------------------------------------------------------------------------------- tz helpers
 def test_encode_decode_tz_key_offset_and_utc() -> None:
-    assert vs.encode_tz(TZ, NOW) == {"key": "America/Chicago"}
+    assert vs.encode_tz(TZ, NOW) == {"key": "America/Chicago", "offset_s": -21600}  # CST on NOW
     assert vs.decode_tz({"key": "America/Chicago"}) == TZ
     fixed = timezone(timedelta(hours=5, minutes=30))
     assert vs.encode_tz(fixed, NOW) == {"offset_s": 19800}
@@ -254,6 +255,28 @@ def test_encode_decode_tz_key_offset_and_utc() -> None:
     # an unknown key on this machine falls back to the offset that came with it, else UTC
     assert vs.decode_tz({"key": "Nowhere/Land", "offset_s": 3600}).utcoffset(None) == timedelta(hours=1)
     assert vs.decode_tz({"key": "Nowhere/Land"}) is UTC
+
+
+def test_decode_tz_unavailable_key_falls_back_to_offset_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """A worker without tzdata gets the parent's offset and says so (Issue #1722)."""
+
+    class Keyed(tzinfo):  # a zone whose key the worker's tzdata does not know, two hours ahead
+        key = "Nowhere/Land"
+
+        def utcoffset(self, dt):
+            return timedelta(hours=2)
+
+    raw = vs.encode_tz(Keyed(), NOW)
+    assert raw == {"key": "Nowhere/Land", "offset_s": 7200}
+    with caplog.at_level(logging.WARNING, logger=vs._LOGGER.name):
+        tz = vs.decode_tz(raw)
+    assert tz.utcoffset(None) == timedelta(hours=2)
+    assert any(
+        r.levelno == logging.WARNING
+        and r.getMessage()
+        == "v4 job: time zone key not available in the worker; using a fixed offset: key=Nowhere/Land"
+        for r in caplog.records
+    )
 
 
 def test_sleep_predicate_boundaries() -> None:

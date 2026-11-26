@@ -39,7 +39,11 @@ default_mode: str = "process"
 _PKG_DIR: Final = Path(__file__).resolve().parent
 _PACKAGE: Final = "custom_components.climate_advisor"
 _ERROR_CAP: Final = 500
-_LOG_LINE_CAP: Final = 500
+_WHERE_CAP: Final = 300  # the "(at file:line in func)" suffix of a job error
+#: One relayed log message. Generous so a traceback survives; a longer one keeps its head and its TAIL (the failing
+#: frame).
+_LOG_LINE_CAP: Final = 8000
+_LOG_HEAD_KEEP: Final = 500
 _CHILD_NICE: Final = 10
 
 # Test-only registry. Production never populates these (see _register_job_for_tests).
@@ -103,29 +107,48 @@ def _thread_run(job: str, payload: dict[str, Any]) -> Any:
     return json.loads(json.dumps(result))
 
 
-def _encode(job: str, payload: dict[str, Any]) -> bytes:
-    """JSON-encode the ``{"job", "payload"}`` message for the child's stdin."""
-    return json.dumps({"job": job, "payload": payload}).encode()
+def _encode(job: str, payload: dict[str, Any], log_level: int = logging.INFO) -> bytes:
+    """JSON-encode the ``{"job", "payload", "log_level"}`` message for the child's stdin.
+
+    ``log_level`` (the caller logger's effective level) travels in the envelope, not the payload: the child logs at
+    that level, so DEBUG lines are relayed exactly when the parent would show them.
+    """
+    return json.dumps({"job": job, "payload": payload, "log_level": log_level}).encode()
 
 
-def _decode(raw: bytes) -> dict[str, Any]:
-    """Decode the child's stdout envelope."""
-    out: dict[str, Any] = json.loads(raw.decode())
-    return out
+def _decode(raw: bytes) -> Any:
+    """Decode the child's stdout envelope (any JSON; the caller checks it is an object)."""
+    return json.loads(raw.decode())
+
+
+def _cap_message(msg: str) -> str:
+    """Cap one relayed message at :data:`_LOG_LINE_CAP`, keeping its head and its tail (a traceback's failing frame)."""
+    if len(msg) <= _LOG_LINE_CAP:
+        return msg
+    marker = "\n...[truncated]...\n"
+    return msg[:_LOG_HEAD_KEEP] + marker + msg[-(_LOG_LINE_CAP - _LOG_HEAD_KEEP - len(marker)) :]
 
 
 def _relay_logs(logger: logging.Logger, job: str, stderr: bytes) -> None:
-    """Relay the child's JSON log lines; non-JSON lines go out at WARNING (capped)."""
+    """Relay the child's JSON log lines; non-JSON lines go out at WARNING (capped).
+
+    Each record goes through ``logging.getLogger(record name)``, the record's own module logger, so a per-module log
+    level the user set still applies; ``logger`` takes the lines that carry no usable name.
+    """
     for line in stderr.decode(errors="replace").splitlines():
         if not line.strip():
             continue
+        target = logger
         try:
             rec = json.loads(line)
             level = int(rec["level"])
             msg = str(rec["msg"])
-        except ValueError, KeyError, TypeError:
+            name = rec.get("name")
+            if isinstance(name, str) and name:
+                target = logging.getLogger(name)
+        except ValueError, KeyError, TypeError, AttributeError:
             level, msg = logging.WARNING, line
-        logger.log(level, "worker %s: %s", job, msg[:_LOG_LINE_CAP])
+        target.log(level, "worker %s: %s", job, _cap_message(msg))
 
 
 async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
@@ -172,7 +195,7 @@ async def async_run_job(
         return await executor_job(_thread_run, job, payload)
 
     started = time.monotonic()
-    raw = await executor_job(_encode, job, payload)
+    raw = await executor_job(_encode, job, payload, logger.getEffectiveLevel())
     args = [sys.executable, "-I", "-c", _BOOTSTRAP, str(_PKG_DIR), str(_PKG_DIR.parent)]
     if _TEST_JOBS or _TEST_PATHS:
         args.append(json.dumps({"jobs": _TEST_JOBS, "paths": _TEST_PATHS}))
@@ -207,9 +230,15 @@ async def async_run_job(
     if proc.returncode != 0:
         tail = stderr.decode(errors="replace")[-_ERROR_CAP:]
         raise ProcessJobError(f"Worker job {job} exited with code {proc.returncode}: {tail}")
-    envelope = await executor_job(_decode, stdout)
+    try:
+        envelope = await executor_job(_decode, stdout)
+    except ValueError as err:  # not JSON (JSONDecodeError and UnicodeDecodeError are both ValueError)
+        raise ProcessJobError(f"Worker job {job} returned an unreadable result: {err}"[:_ERROR_CAP]) from err
+    if not isinstance(envelope, dict):
+        raise ProcessJobError(f"Worker job {job} returned an unreadable result: not a JSON object")
     if not envelope.get("ok"):
-        raise ProcessJobError(f"Worker job {job} failed: {str(envelope.get('error'))[:_ERROR_CAP]}")
+        error = str(envelope.get("error"))[: _ERROR_CAP + _WHERE_CAP]
+        raise ProcessJobError(f"Worker job {job} failed: {error}")
     return envelope.get("result")
 
 
@@ -219,8 +248,8 @@ async def async_run_job(
 class _JsonLineHandler(logging.Handler):
     """Writes each record as a JSON line (level, name, msg) to a stream (stderr)."""
 
-    def __init__(self, stream: IO[str]) -> None:
-        super().__init__(logging.INFO)
+    def __init__(self, stream: IO[str], level: int = logging.INFO) -> None:
+        super().__init__(level)
         self._stream = stream
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -258,6 +287,27 @@ def _install_ha_stub() -> None:
     sys.modules.update({"homeassistant": ha, "homeassistant.util": util, "homeassistant.util.dt": dt})
 
 
+def _protect_stdout(stdout_fd: int = 1, stderr_fd: int = 2) -> IO[bytes]:
+    """Keep the real stdout for the envelope and point fd 1 at stderr.
+
+    Anything a job (or a C extension) writes straight to fd 1 then lands in stderr, where the parent relays it as a
+    log line, instead of corrupting the envelope. Returns a binary stream on the saved real stdout.
+    """
+    saved = os.dup(stdout_fd)
+    os.dup2(stderr_fd, stdout_fd)
+    return os.fdopen(saved, "wb")
+
+
+def _error_text(err: BaseException) -> str:
+    """``"Type: message (at file:line in func)"``: the message capped, the failing frame always kept."""
+    text = f"{type(err).__name__}: {err}"[:_ERROR_CAP]
+    frames = traceback.extract_tb(err.__traceback__)
+    if frames:
+        last = frames[-1]
+        text += f" (at {Path(last.filename).name}:{last.lineno} in {last.name})"[:_WHERE_CAP]
+    return text
+
+
 def _child_main() -> int:
     """Worker entry: read a payload on stdin, run the job, write the envelope on stdout.
 
@@ -273,31 +323,29 @@ def _child_main() -> int:
     with contextlib.suppress(OSError, AttributeError):
         os.nice(_CHILD_NICE)
 
+    raw = sys.stdin.buffer.read()
+    out = _protect_stdout()  # fd 1 now goes to stderr
+    sys.stdout = sys.stderr  # stray prints must not corrupt the envelope either
     root = logging.getLogger()
     old_level = root.level
     handler = _JsonLineHandler(sys.stderr)
     root.addHandler(handler)
     root.setLevel(logging.INFO)
-
-    raw = sys.stdin.buffer.read()
-    out = sys.stdout.buffer
-    sys.stdout = sys.stderr  # stray prints must not corrupt the envelope
     try:
         try:
-            envelope: dict[str, Any] = {"ok": True, "result": run_job_from_wire(raw)}
+            msg = json.loads(raw.decode())
+            level = msg.get("log_level")  # the caller's effective level (see _encode)
+            level = level if isinstance(level, int) and not isinstance(level, bool) else logging.INFO
+            handler.setLevel(level)
+            root.setLevel(level)
+            envelope: dict[str, Any] = {"ok": True, "result": run_job(msg["job"], msg["payload"])}
             body = json.dumps(envelope)
         except Exception as err:  # noqa: BLE001 - reported to the parent
             logging.getLogger(__name__).error("Worker job failed", exc_info=True)
-            body = json.dumps({"ok": False, "error": f"{type(err).__name__}: {err}"[:_ERROR_CAP]})
+            body = json.dumps({"ok": False, "error": _error_text(err)})
         out.write(body.encode())
         out.flush()
     finally:
         root.removeHandler(handler)
         root.setLevel(old_level)
     return 0
-
-
-def run_job_from_wire(raw: bytes) -> Any:
-    """Decode the child's stdin message ``{"job": ..., "payload": ...}`` and run it."""
-    msg = json.loads(raw.decode())
-    return run_job(msg["job"], msg["payload"])

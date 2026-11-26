@@ -169,6 +169,26 @@ class TestFullPathUnchangedAtThreeDays:
         assert p4._under_min_days_model(base, prob, tstats, p4.GATE_MIN_DAYS_NONE) is None
 
 
+class TestWarmStartSkipsAnEarlyNoneModel:
+    """An early "none" model holds the default house and nodes. Warm-starting from it is a cold start that also pays
+    for a second start; the fit must take the cold-start path (one start when it converges)."""
+
+    def test_after_an_early_none_model_the_fit_is_the_cold_start_fit(self, history):
+        early_none = _fit(history[:UNDER])
+        assert early_none.fit["reason"] == p4.REASON_UNDER_MIN_DAYS
+        cold = _fit(history[:OVER])
+        after_early_none = _fit(history[:OVER], warm_start=early_none)
+        assert after_early_none.fit["iterations"] > 0  # the real search ran
+        assert p4.to_dict(after_early_none) == p4.to_dict(cold)
+        assert after_early_none.fit["restarts"] == cold.fit["restarts"]
+
+    def test_a_usable_previous_model_still_warm_starts(self, history, prev_model):
+        cold = _fit(history[:OVER])
+        warm = _fit(history[:OVER], warm_start=prev_model)
+        assert warm.fit["restarts"] == 1  # a warm start always gets the second, cold-defaults start
+        assert p4.to_dict(warm) != p4.to_dict(cold)
+
+
 class TestSameModelAsBeforeExceptTheSearch:
     def test_fit_differs_only_in_search_derived_fields(self, history, prev_model, monkeypatch):
         win = history[:UNDER]

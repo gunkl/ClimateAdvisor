@@ -111,21 +111,23 @@ def fit_snapshot_window(now: datetime, train_days: float | None) -> tuple[dateti
 
 
 def encode_tz(tz: tzinfo | None, now: datetime) -> dict[str, Any] | None:
-    """A timezone as JSON for the worker process (Issue #1722): ``{"key": IANA}`` when ``tz`` is a zone with a key,
-    else ``{"offset_s": n}`` (its offset at ``now``), else UTC as ``{"offset_s": 0}``. :func:`decode_tz` inverts it."""
-    key = getattr(tz, "key", None)
-    if isinstance(key, str) and key:
-        return {"key": key}
+    """A timezone as JSON for the worker process (Issue #1722): ``{"key": IANA, "offset_s": n}`` when ``tz`` is a zone
+    with a key (the offset at ``now`` is the worker's fallback when it cannot load the key), else ``{"offset_s": n}``,
+    else UTC as ``{"offset_s": 0}``. :func:`decode_tz` inverts it."""
     try:
         off = tz.utcoffset(now) if tz is not None else None
     except Exception:  # noqa: BLE001 - an odd tzinfo falls back to UTC
         off = None
-    return {"offset_s": int(off.total_seconds())} if off is not None else {"offset_s": 0}
+    offset_s = int(off.total_seconds()) if off is not None else 0
+    key = getattr(tz, "key", None)
+    if isinstance(key, str) and key:
+        return {"key": key, "offset_s": offset_s}
+    return {"offset_s": offset_s}
 
 
 def decode_tz(raw: Mapping[str, Any] | None) -> tzinfo:
-    """The timezone :func:`encode_tz` described: ``ZoneInfo(key)``, else a fixed offset, else UTC (also when the key is
-    unknown on this machine and no offset came with it)."""
+    """The timezone :func:`encode_tz` described: ``ZoneInfo(key)``, else a fixed offset (logged at WARNING when a key
+    could not be loaded, as the fixed offset ignores daylight saving), else UTC."""
     if isinstance(raw, Mapping):
         key = raw.get("key")
         if isinstance(key, str) and key:
@@ -134,7 +136,7 @@ def decode_tz(raw: Mapping[str, Any] | None) -> tzinfo:
 
                 return ZoneInfo(key)
             except Exception:  # noqa: BLE001 - tzdata missing or a bad key: fall through to the offset
-                _LOGGER.debug("v4 job: unknown timezone key %r", key)
+                _LOGGER.warning("v4 job: time zone key not available in the worker; using a fixed offset: key=%s", key)
         off = raw.get("offset_s")
         if isinstance(off, int | float) and not isinstance(off, bool):
             return timezone(timedelta(seconds=float(off)))
@@ -143,9 +145,9 @@ def decode_tz(raw: Mapping[str, Any] | None) -> tzinfo:
 
 def sleep_predicate(sleep_window: Sequence[Any] | None) -> Callable[[datetime], bool] | None:
     """``in_sleep`` rebuilt from the configured ``[sleep, wake]`` "HH:MM" strings (Issue #1722), or ``None`` when no
-    window is set. The rule is ``predictor_v4.in_sleep_window`` (hass-free; a test pins it to
-    ``automation._in_sleep_window``): the same datetime in gives the same answer the coordinator's
-    ``_in_sleep_window(dt, config)`` gave."""
+    window is set. The rule is ``predictor_v4.in_sleep_window`` (hass-free): the same answer as
+    ``automation._in_sleep_window`` for the HH:MM / HH:MM:SS times the config flow accepts; malformed times read as
+    awake. A test pins the two together."""
     if not sleep_window:
         return None
     sleep, wake = sleep_window[0], sleep_window[1]
@@ -153,11 +155,12 @@ def sleep_predicate(sleep_window: Sequence[Any] | None) -> Callable[[datetime], 
     return lambda dt: p.in_sleep_window(dt, sleep, wake)
 
 
-def _jsonable_window(sleep_window: Sequence[Any] | None) -> list[str | None] | None:
+def jsonable_window(sleep_window: Sequence[Any] | None) -> list[str | None] | None:
+    """``[sleep, wake]`` as JSON strings (``None`` stays ``None``), or ``None`` when no window is set."""
     return [None if v is None else str(v) for v in sleep_window[:2]] if sleep_window else None
 
 
-def _prefetch_snapshots(
+def prefetch_snapshots(
     snapshots_fn: Callable[[datetime, datetime], list[dict]] | None, window: tuple[datetime, datetime], what: str
 ) -> list[dict] | None:
     """The archive read the job cannot do (the archive lives in the parent): ``None`` = no archive; an unreadable
@@ -196,34 +199,39 @@ def fit_job_payload(
         entries = rows_in_window(entries, now, train_days)
     return {
         "chart_entries": entries,
-        "snapshots": _prefetch_snapshots(snapshots_fn, fit_snapshot_window(now, train_days), "v4 fit"),
+        "snapshots": prefetch_snapshots(snapshots_fn, fit_snapshot_window(now, train_days), "v4 fit"),
         "tz": encode_tz(tz, now),
         "now": now.isoformat(),
         "primary": primary,
         "sensors": list(sensors),
         "previous_model": dict(previous_model) if previous_model else None,
         "primary_aliases": list(primary_aliases),
-        "sleep_window": _jsonable_window(sleep_window),
+        "sleep_window": jsonable_window(sleep_window),
         "train_days": train_days,
         "sleep_sensor": sleep_sensor,
         "climate_entity": climate_entity,
     }
 
 
-def _job_clock(payload: Mapping[str, Any]) -> tuple[tzinfo, datetime]:
-    """``(tz, now)`` of a job payload, ``now`` expressed in ``tz`` (the coordinator passes ``tz = now.tzinfo``)."""
+def job_clock_and_archive(
+    payload: Mapping[str, Any],
+) -> tuple[tzinfo, datetime, Callable[[datetime, datetime], list[dict]] | None]:
+    """``(tz, now, snapshots_fn)`` of a job payload: ``now`` expressed in ``tz`` (the coordinator passes
+    ``tz = now.tzinfo``) and a ``snapshots_fn`` that returns the prefetched archive rows (``None`` when the payload has
+    no archive). The three job functions share it (Issue #1722)."""
     tz = decode_tz(payload.get("tz"))
-    return tz, datetime.fromisoformat(str(payload["now"])).astimezone(tz)
+    now = datetime.fromisoformat(str(payload["now"])).astimezone(tz)
+    snaps = payload.get("snapshots")
+    return tz, now, ((lambda _a, _b: snaps) if isinstance(snaps, list) else None)
 
 
 def run_fit_job(payload: Mapping[str, Any]) -> list:
     """:func:`run_fit` from JSON data only (Issue #1722; the worker process calls this). Returns
     ``[model_dict, seconds, summary_line]``. ``run_fit`` is resolved at call time, so a monkeypatch of it holds."""
-    tz, now = _job_clock(payload)
-    snaps = payload.get("snapshots")
+    tz, now, snapshots_fn = job_clock_and_archive(payload)
     out = run_fit(
         chart_entries=payload.get("chart_entries") or [],
-        snapshots_fn=(lambda _a, _b: snaps) if isinstance(snaps, list) else None,
+        snapshots_fn=snapshots_fn,
         tz=tz,
         now=now,
         primary=payload["primary"],
@@ -263,14 +271,14 @@ def display_fit_job_payload(
         "sensors": list(sensors),
         "model_dict": dict(model_dict),
         "primary_aliases": list(primary_aliases),
-        "sleep_window": _jsonable_window(sleep_window),
+        "sleep_window": jsonable_window(sleep_window),
         "train_days": train_days,
     }
 
 
 def run_display_fit_job(payload: Mapping[str, Any]) -> list:
     """:func:`run_display_fit` from JSON data only (Issue #1722). Returns ``[model_dict, seconds, line]``."""
-    tz, now = _job_clock(payload)
+    tz, now, _ = job_clock_and_archive(payload)
     out = run_display_fit(
         chart_entries=payload.get("chart_entries") or [],
         tz=tz,

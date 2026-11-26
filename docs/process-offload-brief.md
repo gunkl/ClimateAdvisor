@@ -103,7 +103,7 @@ One request, one response, per process.
 - **Payloads are data only.** The callables the in-process fits took are rebuilt in the child from data:
   - `snapshots_fn` becomes `snapshots`, the forecast-archive rows prefetched in the executor (`None` = no archive; an unreadable archive becomes `[]`, as before);
   - `in_sleep` becomes `sleep_window`, `[sleep, wake]` as "HH:MM", evaluated by the existing hass-free `predictor_v4.in_sleep_window` (no second copy of the sleep rule);
-  - `tz` becomes `{"key": <IANA>}` or `{"offset_s": n}` (`v4_shadow.encode_tz` / `decode_tz`);
+  - `tz` becomes `{"key": <IANA>, "offset_s": n}` or `{"offset_s": n}` (the worker falls back to the offset, with a WARNING, if it cannot load the key) (`v4_shadow.encode_tz` / `decode_tz`);
   - `now` becomes an ISO string.
 - **Cycle refit payload:** `{cycles, mode, snap, now_ts}`. The result is the `fit_cycles` dict including `w_by_id` (cycle id to weight). The coordinator applies `store.set_weights` after the job.
 - A result that cannot be encoded as JSON raises `ProcessJobError`.
@@ -131,7 +131,7 @@ On timeout, `_kill_and_reap` kills the child and waits for it, and `ProcessJobEr
 
 ### Log relay
 
-After the child exits, `_relay_logs` (`process_offload.py#L117`) re-emits each stderr JSON line on the caller's logger at the record's own level, as `worker <job>: <msg>` (capped at 500 characters). A line that is not JSON goes out at WARNING. The coordinator runs the job inside `log_capture.zone_scope`, so the lines are zone-tagged. A non-zero exit raises `ProcessJobError` with the last 500 characters of stderr. DEBUG lines in the coordinator mark start and return (`Worker job started` / `Worker job returned`, with seconds).
+After the child exits, `_relay_logs` re-emits each stderr JSON line through the logger named in the record (the record's own module logger, so per-module log levels still apply), at the record's own level, as `worker <job>: <msg>`. A message over 8,000 characters keeps its head and its tail (a traceback's failing frame). A line that is not JSON goes out at WARNING on the caller's logger. The child logs at the caller logger's effective level, sent in the request envelope (`log_level`), so DEBUG is relayed when the parent logs DEBUG. The child points fd 1 at stderr and writes the envelope to a saved copy of the real stdout, so even a write straight to fd 1 cannot corrupt it; an envelope that is not a JSON object raises `ProcessJobError`. A job error carries its last frame (`RuntimeError: msg (at file.py:12 in func)`). The coordinator runs the job inside `log_capture.zone_scope`, so the lines are zone-tagged. A non-zero exit raises `ProcessJobError` with the last 500 characters of stderr. DEBUG lines in the coordinator mark start and return (`Worker job started` / `Worker job returned`, with seconds).
 
 ### Fallback
 

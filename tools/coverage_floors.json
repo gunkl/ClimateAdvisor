@@ -89,6 +89,7 @@
     "override_orphaned_grace.py": 100.0,
     "override_supersession.py": 100.0,
     "own_write_echo.py": 100.0,
+    "process_offload.py": 98.7,
     "prediction_accuracy.py": 96.8,
     "prediction_engines.py": 100.0,
     "predictor_v4.py": 97.8,

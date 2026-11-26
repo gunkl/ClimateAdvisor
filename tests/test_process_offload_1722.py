@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import logging
@@ -34,6 +35,9 @@ def _jobs():
         "noisy",
         "not_json",
         "hard_exit",
+        "debug_line",
+        "long_message",
+        "fd_garbage",
     ):
         po._register_job_for_tests(f"t_{name}", _MOD, name, _TESTS_DIR)
     yield
@@ -76,10 +80,16 @@ def test_run_job_unknown_and_allowlisted_resolution() -> None:
 
 
 def test_child_exception_is_process_job_error_and_logs_relayed(caplog: pytest.LogCaptureFixture) -> None:
-    with caplog.at_level(logging.INFO, logger="test_offload"), pytest.raises(po.ProcessJobError) as exc:
+    with (
+        caplog.at_level(logging.INFO, logger="test_offload"),
+        caplog.at_level(logging.INFO),
+        pytest.raises(po.ProcessJobError) as exc,
+    ):
         _run("t_boom", {"x": 7}, "process")
     assert "RuntimeError: kaboom" in str(exc.value)
-    by_level = {r.levelno: r.getMessage() for r in caplog.records if r.name == "test_offload"}
+    assert "(at offload_test_jobs_1722.py:" in str(exc.value) and "in boom)" in str(exc.value)  # the failing frame
+    # each record is relayed through the job's own module logger, with the job name in the message
+    by_level = {r.levelno: r.getMessage() for r in caplog.records if r.name == "offload_test_jobs"}
     assert "worker t_boom: about to fail x=7" in by_level[logging.WARNING]
     assert any(r.levelno == logging.INFO and "info line" in r.getMessage() for r in caplog.records)
     # the child's traceback is relayed too
@@ -89,6 +99,7 @@ def test_child_exception_is_process_job_error_and_logs_relayed(caplog: pytest.Lo
 def test_non_json_stderr_relayed_at_warning_and_stdout_not_corrupted(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO, logger="test_offload"):
         assert _run("t_noisy", {}, "process") == "ok"
+    assert [r.name for r in caplog.records if "raw stderr line" in r.getMessage()] == ["test_offload"]
     assert any(r.levelno == logging.WARNING and "raw stderr line" in r.getMessage() for r in caplog.records)
 
 
@@ -123,11 +134,21 @@ def _capture_spawn(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
 def test_timeout_kills_and_reaps_child(monkeypatch: pytest.MonkeyPatch) -> None:
     procs = _capture_spawn(monkeypatch)
-    with pytest.raises(po.ProcessJobError, match="timed out after 1 s"):
-        _run("t_sleeper", {"s": 60}, "process", timeout_s=1)
-    assert len(procs) == 1
-    assert procs[0].returncode is not None  # reaped: no zombie
-    assert procs[0].returncode < 0  # killed by signal
+
+    async def scenario() -> None:
+        with pytest.raises(po.ProcessJobError, match="timed out after 1 s"):
+            await po.async_run_job(
+                "t_sleeper", {"s": 60}, executor_job=_executor, logger=_LOGGER, timeout_s=1, mode="process"
+            )
+        # Checked here, before asyncio.run's teardown could reap a child the job left behind.
+        assert len(procs) == 1
+        proc = procs[0]
+        assert proc.returncode is not None  # the wait finished
+        assert proc.returncode < 0  # killed by signal
+        with pytest.raises(ChildProcessError):  # the pid is gone: nothing left to wait for (no zombie)
+            os.waitpid(proc.pid, os.WNOHANG)  # noqa: ASYNC222 - non-blocking probe
+
+    asyncio.run(scenario())
 
 
 def test_cancel_kills_and_reaps_child(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,6 +315,7 @@ def _run_child_inprocess(
     monkeypatch.setattr(sys, "stdin", stdin)
     monkeypatch.setattr(sys, "stdout", stdout)
     monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.setattr(po, "_protect_stdout", lambda *a: out_buf)  # the fd shuffle has its own test
     monkeypatch.setattr(po, "_TEST_JOBS", dict(po._TEST_JOBS))
     monkeypatch.setattr(sys, "path", list(sys.path))
     rc = po._child_main()
@@ -307,7 +329,9 @@ def test_child_main_success_and_failure_inprocess(monkeypatch: pytest.MonkeyPatc
     assert json.loads(out)["result"]["sum"] == 5
     rc, out, err = _run_child_inprocess(monkeypatch, {"job": "c_boom", "payload": {"x": 1}}, [extra])
     assert rc == 0
-    assert json.loads(out) == {"ok": False, "error": "RuntimeError: kaboom"}
+    error = json.loads(out)["error"]
+    assert error.startswith("RuntimeError: kaboom (at offload_test_jobs_1722.py:") and error.endswith("in boom)")
+    assert json.loads(out)["ok"] is False
     levels = [json.loads(line)["level"] for line in err.splitlines()]
     assert logging.WARNING in levels and logging.ERROR in levels
 
@@ -337,10 +361,127 @@ def test_json_line_handler_never_raises() -> None:
     handler.emit(logging.LogRecord("n", logging.INFO, "f", 1, "m", None, None))
 
 
-def test_relay_logs_ignores_blank_and_caps_long_lines(caplog: pytest.LogCaptureFixture) -> None:
-    long = "x" * 5000
+def test_relay_logs_ignores_blank_and_keeps_head_and_tail_of_long_messages(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    long = "x" * 20000
+    frame = 'File "job.py", line 9, in failing_frame\nValueError: the end'
+    line = json.dumps({"level": logging.ERROR, "name": "a.b", "msg": f"Traceback head {long}\n{frame}"})
+    with caplog.at_level(logging.INFO):
+        po._relay_logs(_LOGGER, "j", f"\n{line}\n".encode())
+    assert len(caplog.records) == 1
+    rec = caplog.records[0]
+    msg = rec.getMessage()
+    assert rec.name == "a.b" and rec.levelno == logging.ERROR
+    assert msg.startswith("worker j: Traceback head")
+    assert msg.endswith("in failing_frame\nValueError: the end")  # the tail survives
+    assert "...[truncated]..." in msg
+    assert len(msg) <= po._LOG_LINE_CAP + len("worker j: ")
+    assert po._LOG_LINE_CAP >= 8000
+
+
+def test_long_child_message_keeps_its_tail_through_a_real_child(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO, logger="test_offload"):
-        po._relay_logs(_LOGGER, "j", f"\n{long}\n".encode())
-    msgs = [r.getMessage() for r in caplog.records]
-    assert len(msgs) == 1
-    assert len(msgs[0]) < 600
+        assert _run("t_long_message", {}, "process") == "ok"
+    (rec,) = [r for r in caplog.records if r.name == "offload_test_jobs"]
+    assert rec.getMessage().endswith("-LAST-FRAME-MARKER")
+    assert len(rec.getMessage()) < 8100
+
+
+def test_parent_debug_level_reaches_the_child_and_info_does_not(caplog: pytest.LogCaptureFixture) -> None:
+    """The child logs at the caller logger's effective level: DEBUG is relayed only when the parent shows DEBUG."""
+    logging.getLogger("offload_test_jobs").setLevel(logging.NOTSET)
+    with caplog.at_level(logging.DEBUG, logger="test_offload"), caplog.at_level(logging.DEBUG):
+        _run("t_debug_line", {}, "process")
+    got = {r.levelno: r.name for r in caplog.records if r.getMessage().startswith("worker t_debug_line")}
+    assert got == {
+        logging.DEBUG: "offload_test_jobs.sub",
+        logging.INFO: "offload_test_jobs.sub",
+        logging.WARNING: "offload_test_jobs.sub",
+    }
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="test_offload"), caplog.at_level(logging.DEBUG):
+        _run("t_debug_line", {}, "process")
+    levels = {r.levelno for r in caplog.records if r.getMessage().startswith("worker t_debug_line")}
+    assert levels == {logging.INFO, logging.WARNING}
+
+
+def test_per_module_log_level_applies_to_relayed_records(caplog: pytest.LogCaptureFixture) -> None:
+    """A user who set a module logger to ERROR does not see that module's relayed WARNING lines."""
+    module_logger = logging.getLogger("offload_test_jobs")
+    module_logger.setLevel(logging.ERROR)
+    try:
+        with (
+            caplog.at_level(logging.INFO, logger="test_offload"),
+            caplog.at_level(logging.DEBUG),
+            pytest.raises(po.ProcessJobError),
+        ):
+            _run("t_boom", {"x": 1}, "process")
+    finally:
+        module_logger.setLevel(logging.NOTSET)
+    assert [r for r in caplog.records if r.name == "offload_test_jobs"] == []  # its WARNING and INFO lines are dropped
+    # other modules' lines (the child's own ERROR "Worker job failed") are not affected
+    assert any(r.name == po.__name__ and r.levelno == logging.ERROR for r in caplog.records)
+
+
+def test_child_log_level_from_envelope_inprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    extra = json.dumps({"jobs": {"c_dbg": [_MOD, "debug_line"]}, "paths": [_TESTS_DIR]})
+    _, _, err = _run_child_inprocess(
+        monkeypatch, {"job": "c_dbg", "payload": {}, "log_level": logging.WARNING}, [extra]
+    )
+    assert [json.loads(line)["level"] for line in err.splitlines()] == [logging.WARNING]
+    _, _, err = _run_child_inprocess(monkeypatch, {"job": "c_dbg", "payload": {}, "log_level": logging.DEBUG}, [extra])
+    assert [json.loads(line)["level"] for line in err.splitlines()] == [logging.DEBUG, logging.INFO, logging.WARNING]
+    _, _, err = _run_child_inprocess(monkeypatch, {"job": "c_dbg", "payload": {}, "log_level": "loud"}, [extra])
+    assert [json.loads(line)["level"] for line in err.splitlines()] == [logging.INFO, logging.WARNING]
+
+
+def test_job_writing_to_fd_1_does_not_corrupt_the_result(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="test_offload"):
+        assert _run("t_fd_garbage", {}, "process") == "ok"
+    # fd 1 was pointed at stderr, so the garbage came out as a (non-JSON) log line
+    assert any("garbage written to fd 1" in r.getMessage() for r in caplog.records)
+
+
+def test_protect_stdout_redirects_fd_1_to_stderr_and_keeps_the_real_stdout() -> None:
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    os.set_blocking(out_r, False)  # a broken redirect fails the test instead of hanging it
+    os.set_blocking(err_r, False)
+    try:
+        stream = po._protect_stdout(out_w, err_w)
+        os.write(out_w, b"stray")  # a write to "fd 1"
+        stream.write(b"envelope")
+        stream.flush()
+        assert os.read(err_r, 100) == b"stray"
+        assert os.read(out_r, 100) == b"envelope"
+    finally:
+        for fd in (out_r, out_w, err_r, err_w):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def _spawn_printing(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
+    """Make the worker a real child that ignores the job and writes ``code``'s output as its envelope."""
+    real = asyncio.create_subprocess_exec
+
+    async def fake(*_a: Any, **k: Any) -> Any:
+        return await real(sys.executable, "-c", f"import sys; sys.stdin.read(); {code}", **k)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "sys.stdout.write('this is not json')",
+        "sys.stdout.write('')",
+        "sys.stdout.write('[1, 2]')",
+        "sys.stdout.write('\"text\"')",
+        "sys.stdout.buffer.write(b'\\xff\\xfe')",
+    ],
+)
+def test_corrupt_envelope_is_process_job_error(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
+    _spawn_printing(monkeypatch, code)
+    with pytest.raises(po.ProcessJobError, match="unreadable result"):
+        _run("t_echo", {"xs": [1]}, "process")

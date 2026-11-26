@@ -1849,6 +1849,8 @@ def _fit_problem(
         warm_start is not None
         and warm_start.schema_version == V4_SCHEMA_VERSION
         and warm_start.primary == sensor_list[0]
+        # an early "none" model (Issue #1722) holds the default house and nodes: nothing to warm-start from
+        and warm_start.fit.get("reason") != REASON_UNDER_MIN_DAYS
     ):
         warm_applied = True
         hp0.update({k: float(v) for k, v in warm_start.house.items() if k in HOUSE_BOUNDS})

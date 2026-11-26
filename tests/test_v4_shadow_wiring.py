@@ -584,6 +584,7 @@ def test_model_file_round_trip_private_and_atomic(fake: FakePredictor, tmp_path:
     store.v4_model = {"schema_version": 1, "primary": "climate.a", "confidence": "low"}
     store.v4_mass_f, store.v4_mass_at = 66.25, "2026-11-06T10:00:00+00:00"
     store.last_fit, store.last_fit_error = {"ok": False, "reason": "nightly"}, "fit failed; see the log"
+    store.fit_attempt_at = "2026-11-26T03:15:00+00:00"
     assert store.save() is True
     assert not list(tmp_path.glob("*.tmp"))
     if sys.platform != "win32":
@@ -597,11 +598,13 @@ def test_model_file_round_trip_private_and_atomic(fake: FakePredictor, tmp_path:
         "last_fit_error",
         "night_validation",
         "unusable_fit",  # Issue #1529: the last unusable refit beside the model kept in use
+        "fit_attempt_at",  # Issue #1722: when the last fit / night replay started (restart throttle)
     }
     again = V4ModelStore(tmp_path, entry_id="zoneA")
     again.load()
     assert (again.v4_model, again.v4_mass_f, again.v4_mass_at) == (store.v4_model, 66.25, "2026-11-06T10:00:00+00:00")
     assert again.last_fit == store.last_fit and again.last_fit_error == store.last_fit_error
+    assert again.fit_attempt_at == "2026-11-26T03:15:00+00:00"
 
 
 @pytest.mark.parametrize("content", [None, "", "not json{", "[]", '{"model": "oops", "mass_f": true, "mass_at": 5}'])

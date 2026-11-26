@@ -676,12 +676,17 @@ class V4ModelStore:
         {"v": 1, "model": <predictor_v4.to_dict(...)> | null, "mass_f": 66.2 | null, "mass_at": iso | null,
          "last_fit": {"at", "reason", "seconds", "ok"} | null, "last_fit_error": str | null,
          "night_validation": <night_replay.validation_record(...)> | null,
-         "unusable_fit": {"count", "at", "reason", "fit_reason", "fitted_at", "kept_fitted_at"} | null}
+         "unusable_fit": {"count", "at", "reason", "fit_reason", "fitted_at", "kept_fitted_at"} | null,
+         "fit_attempt_at": iso | null}
 
     ``night_validation`` (Issue #1230 R6) is the nightly recorded-night replay that gates the bedroom night strategy
     (``night_strategy.NightValidation`` + the evidence hours); an older file without it simply reads as ``null``.
     ``unusable_fit`` (Issue #1529) records the last refit that came back unusable (confidence ``none``) while a usable
     ``model`` was kept for the decisions; ``null`` once a usable fit replaces the model (and in older files).
+    ``fit_attempt_at`` (Issue #1722) is the wall-clock ISO time the last fit or night replay STARTED, saved before the
+    work begins: a restart inside ``V4_FIT_RETRY_MIN_INTERVAL_S`` of it does not refit at once (a fit that the restart
+    killed writes no ``last_fit``). Additive, so the format version stays 1: ``load`` reads every key with ``.get``
+    and never checks ``v``, and an older release simply ignores the key (and drops it on its next save).
 
     Same persistence contract as ``V4Archive``: blocking load/save via the executor, atomic, 0o600, never raise.
     """
@@ -695,6 +700,7 @@ class V4ModelStore:
         self.last_fit_error: str | None = None
         self.night_validation: dict | None = None
         self.unusable_fit: dict | None = None
+        self.fit_attempt_at: str | None = None
         self.dirty = False
 
     def load(self) -> None:
@@ -702,6 +708,7 @@ class V4ModelStore:
         self.v4_model = self.v4_mass_f = self.v4_mass_at = self.last_fit = self.last_fit_error = None
         self.night_validation = None
         self.unusable_fit = None
+        self.fit_attempt_at = None
         self.dirty = False
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
@@ -731,6 +738,8 @@ class V4ModelStore:
         self.night_validation = night if isinstance(night, dict) else None
         unusable = raw.get("unusable_fit")
         self.unusable_fit = unusable if isinstance(unusable, dict) else None
+        attempt = raw.get("fit_attempt_at")
+        self.fit_attempt_at = attempt if isinstance(attempt, str) else None
 
     def save(self) -> bool:
         """Atomic write (tempfile + os.replace), 0o600 on non-Windows. True on success. Never raises."""
@@ -746,6 +755,7 @@ class V4ModelStore:
                     "last_fit_error": self.last_fit_error,
                     "night_validation": self.night_validation,
                     "unusable_fit": self.unusable_fit,
+                    "fit_attempt_at": self.fit_attempt_at,
                 },
                 separators=(",", ":"),
                 allow_nan=False,

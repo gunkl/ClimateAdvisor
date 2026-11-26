@@ -85,3 +85,16 @@ def test_one_failing_save_does_not_stop_the_others():
     assert coord._today_record.hvac_runtime_minutes == pytest.approx(30.0)
     coord._v4_flush_on_shutdown.assert_awaited()
     assert coord.learning._state.last_shutdown_kind == "ha_stop"
+
+
+def test_stop_kills_running_v4_and_cycle_workers_before_saving():
+    """Issue #1722: a fit, replay or cycle refit running in a worker process is cancelled (and its worker killed)
+    at the start of the HA-stop write, so no worker outlives the stop and the saves never wait on one."""
+    coord = _running_coord()
+    order: list[str] = []
+    coord._v4_cancel_fit = MagicMock(side_effect=lambda: order.append("v4"))
+    coord._cycle_cancel_refit = MagicMock(side_effect=lambda: order.append("cycle"))
+    coord._chart_log.save = MagicMock(side_effect=lambda *a, **k: order.append("save"))
+    _at(30, coord._persist_on_ha_stop)
+    assert order[:2] == ["cycle", "v4"]
+    assert "save" in order[2:]

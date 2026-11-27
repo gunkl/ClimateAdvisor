@@ -289,26 +289,41 @@ def test_a_slow_executor_job_counts_against_the_executor_budget_not_the_loop_one
     assert m.overloaded
 
 
-def test_the_loop_lag_p99_over_budget_for_ten_minutes_enters(caplog) -> None:
+def _lag_minute(m: SelfMeasure, i: int, late_s: list[float]) -> None:
+    """One evaluation minute ``i``: 60 probe samples, the given late ones first, the rest 1 ms."""
+    for k in range(60):
+        m.add_lag(late_s[k] if k < len(late_s) else 0.001)
+    m.evaluate(T0 + 60.0 * i)
+
+
+def test_a_lagging_loop_for_ten_minutes_enters(caplog) -> None:
     caplog.set_level(logging.DEBUG, logger=LOGGER)
     m = SelfMeasure()
-    for _ in range(sm.LAG_SLOTS):
-        m.lag.add(0.080)  # a loop that is 80 ms late all the time
     for i in range(10):
-        m.evaluate(T0 + 60.0 * i)
+        _lag_minute(m, i, [0.080] * 60)  # a loop that is 80 ms late all the time
     assert m.overloaded
     (rec,) = _records(caplog, logging.WARNING)
-    assert "loop lag p99 80 ms against 50 ms" in rec.getMessage()
+    assert "loop lag (3 late ticks in a minute) 80 ms against 50 ms" in rec.getMessage()
 
 
-def test_a_single_loop_hiccup_never_flags_the_p99() -> None:
+def test_a_single_loop_hiccup_never_flags_a_minute() -> None:
     m = SelfMeasure()
-    for _ in range(sm.LAG_SLOTS - 1):
-        m.lag.add(0.001)
-    m.lag.add(0.400)
     for i in range(30):
-        m.evaluate(T0 + 60.0 * i)
-    assert not m.overloaded
+        _lag_minute(m, i, [0.400, 0.200])  # two slow callbacks every minute: under LAG_LATE_TICKS
+    assert not m.overloaded and m.snapshot()["over_minutes"] == 0
+
+
+def test_one_busy_minute_is_one_over_budget_minute_not_ten() -> None:
+    """Home Assistant starting (or a backup) makes the loop late for a minute: that minute only, not the next ten
+    verdicts too (the ten-minute p99 on the card still shows it)."""
+    m = SelfMeasure()
+    _lag_minute(m, 0, [0.080] * 30)
+    for i in range(1, 5):
+        _lag_minute(m, i, [])
+    assert m.snapshot()["loop_lag"]["p99_ms"] == pytest.approx(80.0)  # the card's ten-minute view still shows it
+    for i in range(5, 30):
+        _lag_minute(m, i, [])
+    assert m.snapshot()["over_minutes"] == 1 and not m.overloaded
 
 
 def test_nothing_is_logged_below_budget(caplog) -> None:

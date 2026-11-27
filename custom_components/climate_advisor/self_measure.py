@@ -12,12 +12,14 @@ Hass-free (stdlib only), so the tools can share :func:`callable_name`. Measures 
   the last :data:`LAG_SLOTS` samples (about ten minutes) live in a fixed ``array('d')`` ring, so nothing
   grows. A stall shows as ONE large sample (missed ticks are skipped, not replayed).
 * **Overloaded state.** Once a minute the probe's tick asks :meth:`SelfMeasure.evaluate`. A minute counts as "over
-  budget" when the ten-minute loop-lag p99 exceeds :data:`LOOP_BUDGET_MS`, or a loop-thread cost recorded in that
-  minute exceeded :data:`LOOP_BUDGET_MS`, or an executor job's thread CPU recorded in that minute exceeded
-  :data:`EXECUTOR_BUDGET_MS`. Enter when :data:`ENTER_OVER_MINUTES` of the last :data:`ENTER_WINDOW_MINUTES` minutes
-  were over budget; leave after :data:`CALM_S` without one. One WARNING on entering (the worst offender with its
-  numbers and the machine's figures), one INFO on leaving, one more WARNING if it lasts
-  :data:`PERSIST_S`. Nothing else changes.
+  budget" when at least :data:`LAG_LATE_TICKS` of that minute's own ticks were late by more than
+  :data:`LOOP_BUDGET_MS`, or a loop-thread cost recorded in that minute exceeded :data:`LOOP_BUDGET_MS`, or an
+  executor job's thread CPU recorded in that minute exceeded :data:`EXECUTOR_BUDGET_MS`. The lag verdict reads only
+  the minute's own ticks: the ten-minute p99 on the Debug card would carry one busy minute (Home Assistant starting,
+  a backup) into the next ten verdicts, which alone is the ten over-budget minutes that enter the state. Enter when
+  :data:`ENTER_OVER_MINUTES` of the last :data:`ENTER_WINDOW_MINUTES` minutes were over budget; leave after
+  :data:`CALM_S` without one. One WARNING on entering (the worst offender with its numbers and the machine's figures),
+  one INFO on leaving, one more WARNING if it lasts :data:`PERSIST_S`. Nothing else changes.
 
 The clock is injected (``evaluate(now)``), so the state machine is tested with a fake one.
 """
@@ -47,6 +49,9 @@ EXECUTOR_BUDGET_MS: Final = 500.0
 LAG_INTERVAL_S: Final = 1.0
 LAG_WINDOW_S: Final = 600.0
 LAG_SLOTS: Final = int(LAG_WINDOW_S / LAG_INTERVAL_S)
+# A minute's loop lag is over budget when at least this many of its (about 60) ticks were later than LOOP_BUDGET_MS:
+# sustained lag, not one slow callback (one stall is one sample).
+LAG_LATE_TICKS: Final = 3
 
 EVAL_INTERVAL_S: Final = 60.0
 ENTER_WINDOW_MINUTES: Final = 60
@@ -60,6 +65,7 @@ OTHER_NAME: Final = "<other>"
 TOP_JOBS: Final = 8  # rows in the debug payload
 
 HASS_DATA_KEY: Final = "climate_advisor_self_measure"
+_LAG_SOURCE: Final = f"loop lag ({LAG_LATE_TICKS} late ticks in a minute)"
 
 
 def callable_name(fn: Any) -> str:
@@ -148,6 +154,7 @@ class SelfMeasure:
         self.jobs: dict[str, CostStat] = {}
         self.loop_costs: dict[str, CostStat] = {}
         self.lag = LagWindow()
+        self._minute_top = [0.0] * LAG_LATE_TICKS  # this minute's LAG_LATE_TICKS largest lateness samples, descending
         # probe
         self._refs = 0
         self._loop: Any = None
@@ -243,7 +250,7 @@ class SelfMeasure:
             return
         now = loop.time()
         try:
-            self.lag.add(max(0.0, now - self._due))
+            self.add_lag(max(0.0, now - self._due))
             if self._last_eval is None or now - self._last_eval >= EVAL_INTERVAL_S:
                 self.evaluate(now)
         except Exception:  # noqa: BLE001 - never raise into the loop; keep ticking
@@ -255,10 +262,21 @@ class SelfMeasure:
         if self._loop is not None:
             self._handle = loop.call_at(nxt, self._tick)
 
+    def add_lag(self, seconds: float) -> None:
+        """One probe sample: into the ten-minute ring (the card) and this minute's verdict. Loop thread only."""
+        self.lag.add(seconds)
+        top = self._minute_top
+        if seconds > top[-1]:
+            top[-1] = seconds
+            top.sort(reverse=True)
+
     # -- the overloaded state ----------------------------------------------------------------------------------------
     def evaluate(self, now: float) -> None:
         """One minute's verdict at monotonic time ``now``; moves the overloaded state (logs outside the lock)."""
-        sources: list[tuple[str, float, float]] = [("loop lag p99", self.lag.percentile(99.0) * 1000.0, LOOP_BUDGET_MS)]
+        # the minute's LAG_LATE_TICKS-th largest lateness: over budget means that many ticks were later than it
+        minute_lag_ms = self._minute_top[-1] * 1000.0
+        self._minute_top = [0.0] * LAG_LATE_TICKS
+        sources: list[tuple[str, float, float]] = [(_LAG_SOURCE, minute_lag_ms, LOOP_BUDGET_MS)]
         with self._lock:
             for table, label, budget in (
                 (self.loop_costs, "", LOOP_BUDGET_MS),

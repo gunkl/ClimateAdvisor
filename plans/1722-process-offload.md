@@ -108,7 +108,7 @@ default "none" model the way the existing early returns do:
 - CHANGELOG with credit, version bump, and `fix_history` via `tools/add_fix_entry.py`.
 
 ### Out of scope (follow-up issues)
-- The warm-started fit always runs a second, cold LM pass (`predictor_v4.py:1970`).
+- The warm-started fit always runs a second, cold LM pass (`_fit_problem`; resolved by #1726: skipped when the warm LM converged within `WARM_RESTART_MIN_GAIN` of its start cost).
 - Event-loop jobs that are fine on x86 but may cost 0.1-0.3 s on a Pi: `build_timeline` (up to 29 ms on x86),
   `_v4_display_pending` (16 ms).
 

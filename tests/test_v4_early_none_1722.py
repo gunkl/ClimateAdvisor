@@ -185,7 +185,7 @@ class TestWarmStartSkipsAnEarlyNoneModel:
     def test_a_usable_previous_model_still_warm_starts(self, history, prev_model):
         cold = _fit(history[:OVER])
         warm = _fit(history[:OVER], warm_start=prev_model)
-        assert warm.fit["restarts"] == 1  # a warm start always gets the second, cold-defaults start
+        assert warm.fit["restarts"] == 1  # this warm start moved far (#1726), so it still gets the cold-defaults start
         assert p4.to_dict(warm) != p4.to_dict(cold)
 
 

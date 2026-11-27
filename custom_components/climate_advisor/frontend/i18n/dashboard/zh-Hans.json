@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "自然通风与节能器",
   "dashboard.debug.group.occupancy": "在家状态",
   "dashboard.debug.group.plan": "计划",
+  "dashboard.debug.group.performance": "性能",
   "dashboard.debug.group.units": "单位",
   "dashboard.debug.load_failed": "加载失败：{error}",
   "dashboard.debug.no": "否",

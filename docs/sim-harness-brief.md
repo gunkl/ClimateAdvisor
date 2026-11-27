@@ -100,9 +100,12 @@ Assertions tagged `track: "integration"` are skipped in Tier A without causing a
 **What it records** (rows sorted by max CPU):
 - `executor`: thread CPU and wall per callable handed to `FakeHass.async_add_executor_job`. The harness runs these inline, so thread CPU is the job's own cost. Flagged `OVER_BUDGET` above 500 ms.
 - `loop`: thread CPU per event-loop callback step, hooked at `asyncio.events.Handle._run` (an asyncio internal, restored on exit). Flagged above 10 ms, highlighted above 20 ms.
+- `callback`: thread CPU and wall per `FakeScheduler` timer callback (the synchronous part; a coroutine it returns runs later as a `task`), named after the registered callable, looking through the scheduler's re-arming closures (Issue #1730).
 - `task`: the same per `FakeScheduler.enqueue_task` coroutine.
 - `worker`: wall time per `process_offload.async_run_job` call (inline in the sim).
 - `lines`: optional (`--perf-lines`), line counts for a few hot functions through `sys.monitoring`. It roughly doubles CPU time.
+
+**Nested spans (Issue #1730).** The harness runs executor jobs inline, so one would be counted twice, in the executor row and in the `loop`, `task` or `callback` row that contains it. The probe subtracts nested executor spans from the rows that contain them: a `loop`/`task`/`callback` row is the loop's own cost, and the job is read in the `executor` rows. `run_heavy_household` adds one generated household with a 7-day hourly forecast and a v4 model, reported as separate `household_*` rows (report only).
 
 **Overlap of the loop and task rows.** The harness runs a whole scheduler task inside one loop step, so a task's time is also inside a loop row. Do not add the two kinds together. Read `task` for the useful granularity and `loop` for the asyncio view.
 

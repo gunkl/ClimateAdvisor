@@ -85,6 +85,9 @@ ALLOWED: dict[tuple[str, str, str], str] = {
     ("prediction_engines.py", "control_path", "now - stamp"): _ISO,
     # swing.py is loaded standalone by tools/ and cannot import time_utils: its own stdlib helper (Issue #1607) keeps
     # the raw subtraction only for two naive (stub) clocks; aware values are compared in UTC.
+    ("self_measure.py", "_tick", "now - self._last_eval"): _MONOTONIC + " (loop.time(), the loop-lag probe)",
+    ("self_measure.py", "evaluate", "now - calm_since"): _MONOTONIC + " (loop.time(), the overloaded state)",
+    ("self_measure.py", "evaluate", "now - since"): _MONOTONIC + " (loop.time(), the overloaded state)",
     ("swing.py", "_coast_age_s", "now - off_dt"): "the naive-only branch of swing's stdlib UTC helper (#1607)",
     ("temperature.py", "is_sensor_stale", "now - last_seen"): _UTC_OR_HA_STATE,
     ("thermal_lead_time.py", "_warn_out_of_reach", "now - last"): _MONOTONIC,

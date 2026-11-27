@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "Wentylacja naturalna i ekonomizer",
   "dashboard.debug.group.occupancy": "Obecność",
   "dashboard.debug.group.plan": "Plan",
+  "dashboard.debug.group.performance": "Wydajność",
   "dashboard.debug.group.units": "Jednostki",
   "dashboard.debug.load_failed": "Nie udało się wczytać: {error}",
   "dashboard.debug.no": "nie",

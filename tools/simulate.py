@@ -744,6 +744,13 @@ def main() -> int:
         return _run(args)
     try:
         rc = _run(args)
+        if args.generate:
+            # Issue #1730: after the judged run (its result and exit status are final), one generated household with a
+            # 7-day forecast and a v4 model, booked as separate "household" rows. Report only: never raises.
+            try:
+                perf_probe.run_heavy_household(probe)
+            except Exception as exc:  # noqa: BLE001
+                print(f"perf household run failed (ignored): {exc}")
     finally:
         probe.__exit__(None, None, None)
     try:

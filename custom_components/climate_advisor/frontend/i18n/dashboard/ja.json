@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "自然換気とエコノマイザー",
   "dashboard.debug.group.occupancy": "在宅状況",
   "dashboard.debug.group.plan": "プラン",
+  "dashboard.debug.group.performance": "パフォーマンス",
   "dashboard.debug.group.units": "単位",
   "dashboard.debug.load_failed": "読み込めませんでした: {error}",
   "dashboard.debug.no": "いいえ",

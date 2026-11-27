@@ -23,6 +23,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from time import monotonic as _monotonic
 from time import perf_counter as _perf_counter
+from time import thread_time as _thread_time
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
@@ -45,7 +46,16 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from . import cycle_model, i18n, log_capture, prediction_engines, process_offload, v4_shadow, window_span
+from . import (
+    cycle_model,
+    i18n,
+    log_capture,
+    prediction_engines,
+    process_offload,
+    self_measure,
+    v4_shadow,
+    window_span,
+)
 from . import zone_capability as zc
 from .ai_settings_sync import is_ai_configured, provider_of
 from .automation import (
@@ -1514,6 +1524,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # shown only in the debug payload; nothing on a decision or display path reads it.
         self._timeline_latch = TimelineLatch()
         self._timeline_last: dict[str, Any] = {}
+        # Issue #1730 phase 4: what this zone's build costs the loop (thread CPU: last / max / EWMA), and the
+        # install-wide self-measurement (executor job CPU, loop-lag probe, overloaded state) every zone shares.
+        self._timeline_cpu = self_measure.CostStat()
+        self._perf = self_measure.for_hass(hass)
+        self._perf_held = False
         self._timeline_failed_logged = False
         self._timeline_dirty: str | None = None
         # Issue #1230 R6: tonight's bedroom strategy (advice) is computed beside the timeline and applied to it.
@@ -2421,8 +2436,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _on_homeassistant_stop))
 
+        self._perf_start()
         self._log_narrow_setpoint_bands()
         _LOGGER.info("Climate Advisor v%s coordinator setup complete", VERSION)
+
+    def _perf_start(self) -> None:
+        """Issue #1730: take this zone's reference on the instance-wide loop-lag probe (the first one starts it)."""
+        perf = getattr(self, "_perf", None)
+        if perf is None or getattr(self, "_perf_held", False):
+            return
+        self._perf_held = True
+        perf.acquire(getattr(self.hass, "loop", None))
+
+    def _perf_stop(self) -> None:
+        """Mirror of ``_perf_start`` (unload and HA stop): drop the reference; the last one cancels the probe."""
+        perf = getattr(self, "_perf", None)
+        if perf is None or not getattr(self, "_perf_held", False):
+            return
+        self._perf_held = False
+        perf.release()
 
     def _log_narrow_setpoint_bands(self) -> None:
         """Name a narrow or inverted setpoint band as the cause of what follows from it (Issue #1514).
@@ -2783,6 +2815,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         still tagged with the calling zone. Purely additive: same return
         value (the executor future) and exception propagation as before.
         """
+        perf = getattr(self, "_perf", None)
+        if perf is not None:
+            fn = perf.timed(fn)  # Issue #1730: thread CPU per job, measured inside the worker thread
         return self.hass.async_add_executor_job(log_capture.bind_zone_for_executor(fn), *args)
 
     async def _process_job(self, job: str, payload_fn: Callable[[], dict[str, Any]], timeout_s: float) -> Any:
@@ -8286,11 +8321,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         self._timeline_dirty = None
         started = _perf_counter()
+        cpu_started = _thread_time()  # the build runs on the loop thread: its thread CPU is what the loop paid
         snap = self._timeline_snapshot(c)
         force = trigger if trigger in ("occupancy",) else None
         outcome = latch.update(snap, force=force)
         self._timeline_night_apply(snap, outcome.regenerated)
         cost_ms = (_perf_counter() - started) * 1000.0
+        self._record_timeline_cpu(_thread_time() - cpu_started)
         self._timeline_last = {
             "at": snap.now.isoformat(),
             "trigger": trigger,
@@ -8309,6 +8346,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         else:
             _LOGGER.debug("Operation timeline (shadow) kept: %d steps, %.1f ms", len(outcome.timeline.steps), cost_ms)
+
+    def _record_timeline_cpu(self, cpu_s: float) -> None:
+        """Issue #1730: keep last / max / EWMA of one build's thread CPU; the install-wide probe judges it against
+        the loop budget. Measuring never raises into the cycle."""
+        try:
+            self._timeline_cpu.add(cpu_s * 1000.0)
+            perf = getattr(self, "_perf", None)
+            if perf is not None:
+                perf.record_loop_cost("timeline build", cpu_s)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("timeline cpu record failed", exc_info=True)
+
+    def performance_debug(self) -> dict[str, Any]:
+        """Issue #1730: the self-measurement for the Debug card. English labels; ``{}`` when unavailable."""
+        try:
+            perf = getattr(self, "_perf", None)
+            out: dict[str, Any] = dict(perf.snapshot()) if perf is not None else {}
+            cpu = getattr(self, "_timeline_cpu", None)
+            out["timeline_build"] = cpu.as_dict() if cpu is not None else {}
+            return out
+        except Exception:  # noqa: BLE001 - a debug field must never break the debug payload
+            _LOGGER.debug("performance_debug failed", exc_info=True)
+            return {}
 
     def _timeline_snapshot(self, c: DayClassification) -> TimelineSnapshot:
         """Everything the timeline reads, taken from the live plan (read-only)."""
@@ -21718,6 +21778,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             },
             # Issue #1230 R3a: the operation timeline (shadow, debug only: nothing reads it for a decision or display).
             "operation_timeline": self.timeline_debug(),
+            # Issue #1730 phase 4: what Climate Advisor costs Home Assistant (debug only; measurement, no behaviour).
+            "performance": self.performance_debug(),
             "startup_coalesce_active": self._startup_coalesce_active,
             "startup_coalesce_seconds_remaining": (
                 max(
@@ -21802,6 +21864,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         The diagnostics write is not latched and still runs.
         """
         self._ha_stopping = True
+        self._perf_stop()
         engine = getattr(self, "automation_engine", None)
         if engine is not None:
             engine.mark_ha_stopping()
@@ -21913,6 +21976,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self._v4_flush_on_shutdown()
         finally:
             # Issue #1102: release always runs, even if a save above raised.
+            self._perf_stop()  # Issue #1730: the loop-lag probe's reference (the last zone cancels it)
             self._v4_cancel_fit()  # Issue #1230 R1: a running fit's result is dropped; the executor thread just ends
             # Cancel any pending occupancy away setback timer
             self._cancel_occupancy_away_timer()

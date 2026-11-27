@@ -2878,8 +2878,8 @@ def splice_outlook(
         outlook is None
         or outlook.day != now.date()
         or loop.day != now.date()
-        or outlook.generated_at > now
-        or now - outlook.generated_at > timedelta(hours=TIMELINE_OUTLOOK_MAX_AGE_H)
+        # real elapsed time (epoch seconds), right across a daylight-saving change (Issue #1244)
+        or not 0.0 <= now.timestamp() - outlook.generated_at.timestamp() <= TIMELINE_OUTLOOK_MAX_AGE_H * 3600.0
         or outlook.zone != loop.zone
     ):
         return loop, None

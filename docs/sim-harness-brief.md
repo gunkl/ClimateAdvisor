@@ -95,6 +95,8 @@ Assertions tagged `track: "integration"` are skipped in Tier A without causing a
 
 `tools/sim_harness/perf_probe.py` measures how much CPU the code under simulation takes, so a slow job shows up before it reaches a home. Run it with `python tools/simulate.py --generate N --seeds S --perf-report [PATH]` (default `perf_report.json`). The nightly `generated-days` job does this and uploads the JSON as the `perf-report` artifact.
 
+**Environment (Issue #1730).** The stores read and write through `store_json.py`, which needs `orjson`. `tools/simulate.py` runs under `.venv-test`, whose `test` dependency group now includes `orjson` (Home Assistant core pins it, so production always has it); a venv built before that must be refreshed (`uv sync --locked --only-group test`, or delete and let `scripts/test.py` recreate it).
+
 **What it records** (rows sorted by max CPU):
 - `executor`: thread CPU and wall per callable handed to `FakeHass.async_add_executor_job`. The harness runs these inline, so thread CPU is the job's own cost. Flagged `OVER_BUDGET` above 500 ms.
 - `loop`: thread CPU per event-loop callback step, hooked at `asyncio.events.Handle._run` (an asyncio internal, restored on exit). Flagged above 10 ms, highlighted above 20 ms.

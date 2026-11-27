@@ -10,7 +10,7 @@
 | When is a snapshot recorded, and when is it not? | Only on a successful fetch that returned entries, from the single choke point `_refresh_hourly_forecast()`. A kept-forecast reuse during an outage and the chart's synthetic extended days are never recorded. | [Record Rules](#record-rules), [Outage Behavior](#outage-behavior) |
 | What if the forecast is fetched several times in one hour? | The latest fetch in a local clock hour REPLACES that hour's snapshot; a refetch with identical content (same source, grid start and temperatures, at any minute of the hour) changes nothing, keeps the earlier issue time and triggers no write. | [Record Rules](#record-rules) |
 | What is on disk, and how big does it get? | `climate_advisor_forecast_archive_<entry_id>.json`, `{"snapshots": [{"i","s","h0","t":[...]}]}`, one hourly grid per snapshot; 365 days at 72 h is about 3.9 MB. | [On-Disk Schema](#on-disk-schema), [Retention and Size](#retention-and-size) |
-| How do the v4 fit and the backtest read it? | `ForecastArchive.get_snapshots(start, end)` returns snapshots issued in `[start, end)`, ascending, as `{"issued","source","hours":[[iso_hour, temp_f], ...]}`; never raises. | [R1 Consumer Contract](#r1-consumer-contract) |
+| How do the v4 fit and the backtest read it? | `ForecastArchive.get_snapshots(start, end)` returns snapshots issued in `[start, end)`, ascending, as `{"issued","source","hours":[[iso_hour, temp_f], ...]}`; never raises. Since Issue #1730 `get_snapshots_raw(start, end)` returns the same selection in the compact stored form, for a worker job to decode with the hass-free `decode_snapshot`. | [R1 Consumer Contract](#r1-consumer-contract) |
 | Can the archive break a coordinator cycle or block the event loop? | No. `record()` and `get_snapshots()` never raise; the coordinator also wraps the call; `load()`/`save()` run via the executor and are registered in `_BLOCKING_METHODS`. | [Failure Handling](#error-conditions) |
 | What temperature unit is stored? | Internal °F, 1 decimal, verbatim. The list is already normalised at its source (Issue #1015); the archive never converts. | [Invariants](#invariants) |
 
@@ -19,8 +19,8 @@
 The persisted hourly-forecast snapshot archive added by Issue #1230 R0 and its coordinator wiring.
 
 - **File:** `custom_components/climate_advisor/forecast_archive.py` (class `ForecastArchive`); constants in `const.py` (`FORECAST_ARCHIVE_FILE`, `FORECAST_ARCHIVE_HORIZON_HOURS = 72`, `FORECAST_ARCHIVE_MAX_DAYS = 365`)
-- **Coordinator wiring:** construction (`coordinator.py` `__init__`), `async_restore_state` load, `_refresh_hourly_forecast()` → `_record_forecast_archive()`; readers `_v4_run_fit` / the night replay pass `snapshots_fn=self._forecast_archive.get_snapshots`
-- **Entry points:** `ForecastArchive.record()`, `.get_snapshots()`, `.load()`, `.save()`
+- **Coordinator wiring:** construction (`coordinator.py` `__init__`), `async_restore_state` load, `_refresh_hourly_forecast()` → `_record_forecast_archive()`; readers `_v4_run_fit` / the night replay pass `snapshots_fn=self._forecast_archive.get_snapshots` and, since Issue #1730, `raw_snapshots_fn=self._forecast_archive.get_snapshots_raw`
+- **Entry points:** `ForecastArchive.record()`, `.get_snapshots()`, `.get_snapshots_raw()`, `forecast_archive.decode_snapshot()`, `.load()`, `.save()`
 
 **Out of scope:**
 
@@ -36,15 +36,15 @@ Persistence mirrors `ChartStateLog` ([Chart Log Spec](chart-log-spec.md)): atomi
 2. `load()` has been called once before the first `record()` in normal operation (coordinator `async_restore_state`); `record()` on an unloaded archive still works on an empty list.
 3. `record(issued, source, hourly)`: `hourly` is a list of `(forecast_hour, temp_F)` pairs already in internal °F. A naive `issued` is read as UTC; a naive forecast hour is read in the issue time's timezone.
 4. `load()` and `save()` are blocking file I/O and MUST be run through the executor (never directly on the event loop).
-5. `get_snapshots(start, end)`: naive bounds are read as UTC.
+5. `get_snapshots(start, end)` / `get_snapshots_raw(start, end)`: naive bounds are read as UTC.
 
 ## Post-conditions
 
 1. After `record()` returns `True`, the in-memory list holds the new (or replaced) snapshot as its last item; nothing has been written to disk. The caller saves.
 2. `record()` returns `False` (archive unchanged) when no usable point remains, a snapshot with identical content (`s`, `h0`, `t`; the issue minute is ignored) is already held for that hour, or an unexpected error occurred.
-3. After `save()` without an `OSError`: the file holds `{"snapshots": [...]}` in compact JSON, permissions `0o600` on non-Windows, no `.tmp` left. On failure the in-memory list and the original file are unchanged and an ERROR is logged.
+3. After `save()` without an `OSError`: the file holds `{"snapshots": [...]}` as plain JSON, one snapshot per line (`store_json.dumps`, Issue #1730: orjson, no single long GIL hold; the same format, readable by older versions, which also still load an older one-line file), permissions `0o600` on non-Windows, no `.tmp` left. On failure the in-memory list and the original file are unchanged and an ERROR is logged.
 4. After `load()`: `_snapshots` holds only structurally valid snapshots issued within `max_days`, sorted ascending by issue time; any file-level problem leaves it `[]`.
-5. `get_snapshots()` returns a list (possibly `[]`) ascending by issue time, each item decoded to the read shape.
+5. `get_snapshots()` returns a list (possibly `[]`) ascending by issue time, each item decoded to the read shape; `get_snapshots_raw()` returns the same snapshots in the stored shape.
 
 ## Invariants
 
@@ -73,6 +73,8 @@ The coordinator then saves only when `record()` returned `True`: `await self._ex
 During a weather outage `_get_hourly_forecast_data()` returns nothing and `_refresh_hourly_forecast()` reuses the kept forecast (Issue #1337). That branch never calls the archive: re-recording kept data under a new issue time would stamp stale forecasts as fresh and corrupt lead-time error scoring. The archive therefore has a gap for the outage, and no synthetic day is ever added. On recovery the next successful fetch records normally. See [Forecast Pipeline - Kept forecast](forecast-pipeline-spec.md#kept-forecast-issue-1337).
 
 ## On-Disk Schema
+
+Layout (Issue #1730): written one snapshot per line by `store_json.dumps`; the example below is the same JSON, shown compact. Older releases read it unchanged.
 
 File: `climate_advisor_forecast_archive_<entry_id>.json` in the HA config directory (via `resolve_entry_scoped_path`; with an empty `entry_id` the unscoped `climate_advisor_forecast_archive.json`). A new file, so there is no legacy file to migrate.
 
@@ -110,7 +112,7 @@ Decoded read shape (see below): `{"issued": "2026-11-06T14:05-07:00", "source": 
 | Top-level not a dict, or `snapshots` missing/not a list | WARNING, `[]` | Empty archive |
 | Individual snapshot invalid or expired | Dropped (DEBUG count) | Remaining kept |
 | Any other exception in `load()` | WARNING with traceback, `[]` | Empty archive |
-| `json.dumps` raises | ERROR, return; no `.tmp`, file unchanged | `None` |
+| `store_json.dumps` raises | ERROR, return; no `.tmp`, file unchanged | `None` |
 | `OSError` on tempfile write or `os.replace` | ERROR, `.tmp` unlinked, file unchanged | `None` |
 | Exception inside `record()` | WARNING with traceback | `False` |
 | Exception in `_record_forecast_archive()` (incl. executor save failure) | WARNING in `_refresh_hourly_forecast()` | Cycle continues; forecast already installed |
@@ -123,6 +125,8 @@ Decoded read shape (see below): `{"issued": "2026-11-06T14:05-07:00", "source": 
 - Snapshots whose issue time is in `[start, end)` (half-open), ascending by issue time. Naive bounds are read as UTC.
 - Each item: `{"issued": iso_str, "source": str, "hours": [[iso_hour_str, temp_f], ...]}`. `issued` and hour strings are ISO-8601 with minute precision and the local offset in force at recording. `temp_f` is a float in internal °F (1 dp). Hours with no provider entry are absent.
 - The lead time of an hour is `hour − issued`; the lead-0 hour is the hour containing `issued`.
+- **Order tracking (Issue #1730).** `_time_sorted_snapshots()` (as `ChartStateLog._time_sorted_rows`, #1598) verifies once, then incrementally, that the issue times are readable and non-decreasing (`_order`, one tuple replaced whole so an executor reader never sees a half-update). While true, `_select()` finds the window by bisection; an out-of-order list (a clock stepped back) or an unreadable issue time falls back to the original scan. Same selection either way.
+- `get_snapshots_raw(start, end)` returns the stored dicts of that selection (never mutated: a snapshot is replaced, not edited); `decode_snapshot(snap)` is the hass-free module function that turns one into the read shape, so a worker process can decode them.
 - Reads are from the in-memory list (loaded at startup). An offline tool without a coordinator constructs `ForecastArchive(config_dir, entry_id=...)` and calls `load()` first. The method is a pure read and safe to call from any thread (it iterates a `list()` copy).
 - Scoring against actual weather uses the `outdoor` series in the chart log ([Chart Log Spec](chart-log-spec.md)); this module does not provide actuals.
 
@@ -137,7 +141,7 @@ Decoded read shape (see below): `{"issued": "2026-11-06T14:05-07:00", "source": 
 - [`ForecastArchive.save`](../custom_components/climate_advisor/forecast_archive.py#L173) - atomic write
 - [`ForecastArchive.record`](../custom_components/climate_advisor/forecast_archive.py#L203) / [`_record`](../custom_components/climate_advisor/forecast_archive.py#L216) - snapshot encoding and replace rule
 - [`ForecastArchive._maybe_prune`](../custom_components/climate_advisor/forecast_archive.py#L282) - hourly-gated retention
-- [`ForecastArchive.get_snapshots`](../custom_components/climate_advisor/forecast_archive.py#L298) / [`_decode`](../custom_components/climate_advisor/forecast_archive.py#L318) - R1 read path
+- [`ForecastArchive.get_snapshots`](../custom_components/climate_advisor/forecast_archive.py#L323) / [`get_snapshots_raw`](../custom_components/climate_advisor/forecast_archive.py#L335) / [`_select`](../custom_components/climate_advisor/forecast_archive.py#L348) / [`_time_sorted_snapshots`](../custom_components/climate_advisor/forecast_archive.py#L367) / [`decode_snapshot`](../custom_components/climate_advisor/forecast_archive.py#L92) - R1 read path
 - [`const.py`](../custom_components/climate_advisor/const.py) - `FORECAST_ARCHIVE_FILE`, `_HORIZON_HOURS`, `_MAX_DAYS`
 - [`ClimateAdvisorCoordinator._refresh_hourly_forecast`](../custom_components/climate_advisor/coordinator.py#L5536) - single choke point
 - [`ClimateAdvisorCoordinator._record_forecast_archive`](../custom_components/climate_advisor/coordinator.py#L5564) - filter synthetic, parse, record, save via executor

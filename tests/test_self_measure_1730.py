@@ -232,6 +232,45 @@ def test_the_warning_says_the_delay_is_probably_elsewhere_when_our_work_was_smal
     assert "biggest recent cost" not in text and "v4_archive" not in text  # never blames Climate Advisor
 
 
+def test_one_big_save_of_ours_inside_sustained_lag_is_not_named_as_the_cause(caplog) -> None:
+    """Lag from elsewhere every minute; our hourly archive save (seconds of CPU on a Pi) lands in one of the late
+    minutes. One coincidence in ten does not make Climate Advisor the likely cause."""
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    m = SelfMeasure()
+    for i in range(10):
+        if i == 4:
+            m.record_job("v4_archive.V4Archive.save", 1.75)
+        _lag_minute(m, i, [0.080] * 5)
+    (rec,) = _records(caplog, logging.WARNING)
+    text = rec.getMessage()
+    assert "lined up with only 1 of the 10 late minutes (largest 1750 ms)" in text and "probably elsewhere" in text
+    assert "likely cause" not in text and "biggest recent cost" not in text
+
+
+def test_our_cost_in_half_of_the_late_minutes_is_named_as_the_likely_cause(caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    m = SelfMeasure()
+    for i in range(10):
+        if i % 2:
+            m.record_job("cycle_store.CycleStore.save", 0.9)
+        _lag_minute(m, i, [0.300] * 3)
+    (rec,) = _records(caplog, logging.WARNING)
+    text = rec.getMessage()
+    assert "biggest recent cost: executor job cycle_store.CycleStore.save 900 ms CPU" in text
+    assert "in 5 of the 10 late minutes), so it is the likely cause" in text and "elsewhere" not in text
+
+
+def test_the_back_to_normal_line_counts_from_the_first_late_minute_not_from_entering(caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    m = SelfMeasure()
+    for i in range(12):
+        _minute(m, i, over=True)  # late in minutes 0-11; entered at minute 9
+    for i in range(12, 72):
+        _minute(m, i, over=False)
+    (info,) = _records(caplog, logging.INFO)
+    assert "calm for 60 min after running late on and off for 12 min" in info.getMessage()
+
+
 def test_the_warning_with_no_recorded_work_at_all_says_elsewhere(caplog) -> None:
     caplog.set_level(logging.DEBUG, logger=LOGGER)
     m = SelfMeasure()

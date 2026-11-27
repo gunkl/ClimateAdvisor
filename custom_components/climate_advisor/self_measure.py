@@ -19,8 +19,9 @@ Hass-free (stdlib only), so the tools can share :func:`callable_name`. Measures 
   ticks: the ten-minute p99 on the Debug card would carry one busy minute (Home Assistant starting, a backup) into the
   next ten verdicts. Enter when :data:`ENTER_OVER_MINUTES` of the last :data:`ENTER_WINDOW_MINUTES` minutes were over
   budget; leave after :data:`CALM_S` without one. One WARNING on entering, one INFO on leaving, one more WARNING if it
-  lasts :data:`PERSIST_S`. The WARNING names the biggest recent cost of ours as the likely culprit only when it could
-  explain the lag (:data:`OWN_COST_EXPLAINS_MS`); otherwise it says the delay is probably elsewhere in Home Assistant.
+  lasts :data:`PERSIST_S`. The WARNING names the biggest recent cost of ours as the likely cause only when costs that
+  could explain the lag (:data:`OWN_COST_EXPLAINS_MS`) turned up in at least :data:`OWN_COST_SHARE` of the late
+  minutes; otherwise it says the delay is probably elsewhere in Home Assistant.
   Nothing else changes.
 
 The clock is injected (``evaluate(now)``), so the state machine is tested with a fake one.
@@ -49,6 +50,10 @@ LOOP_BUDGET_MS: Final = 50.0
 # A cost of ours at least this long (loop-thread time or an executor job's thread CPU) could plausibly make the loop
 # late, so the WARNING names it; a smaller one cannot explain the lag.
 OWN_COST_EXPLAINS_MS: Final = 50.0
+# ... but only when such a cost of ours turned up in at least this share of the late minutes. Sustained lag from
+# elsewhere overlaps a routine save of ours now and then (on a Pi an hourly archive save is seconds of CPU); one
+# coincidence in ten late minutes does not make us the likely cause.
+OWN_COST_SHARE: Final = 0.5
 
 LAG_INTERVAL_S: Final = 1.0
 LAG_WINDOW_S: Final = 600.0
@@ -165,9 +170,11 @@ class SelfMeasure:
         self._due = 0.0
         # overloaded state
         self._last_eval: float | None = None
-        self._flags: deque[tuple[bool, float, tuple[str, float] | None]] = deque(maxlen=ENTER_WINDOW_MINUTES)
+        # per judged minute: (over budget, its lag ms, our largest cost in it, when it was judged)
+        self._flags: deque[tuple[bool, float, tuple[str, float] | None, float]] = deque(maxlen=ENTER_WINDOW_MINUTES)
         self.overloaded = False
         self.overloaded_since: float | None = None
+        self._late_since: float | None = None  # the end of the episode's first over-budget minute
         self._last_over_at: float | None = None
         self._persist_logged = False
         self.episodes = 0
@@ -288,14 +295,15 @@ class SelfMeasure:
                     st.interval_max_ms = 0.0
         over = minute_lag_ms > LOOP_BUDGET_MS
         self._last_eval = now
-        self._flags.append((over, minute_lag_ms, own))
+        self._flags.append((over, minute_lag_ms, own, now))
         if over:
             self._last_over_at = now
-        over_minutes = sum(1 for flag, _lag, _own in self._flags if flag)
+        over_minutes = sum(1 for flag, *_rest in self._flags if flag)
         if not self.overloaded:
             if over_minutes >= ENTER_OVER_MINUTES:
                 self.overloaded = True
                 self.overloaded_since = now
+                self._late_since = min(at for flag, _lag, _own, at in self._flags if flag)
                 self._persist_logged = False
                 self.episodes += 1
                 self._log.warning(
@@ -312,12 +320,14 @@ class SelfMeasure:
         calm_since = self._last_over_at if self._last_over_at is not None else since
         if now - calm_since >= CALM_S:
             self.overloaded = False
+            late_since = self._late_since if self._late_since is not None else since
             self._log.info(
-                "Home Assistant's event loop is back to normal: calm for %d min after %d min running late",
+                "Home Assistant's event loop is back to normal: calm for %d min after running late on and off for "
+                "%d min",
                 int((now - calm_since) // 60),
-                int((calm_since - since) // 60),
+                int((calm_since - late_since) // 60) + 1,  # counted from the start of the first late minute
             )
-            self.overloaded_since = None
+            self.overloaded_since = self._late_since = None
             self._flags.clear()
         elif now - since >= PERSIST_S and not self._persist_logged:
             self._persist_logged = True
@@ -336,15 +346,25 @@ class SelfMeasure:
         return f"p99 {self.lag.percentile(99) * 1000:.0f} ms, max {self.lag.max() * 1000:.0f} ms over the last 10 min"
 
     def _culprit_text(self) -> str:
-        """Our biggest cost in the over-budget minutes, named as the likely cause only if it could explain the lag."""
-        costs = [own for flag, _lag, own in self._flags if flag and own is not None]
+        """Our biggest cost in the over-budget minutes, named as the likely cause only when costs of ours that could
+        explain the lag (:data:`OWN_COST_EXPLAINS_MS`) turned up in at least :data:`OWN_COST_SHARE` of those minutes."""
+        late = [own for flag, _lag, own, _at in self._flags if flag]
+        costs = [own for own in late if own is not None]
         worst = max(costs, key=lambda c: c[1]) if costs else None
-        if worst is not None and worst[1] >= OWN_COST_EXPLAINS_MS:
+        big = sum(1 for own in costs if own[1] >= OWN_COST_EXPLAINS_MS)
+        if worst is not None and big and big >= OWN_COST_SHARE * len(late):
             return (
-                f"Climate Advisor's biggest recent cost: {worst[0]} {worst[1]:.0f} ms CPU. "
+                f"Climate Advisor's biggest recent cost: {worst[0]} {worst[1]:.0f} ms CPU (work of ours over "
+                f"{OWN_COST_EXPLAINS_MS:.0f} ms in {big} of the {len(late)} late minutes), so it is the likely cause. "
                 "Climate Advisor only measures and reports this; nothing was changed"
             )
         largest = f"{worst[1]:.0f}" if worst is not None else "0"
+        if big:
+            return (
+                f"Climate Advisor's own work lined up with only {big} of the {len(late)} late minutes (largest "
+                f"{largest} ms), so the delay is probably elsewhere in Home Assistant (another integration, the "
+                "recorder, a backup). Nothing was changed"
+            )
         return (
             f"Climate Advisor's own work was small (largest {largest} ms), so the delay is probably elsewhere in "
             "Home Assistant (another integration, the recorder, a backup). Nothing was changed"
@@ -371,7 +391,7 @@ class SelfMeasure:
                 "p99_ms": round(self.lag.percentile(99.0) * 1000.0, 2),
             },
             "overloaded": self.overloaded,
-            "over_minutes": sum(1 for flag, _lag, _own in self._flags if flag),
+            "over_minutes": sum(1 for flag, *_rest in self._flags if flag),
             "episodes": self.episodes,
             "budgets_ms": {"loop_lag": LOOP_BUDGET_MS},
         }

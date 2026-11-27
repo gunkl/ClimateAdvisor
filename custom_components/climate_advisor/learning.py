@@ -22,7 +22,7 @@ from typing import Any, TypedDict
 
 from homeassistant.util import dt as dt_util
 
-from . import i18n
+from . import i18n, store_json
 from .const import (
     COMPLIANCE_THRESHOLD_LOW,
     LEARNING_DB_FILE,
@@ -1332,7 +1332,7 @@ class LearningEngine:
         migrate_legacy_storage_file(self._storage_dir, LEARNING_DB_FILE, self._entry_id)
         if self._db_path.exists():
             try:
-                data = json.loads(self._db_path.read_text())
+                data = store_json.loads(self._db_path.read_bytes())
                 if not isinstance(data, dict):
                     _LOGGER.warning("Learning state is not a JSON object, starting fresh")
                     self._state = LearningState()
@@ -1461,7 +1461,8 @@ class LearningEngine:
         call lost the race.
         """
         try:
-            serialized = json.dumps(asdict(self._state), indent=2)
+            # lossless: the stdlib encoding (NaN tokens, ASCII escapes) one top-level entry per line (Issue #1730)
+            serialized = store_json.dumps(asdict(self._state), lossless=True)
         except (TypeError, ValueError) as err:
             _LOGGER.error("Failed to serialize learning state: %s", err)
             return
@@ -1472,7 +1473,7 @@ class LearningEngine:
             suffix=".tmp",
         )
         try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            with os.fdopen(tmp_fd, "wb") as f:
                 f.write(serialized)
             os.replace(tmp_path_str, self._db_path)
             if sys.platform != "win32":

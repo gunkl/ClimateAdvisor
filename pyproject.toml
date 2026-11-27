@@ -19,6 +19,9 @@ test = [
     "voluptuous>=0.14",
     # property-based random-day generator (Issue #1128 Step 3, I3)
     "hypothesis>=6.170.15",
+    # JSON store reads/writes one element per line (store_json.py, Issue #1730). Home Assistant core pins orjson, so
+    # production always has it; the stubbed unit tier needs it named here.
+    "orjson>=3.10",
 ]
 test-ha = [
     # Pinned to the plugin release that pins HA 2026.10.4 (needs Python >=3.14.2).

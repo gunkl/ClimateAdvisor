@@ -20,6 +20,7 @@ import pytest
 
 from custom_components.climate_advisor import v4_shadow
 from custom_components.climate_advisor.const import V4_FIT_HOUR, V4_FIT_MINUTE, V4_FIT_STAGGER_S
+from custom_components.climate_advisor.forecast_archive import decode_snapshot
 from custom_components.climate_advisor.learning import LearningEngine
 from custom_components.climate_advisor.v4_archive import V4ModelStore, slot_key
 from tests.v4_fake_predictor import FakePredictor, install, uninstall
@@ -168,13 +169,19 @@ def test_fit_inputs_are_chart_rows_and_forecast_archive_snapshots(fake: FakePred
     coord, fake_hass, scheduler = _build()
     _seed_cycle_inputs(coord, scheduler)
     seen: list = []
-    coord._forecast_archive.get_snapshots = lambda s, e: seen.append((s, e)) or [{"issued": "x", "hours": []}]  # type: ignore[method-assign]
+    # Issue #1730: the payload carries the archive's compact snapshots and the worker decodes them
+    snap = {"i": "2026-01-01T00:05+00:00", "s": "weather.home", "h0": "2026-01-01T00:00+00:00", "t": [50.0, None, 52.5]}
+    coord._forecast_archive.get_snapshots_raw = lambda s, e: seen.append((s, e)) or [snap]  # type: ignore[method-assign]
     with scheduler.installed():
         assert coord._v4_start_fit("nightly") is True
         scheduler.advance_by(0)
     assert seen, "the forecast archive was not asked for snapshots"
     assert fake.sample_calls[0]["entries"] >= 1
-    assert fake.sample_calls[0]["snapshots"] == [{"issued": "x", "hours": []}]
+    assert fake.sample_calls[0]["snapshots"] == [decode_snapshot(snap)]
+    assert fake.sample_calls[0]["snapshots"][0]["hours"] == [
+        ["2026-01-01T00:00+00:00", 50.0],
+        ["2026-01-01T02:00+00:00", 52.5],
+    ]
 
 
 def test_first_fit_waits_for_startup_coalescing_then_runs_once(fake: FakePredictor) -> None:

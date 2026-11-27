@@ -31,6 +31,7 @@ therefore still shows v3's and "no change"'s scores, and the actual line.
 from __future__ import annotations
 
 import bisect
+import functools
 import json
 import logging
 import math
@@ -41,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from . import hvac_season, i18n
+from .chart_log import epoch_range
 from .const import (
     ENGINE_V3,
     SCORECARD_BIAS_LIMIT_F,
@@ -104,14 +106,72 @@ def _num(v: Any) -> float | None:
     return float(v) if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v) else None
 
 
-def _epoch(value: Any) -> float | None:
-    if not isinstance(value, str):
-        return None
+@functools.lru_cache(maxsize=65536)
+def _epoch_of_str(value: str) -> float | None:
     try:
         dt = datetime.fromisoformat(value)
     except ValueError:
         return None
     return dt.timestamp() if dt.tzinfo is not None else dt.replace(tzinfo=None).timestamp()
+
+
+def _epoch(value: Any) -> float | None:
+    """A row timestamp as epoch seconds. Memoised on the string (Issue #1730): a page reads each row's ``ts`` ~10 times
+    (every series, the scorecard, the heat runs, the swaps) and across requests; a pure function of the string."""
+    return _epoch_of_str(value) if isinstance(value, str) else None
+
+
+class _ChartRows:
+    """The chart rows a page reads, with the window of each read found by bisection when the log is time-sorted.
+
+    Issue #1730. ``rows`` is every row (a copy taken on the event loop). ``view`` is the log's own ``(rows, n)`` when it
+    knows them to be time-sorted (``ChartStateLog.sorted_rows_view``, Issue #1598), else ``None``: then every window is
+    all of ``rows`` and the caller's own filter does the work, as before. A window is a SUPERSET of what the caller
+    keeps (inclusive of both ends, log order); the caller re-applies its exact predicate.
+    """
+
+    def __init__(self, rows: Sequence[Mapping[str, Any]], log: Any = None) -> None:
+        self.rows = rows
+        self.view: tuple[list[dict[str, Any]], int] | None = None
+        if log is not None:
+            try:
+                self.view = log.sorted_rows_view()
+            except Exception:  # noqa: BLE001 - a log that cannot say is a log to scan
+                self.view = None
+
+    def window(self, lo: float, hi: float) -> Sequence[Mapping[str, Any]]:
+        if self.view is not None:
+            got = epoch_range(self.view[0], self.view[1], lo, hi)
+            if got is not None:
+                return self.view[0][got[0] : got[1]]
+        return self.rows
+
+    def swap_rows(self, lo: float, hi: float) -> Sequence[Mapping[str, Any]]:
+        """The rows ``ca_swap_epochs`` needs for ``[lo, hi]``: the window and the nearest ``band_sensor`` row each side.
+
+        A swap is a change between two consecutive rows that have a ``band_sensor``, and the pair that straddles an
+        edge of the window decides it (the first/last such row of the log only decide a bedtime or wake-up that lies
+        outside the window, which is dropped). Every row when the log is not time-sorted.
+        """
+        if self.view is None:
+            return self.rows
+        rows, n = self.view
+        got = epoch_range(rows, n, lo, hi)
+        if got is None:
+            return self.rows
+
+        def has_band(i: int) -> bool:
+            sid = rows[i].get("band_sensor")
+            return isinstance(sid, str) and bool(sid)
+
+        i, j = got
+        i0 = i - 1
+        while i0 >= 0 and not has_band(i0):
+            i0 -= 1
+        j0 = j
+        while j0 < n and not has_band(j0):
+            j0 += 1
+        return rows[max(i0, 0) : min(j0 + 1, n)]
 
 
 def _row_series(rows: Sequence[Mapping[str, Any]], getter: Any, lo: float, hi: float) -> _Series:
@@ -219,6 +279,7 @@ def build_prediction_accuracy(
     sleep_time: Any = None,
     wake_time: Any = None,
     v3_archive: V4Archive | None = None,
+    chart_log: Any = None,
 ) -> dict[str, Any]:
     """The endpoint payload. ``lead``/``range_str`` must already be valid (the view resets bad values to defaults).
 
@@ -226,6 +287,10 @@ def build_prediction_accuracy(
     ``wake_time`` settings: with them ``ca_swaps`` (Issue #1431) lists when the reading Climate Advisor uses swapped
     sensor in the window (``ca_swap_epochs``, the rule behind the Status chart's ``ca_swaps``), so the page breaks its
     ``_ca`` lines there. Without a sleep sensor only the chart log's recorded ``band_sensor`` changes count.
+
+    ``chart_log`` (Issue #1730, optional) is the ``ChartStateLog`` ``chart_rows`` was copied from: while it is
+    time-sorted every read of the rows finds its window by bisection instead of parsing the whole year; the payload is
+    the same without it.
     """
     tz = now.tzinfo or datetime.now().astimezone().tzinfo
     assert tz is not None
@@ -246,9 +311,11 @@ def build_prediction_accuracy(
             readings = row.get("indoor_sensors")
             return readings.get(sensor) if isinstance(readings, dict) else None
 
-    actual = _row_series(chart_rows, actual_of, start - lead_s - _MATCH_TOLERANCE_S, end + _MATCH_TOLERANCE_S)
+    chart = _ChartRows(chart_rows, chart_log)
+    near_rows = chart.window(start - lead_s - _MATCH_TOLERANCE_S, end + _MATCH_TOLERANCE_S)  # every read below is in it
+    actual = _row_series(near_rows, actual_of, start - lead_s - _MATCH_TOLERANCE_S, end + _MATCH_TOLERANCE_S)
     has_v3 = sensor == CA_SENSOR and lead == DEFAULT_LEAD
-    v3_series = _row_series(chart_rows, lambda r: r.get("pred_indoor"), start, end) if has_v3 else None
+    v3_series = _row_series(near_rows, lambda r: r.get("pred_indoor"), start, end) if has_v3 else None
     # Issue #1492: v3's own look-ahead archive answers the leads the chart log never had (and 4 h slots it lacks).
     v3_extra: dict[int, float] = {}
     if sensor == CA_SENSOR and v3_archive is not None:
@@ -261,7 +328,7 @@ def build_prediction_accuracy(
     # One point per 30-minute slot. Every chart row in the window gives one (its actual, v3's logged value, the "no
     # change" value), so v3 and the baseline are scored even while v4 has nothing (Issue #1400); v4 joins its slots.
     points: dict[float, dict[str, Any]] = {}
-    for row in chart_rows:
+    for row in near_rows:
         t = _epoch(row.get("ts"))
         if t is None or not (start <= t < end) or row.get("event") is not None:
             continue
@@ -371,7 +438,7 @@ def build_prediction_accuracy(
     # Issue #1431: whether each sensor has anything to draw at all (any time, any look-ahead), so the page can label a
     # sensor v4 has not learned ("no v4 data yet") and disable one with nothing recorded instead of an empty chart.
     v4_ids = _v4_sensor_ids(archive, bt_points)
-    read_ids = _read_sensor_ids(chart_rows)
+    read_ids = _read_sensor_ids(chart_rows, {str(s.get("id")) for s in sensors_out})
     for s in sensors_out:
         sid = str(s.get("id"))
         s["has_v4"] = sid in v4_ids
@@ -383,7 +450,7 @@ def build_prediction_accuracy(
     if downsample != "daily":
         try:
             swaps = ca_swap_epochs(
-                chart_rows,
+                chart.swap_rows(start, end),
                 start,
                 end,
                 tz=tz,
@@ -407,6 +474,7 @@ def build_prediction_accuracy(
             archive=archive,
             v3_archive=v3_archive,
             v3_running=ENGINE_V3 in (primary_engine, shadow_engine),
+            chart=chart,
         )
     except Exception:  # noqa: BLE001 - information only: an empty table beats no page
         _LOGGER.warning("prediction accuracy: the live scorecard failed; the table is empty", exc_info=True)
@@ -419,7 +487,7 @@ def build_prediction_accuracy(
             "span_days": model.get("span_days"),
         }
 
-    heat_runs = [] if downsample == "daily" else _heat_runs(chart_rows, start, end, tz)
+    heat_runs = [] if downsample == "daily" else _heat_runs(near_rows, start, end, tz)
 
     return {
         "zone": zone,
@@ -458,6 +526,7 @@ def live_scorecard(
     v3_archive: V4Archive | None = None,
     v3_running: bool = True,
     window_days: float = SCORECARD_WINDOW_DAYS,
+    chart: _ChartRows | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """DP-8 rows for the reading Climate Advisor uses (``_ca``), scored live over ``window_days`` ending ``now``.
 
@@ -481,6 +550,9 @@ def live_scorecard(
     ``SCORECARD_MIN_COVERAGE``; ``scored`` needs n >= ``SCORECARD_MIN_N`` and all three MAEs, else ``reasons`` says
     why ("not enough data yet", "v3 still collecting"). Errors are predicted - actual (positive = too warm); the
     row values are converted to ``unit`` here, the pass rule is judged in degrees F. Pure; never reads a file.
+
+    ``chart`` (Issue #1730, optional) is the page's ``_ChartRows``: the reads below then cover only their window of the
+    log, found by bisection; without it every row is read, with the same answer.
     """
     tz = now.tzinfo or datetime.now().astimezone().tzinfo
     assert tz is not None
@@ -488,9 +560,10 @@ def live_scorecard(
     start = end - window_days * 86400
     max_lead_s = max(lead_hours(ld) for ld in SCORECARD_LEADS) * 3600
     lo = start - max_lead_s - _MATCH_TOLERANCE_S
-    actual = _row_series(chart_rows, lambda r: r.get("indoor"), lo, end + _MATCH_TOLERANCE_S)
-    logged_v3 = _row_series(chart_rows, lambda r: r.get("pred_indoor"), start - _MATCH_TOLERANCE_S, end)
-    window_rows = [r for r in chart_rows if (t := _epoch(r.get("ts"))) is not None and lo - 86400 <= t <= end]
+    near_rows = (chart or _ChartRows(chart_rows)).window(lo - 86400, end + _MATCH_TOLERANCE_S)  # all three reads below
+    actual = _row_series(near_rows, lambda r: r.get("indoor"), lo, end + _MATCH_TOLERANCE_S)
+    logged_v3 = _row_series(near_rows, lambda r: r.get("pred_indoor"), start - _MATCH_TOLERANCE_S, end)
+    window_rows = [r for r in near_rows if (t := _epoch(r.get("ts"))) is not None and lo - 86400 <= t <= end]
     seasons = hvac_season.day_seasons(window_rows, tz)
     slots = sorted(
         {
@@ -621,7 +694,7 @@ def _v4_sensor_ids(archive: V4Archive, bt_points: Any) -> set[str]:
     """Sensor ids with at least one v4 prediction: in the live archive or in the published backtest (any lead)."""
     out: set[str] = set()
     try:
-        out.update(sid for sid, n in archive.slot_count().items() if n)
+        out.update(archive.sensors_with_slots())  # one slot per line, not every slot of a year (Issue #1730)
     except Exception:  # noqa: BLE001 - a label only
         _LOGGER.debug("prediction accuracy: archive slot count failed", exc_info=True)
     if isinstance(bt_points, Mapping):
@@ -637,15 +710,21 @@ def _v4_sensor_ids(archive: V4Archive, bt_points: Any) -> set[str]:
     return out
 
 
-def _read_sensor_ids(rows: Sequence[Mapping[str, Any]]) -> set[str]:
-    """Sensor ids the chart log has a reading for (``_ca`` = the ``indoor`` column), any time."""
+def _read_sensor_ids(rows: Sequence[Mapping[str, Any]], wanted: set[str] | None = None) -> set[str]:
+    """Sensor ids the chart log has a reading for (``_ca`` = the ``indoor`` column), any time.
+
+    ``wanted`` (Issue #1730): the caller only asks about these ids, so the read stops once all of them are found; the
+    answer for each of them is the same as reading every row (the set may then lack ids nobody asked about)."""
     out: set[str] = set()
     for r in rows:
+        before = len(out)
         if CA_SENSOR not in out and _num(r.get("indoor")) is not None:
             out.add(CA_SENSOR)
         readings = r.get("indoor_sensors")
         if isinstance(readings, dict):
             out.update(k for k, v in readings.items() if isinstance(k, str) and k not in out and _num(v) is not None)
+        if wanted is not None and len(out) != before and wanted <= out:
+            break
     return out
 
 
@@ -669,19 +748,52 @@ def backtest_scores(backtest: Mapping[str, Any] | None) -> dict[str, Any] | None
     return {out: summary[k] for k, out in names.items() if k in summary}
 
 
-def _downsample_pairs(pairs: list[tuple[float, float]], range_days: float, tz: tzinfo) -> list[tuple[float, float]]:
-    """Same buckets as the chart log: raw to 3 days, local-hour means to 30 days, local-day means beyond."""
+class _BucketMemo:
+    """Epoch -> ``(group id, bucket start)`` for :func:`_downsample_pairs`, shared by every line of one window.
+
+    Issue #1730. Every look-ahead of every sensor sits on the same 30-minute slots, so a year is bucketed once, and a
+    pair is grouped by a small integer instead of by hashing a ``datetime`` (equal bucket starts share one id, as they
+    shared one dict key).
+    """
+
+    __slots__ = ("by_epoch", "ids")
+
+    def __init__(self) -> None:
+        self.by_epoch: dict[float, tuple[int, datetime]] = {}
+        self.ids: dict[datetime, int] = {}
+
+
+def _downsample_pairs(
+    pairs: list[tuple[float, float]], range_days: float, tz: tzinfo, memo: _BucketMemo | None = None
+) -> list[tuple[float, float]]:
+    """Same buckets as the chart log: raw to 3 days, local-hour means to 30 days, local-day means beyond.
+
+    ``memo`` (optional; one per ``range_days``) lets the callers of one window share the bucket of each epoch.
+    """
     if range_days <= _RAW_MAX_DAYS or not pairs:
         return sorted(pairs)
     hourly = range_days <= _HOURLY_MAX_DAYS
-    groups: dict[datetime, list[float]] = defaultdict(list)
+    memo = memo or _BucketMemo()
+    by_epoch, ids = memo.by_epoch, memo.ids
+    groups: dict[int, tuple[datetime, list[float]]] = {}
+    cur_id = -1
+    cur: list[float] = []
     for t, v in pairs:
-        dt = datetime.fromtimestamp(t, tz)
-        key = dt.replace(minute=0, second=0, microsecond=0)
-        if not hourly:
-            key = key.replace(hour=0)
-        groups[key].append(v)
-    return [(k.timestamp(), sum(vs) / len(vs)) for k, vs in sorted(groups.items())]
+        got = by_epoch.get(t)
+        if got is None:
+            key = datetime.fromtimestamp(t, tz).replace(minute=0, second=0, microsecond=0)
+            if not hourly:
+                key = key.replace(hour=0)
+            got = by_epoch[t] = (ids.setdefault(key, len(ids)), key)
+        if got[0] == cur_id:  # slots arrive in time order: a bucket is mostly one run
+            cur.append(v)
+            continue
+        group = groups.get(got[0])
+        if group is None:
+            group = groups[got[0]] = (got[1], [])  # the first bucket start met in THIS call stands for the group
+        cur_id, cur = got[0], group[1]
+        cur.append(v)
+    return [(k.timestamp(), sum(vs) / len(vs)) for k, vs in sorted(groups.values(), key=lambda g: g[0])]
 
 
 def _out_pairs(pairs: Sequence[tuple[float, float]], tz: tzinfo, unit: str) -> list[dict[str, Any]]:
@@ -817,8 +929,8 @@ def build_chart_v4(
     ids = [CA_SENSOR, *(s for s in dict.fromkeys(sensor_ids) if s != CA_SENSOR)]
     model_primary = model.get("primary") if isinstance(model, Mapping) else None
     # 0.9.6 Lane F: the span of EVERY past v4 prediction (any of these sensors, any look-ahead, live archive or
-    # backtest), not just this window's, so the page can say "none in this view" instead of "none yet". It rides the
-    # loops below (series() already walks every slot of a line), so it costs no extra pass.
+    # backtest), not just this window's, so the page can say "none in this view" instead of "none yet". It comes
+    # from V4Archive.span (first and last valid slot), so no whole-line read.
     span: list[float] = []
     span_sensors: list[str] = []
 
@@ -830,17 +942,22 @@ def build_chart_v4(
         elif t > span[1]:
             span[1] = t
 
+    bucket_memo = _BucketMemo()  # Issue #1730: shared by every line of this window
     for sid in ids:
         per_lead: dict[str, list[dict[str, Any]]] = {}
+        # one pass over the window for every look-ahead (Issue #1730)
+        window = archive.series_leads(sid, CHART_LEADS, start, end) if archive is not None else {}
         for lead in CHART_LEADS:
-            every = archive.series(sid, lead, float("-inf"), float("inf")) if archive is not None else {}
-            for slot in every:
-                _seen(float(slot))
-            if every and sid not in span_sensors:
-                span_sensors.append(sid)
-            live = {slot: v for slot, v in every.items() if start <= slot < end}
-            pairs: list[tuple[float, float]] = [(float(slot), v) for slot, v in live.items()]
-            live_slots = set(live)
+            # Issue #1730: only the window is read; the whole-archive span comes from the first/last valid slot.
+            ends = archive.span(sid, lead) if archive is not None else None
+            if ends is not None:
+                _seen(float(ends[0]))
+                _seen(float(ends[1]))
+                if sid not in span_sensors:
+                    span_sensors.append(sid)
+            live = window.get(lead, {}) if ends is not None else {}
+            pairs: list[tuple[float, float]] = list(live.items())  # (slot, value): epochs, whole numbers
+            live_slots = live  # membership of a slot only
             by_sensor = bt_points.get(sid) if isinstance(bt_points, Mapping) else None
             rows = by_sensor.get(lead) if isinstance(by_sensor, Mapping) else None
             for item in rows if isinstance(rows, list) else []:
@@ -859,7 +976,7 @@ def build_chart_v4(
                     continue
                 pairs.append((t, v4))
             if pairs:
-                per_lead[lead] = _out_pairs(_downsample_pairs(pairs, range_days, tz), tz, unit)
+                per_lead[lead] = _out_pairs(_downsample_pairs(pairs, range_days, tz, bucket_memo), tz, unit)
         if per_lead:
             out["past"][sid] = per_lead
     if span and span[0] <= now.timestamp():

@@ -287,9 +287,9 @@ A past row's band is the band in effect from its time until the next row: `chart
 
 v4 trains on this log and nothing else changes in its schema. Since 0.9.4 v4 is the default primary engine (it drives the prediction-dependent decisions and is the Status chart's main line, [Prediction Engines Spec](prediction-engines-spec.md)); v3's `pred_indoor` is written only while v3 is the primary or comparison engine (otherwise `null`, see the `pred_indoor` row above). v4's own predictions are kept in its archive (`climate_advisor_v4_archive_<entry_id>.json`), not in this log.
 
-- **Fit:** `v4_shadow.run_fit` passes `ChartStateLog.raw_entries()` (a shallow copy of every retained row, undownsampled; rows are never mutated after append, so the copy is safe on an executor thread) to `predictor_v4.samples_from_chart_log`, which resamples to a 15-minute grid. Fields read: `ts`, `hvac` (the action string), `fan_running`/`fan`, `indoor`, `indoor_sensors`, `outdoor`, `windows_open`, `pred_outdoor`, `setpoint`. Gaps over 2 h break continuity. `setpoint` is null in older Zone 1 history, so a house with only such rows keeps the learned-thermostat defaults ([Predictor v4: thermostat](predictor-v4-spec.md#thermostat-learning-and-emulation)).
+- **Fit:** since Issue #1730 the fit payloads (`v4_shadow.fit_job_payload`, `display_fit_job_payload`) take only the last `V4_FIT_TRAIN_DAYS` days: `ChartStateLog.rows_between(lo, hi)` finds them by bisection of the time-sorted log (the #1598 order check; `None` for an out-of-order log or a row without a UTC offset, and the caller falls back to the full `raw_entries()` scan, which gives the same rows) instead of copying and parsing a year of rows. `raw_entries()` is still a shallow copy of every retained row, undownsampled; rows are never mutated after append, so a copy is safe on an executor thread. The rows reach `predictor_v4.samples_from_chart_log`, which resamples to a 15-minute grid. Fields read: `ts`, `hvac` (the action string), `fan_running`/`fan`, `indoor`, `indoor_sensors`, `outdoor`, `windows_open`, `pred_outdoor`, `setpoint`. Gaps over 2 h break continuity. `setpoint` is null in older Zone 1 history, so a house with only such rows keeps the learned-thermostat defaults ([Predictor v4: thermostat](predictor-v4-spec.md#thermostat-learning-and-emulation)).
 - **Per cycle:** the coordinator reads `ChartStateLog.last_entry()` (the newest row appended, any kind; `chart_log.py`) right after it wrote this cycle's row and skips v4 for that cycle unless it is a non-event row less than 120 s old, so the live readings equal the training fields ([v4 Shadow: per-cycle inputs](v4-shadow-spec.md#per-cycle-inputs)).
-- **Scoring:** the prediction-accuracy endpoint reads `raw_entries()` for the "actual" reading (`indoor` / `indoor_sensors[entity]`), v3's `pred_indoor` and heat runs ([REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1)).
+- **Scoring:** the prediction-accuracy endpoint reads the "actual" reading from the rows of each requested window through `ChartStateLog.sorted_rows_view()` plus `chart_log.epoch_range` bisection (Issue #1730; the #1598 fallback scans `raw_entries()` when the log is out of order) -- `indoor` / `indoor_sensors[entity]` (`indoor` / `indoor_sensors[entity]`), v3's `pred_indoor` and heat runs ([REST API](rest-api.md#get-apiclimate_advisorprediction_accuracy-issue-1230-r1)).
 - **Retention interaction:** the 365-day chart log bounds what a fit and the "no change" baseline can see; the v4 archive keeps its own 400 days.
 
 ## Vent Bar Fields (Issue #331)
@@ -506,9 +506,9 @@ In all error paths `load()` returns `None` and does not raise. The coordinator r
 
 ## Save / Persistence Contract
 
-`save()` writes `{"entries": self._entries}` to `self._path` using an atomic tempfile pattern:
+`save()` writes `{"entries": list(self._entries)}` to `self._path` using an atomic tempfile pattern:
 
-1. `json.dumps()` serializes the entries list. Compact separators (`","`, `":"`) are used.
+1. `store_json.dumps()` serializes the entries list (Issue #1730): orjson, one row per line, so no single call holds the GIL for long. The file is still plain JSON that `json.loads` and older releases read; `load()` reads it with `store_json.loads` (one-line files from older releases too). The file is opened in binary mode.
 2. `tempfile.mkstemp()` creates a `.tmp` file in `self._path.parent` (the HA config dir).
 3. The serialized content is written to the temp file.
 4. `os.replace(tmp_path, str(self._path))` atomically promotes the temp file to the final path.
@@ -518,7 +518,7 @@ In all error paths `load()` returns `None` and does not raise. The coordinator r
 
 | Failure | Handling | On-disk state |
 |---|---|---|
-| `json.dumps()` raises `TypeError`/`ValueError` | Log ERROR; return immediately | Original file unchanged; no `.tmp` created |
+| `store_json.dumps()` raises `TypeError`/`ValueError` | Log ERROR; return immediately | Original file unchanged; no `.tmp` created |
 | `OSError` writing to `.tmp` or on `os.replace()` | Log ERROR; attempt `os.unlink(tmp_path)` (suppressing `OSError`) | Original file unchanged; `.tmp` deleted if possible |
 
 **The original file is never modified until `os.replace()` succeeds.** If the process crashes between tempfile creation and `os.replace()`, a stale `.tmp` file may remain in the config directory but the original is intact.

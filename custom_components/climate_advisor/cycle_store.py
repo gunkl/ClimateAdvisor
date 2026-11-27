@@ -54,17 +54,20 @@ from __future__ import annotations
 
 import bisect
 import contextlib
-import json
 import logging
+import math
 import os
 import sys
 import tempfile
 import threading
 import time
 from array import array
+from collections.abc import Iterable
+from itertools import accumulate
 from pathlib import Path
 from typing import Any
 
+from . import store_json
 from .const import (
     CYCLE_MAX_STORED,
     CYCLE_RETAIN_MIN_WEIGHT,
@@ -143,21 +146,8 @@ def _compact(cycle: dict[str, Any]) -> _Cycle | None:
             return None
         p = _places([v for _, v, _ in rows])
         op = _places([v for _, v in orows])
-        t_on = float(round(cycle["t_on"]))
-        t_off = cycle.get("t_off")
-        res = cycle.get("res")
-        sp = cycle.get("setpoint_f")
-        cut = cycle.get("cut")
-        entity = cycle.get("entity")
-        c = _Cycle()
-        c.id = str(cycle["id"])
-        c.mode = mode
-        c.t_on = t_on
-        c.t_off = None if t_off is None else float(round(t_off))
-        c.cut = None if cut is None else str(cut)
-        c.res = None if res is None else round(float(res), 3)
-        c.setpoint_f = None if sp is None else round(float(sp), 2)
-        c.entity = None if entity is None else str(entity)
+        c = _scalars(cycle, mode)
+        t_on = c.t_on
         c.p, c.op = p, op
         sc, osc = 10**p, 10**op
         c.t = array("i", (int(t - t_on) for t, _, _ in rows))
@@ -166,24 +156,39 @@ def _compact(cycle: dict[str, Any]) -> _Cycle | None:
         c.ot = array("i", (int(t - t_on) for t, _ in orows))
         c.oy = array("i", (round(v * osc) for _, v in orows))
         c.end = (t_on + c.t[-1]) if rows else t_on
-        w = cycle.get("w")
-        c.w = float(w) if isinstance(w, int | float) and not isinstance(w, bool) and 0.0 <= w <= 1.0 else None
         return c
     except KeyError, TypeError, ValueError, IndexError, OverflowError:
         return None
+
+
+def _scalars(cycle: dict[str, Any], mode: str) -> _Cycle:
+    """A ``_Cycle`` with its non-series fields set from ``cycle`` (rounded as the store keeps them)."""
+    t_on = float(round(cycle["t_on"]))
+    t_off = cycle.get("t_off")
+    res = cycle.get("res")
+    sp = cycle.get("setpoint_f")
+    cut = cycle.get("cut")
+    entity = cycle.get("entity")
+    c = _Cycle()
+    c.id = str(cycle["id"])
+    c.mode = mode
+    c.t_on = t_on
+    c.t_off = None if t_off is None else float(round(t_off))
+    c.cut = None if cut is None else str(cut)
+    c.res = None if res is None else round(float(res), 3)
+    c.setpoint_f = None if sp is None else round(float(sp), 2)
+    c.entity = None if entity is None else str(entity)
+    w = cycle.get("w")
+    c.w = float(w) if isinstance(w, int | float) and not isinstance(w, bool) and 0.0 <= w <= 1.0 else None
+    return c
 
 
 def _deltas(vals: list[int]) -> list[int]:
     return [vals[0]] + [b - a for a, b in zip(vals, vals[1:], strict=False)] if vals else []
 
 
-def _undelta(vals: list[int]) -> list[int]:
-    out: list[int] = []
-    acc = 0
-    for i, v in enumerate(vals):
-        acc = v if i == 0 else acc + v
-        out.append(acc)
-    return out
+def _undelta(vals: Iterable[int]) -> list[int]:
+    return list(accumulate(vals))
 
 
 def _encode(c: _Cycle) -> dict[str, Any]:
@@ -214,44 +219,107 @@ def _encode(c: _Cycle) -> dict[str, Any]:
     }
 
 
+_FAST_LIMIT = 2**50  # times beyond this go through the float path (exact below it)
+_FAST_READING_LIMIT = 2**36  # stored readings beyond this too: the float ``_places`` test loses its 1e-4 margin there
+
+
+def _magnitude(ints: list[int]) -> int:
+    return max(max(ints), -min(ints)) if ints else 0
+
+
+def _native_places(ints: list[int], stored: int) -> int:
+    """The places ``_places`` finds for ``[i / 10**stored for i in ints]``, from the integers (no float arithmetic).
+
+    A value ``i / 10**stored`` is exact to ``q`` places exactly when ``10**(stored - q)`` divides ``i``; the first
+    ``q`` in 0..2 that divides every integer wins, else 3. Not-divisible leaves a remainder of at least a thousandth
+    of a step, far above ``_places``' 1e-4 tolerance, so this is the same answer.
+    """
+    g = math.gcd(*ints) if ints else 0
+    for q in range(_MAX_PLACES):
+        if g % 10 ** max(0, stored - q) == 0:
+            return q
+    return _MAX_PLACES
+
+
 def _decode(d: Any, version: int) -> _Cycle | None:
+    """One stored row -> a ``_Cycle``, or None when it is unusable.
+
+    Version 2 rows are built straight into the compact columns (Issue #1730): the sample lists a public dict would
+    hold are never built, then re-derived by ``_compact``. Every check ``_compact`` makes still happens (flags in
+    0..255, native places per series, finite numbers, a known mode) and the result is attribute-for-attribute the
+    same; ``_decode_via_compact`` is the original path, used for version 1 and for integers too large for it.
+    """
     try:
-        t = _undelta([int(x) for x in d["t"]])
-        y = _undelta([int(x) for x in d["y"]])
+        t = _undelta(map(int, d["t"]))
+        y = _undelta(map(int, d["y"]))
         flags: list[int] = []
         for f, n in d["f"]:
             flags.extend([int(f)] * int(n))
-        ot = _undelta([int(x) for x in d.get("ot") or []])
-        oy = _undelta([int(x) for x in d.get("oy") or []])
+        ot = _undelta(map(int, d.get("ot") or []))
+        oy = _undelta(map(int, d.get("oy") or []))
         if not (len(t) == len(y) == len(flags)) or len(ot) != len(oy):
             return None
         mode = _CODE_MODE.get(d["m"])
         if mode is None:
             return None
         if version < 2:
-            p, op = _V1_PLACES
-        else:
-            p, op = int(d["p"]), int(d["op"])
-            if not (0 <= p <= _MAX_PLACES and 0 <= op <= _MAX_PLACES):
-                return None
-        sc, osc = 10**p, 10**op
-        return _compact(
+            return _decode_via_compact(d, mode, t, y, flags, ot, oy, *_V1_PLACES)
+        p, op = int(d["p"]), int(d["op"])
+        if not (0 <= p <= _MAX_PLACES and 0 <= op <= _MAX_PLACES):
+            return None
+        biggest = max(_magnitude(t), _magnitude(ot))
+        readings = max(_magnitude(y), _magnitude(oy))
+        if biggest >= _FAST_LIMIT or readings >= _FAST_READING_LIMIT or abs(d["a"]) >= _FAST_LIMIT:
+            return _decode_via_compact(d, mode, t, y, flags, ot, oy, p, op)
+        c = _scalars(
             {
                 "id": d["i"],
-                "mode": mode,
                 "t_on": d["a"],
                 "t_off": d.get("b"),
                 "cut": d.get("x"),
                 "res": d.get("r"),
                 "setpoint_f": d.get("s"),
                 "entity": d.get("e"),
-                "samples": [[a, b / sc, f] for a, b, f in zip(t, y, flags, strict=True)],
-                "outdoor": [[a, b / osc] for a, b in zip(ot, oy, strict=True)],
                 "w": d.get("w"),
-            }
+            },
+            mode,
         )
-    except KeyError, TypeError, ValueError:
+        if any(not 0 <= f <= 255 for f in (min(flags, default=0), max(flags, default=0))):
+            return None
+        base = int(c.t_on)
+        c.p, c.op = _native_places(y, p), _native_places(oy, op)
+        shift, oshift = 10 ** (p - c.p), 10 ** (op - c.op)
+        c.t = array("i", [x - base for x in t])
+        c.y = array("i", y if shift == 1 else [x // shift for x in y])
+        c.f = bytes(flags)
+        c.ot = array("i", [x - base for x in ot])
+        c.oy = array("i", oy if oshift == 1 else [x // oshift for x in oy])
+        c.end = (c.t_on + c.t[-1]) if t else c.t_on
+        return c
+    except KeyError, TypeError, ValueError, IndexError, OverflowError:
         return None
+
+
+def _decode_via_compact(
+    d: Any, mode: str, t: list[int], y: list[int], flags: list[int], ot: list[int], oy: list[int], p: int, op: int
+) -> _Cycle | None:
+    """The original decode: public sample lists, then ``_compact`` (version 1 files; values past ``_FAST_LIMIT``)."""
+    sc, osc = 10**p, 10**op
+    return _compact(
+        {
+            "id": d["i"],
+            "mode": mode,
+            "t_on": d["a"],
+            "t_off": d.get("b"),
+            "cut": d.get("x"),
+            "res": d.get("r"),
+            "setpoint_f": d.get("s"),
+            "entity": d.get("e"),
+            "samples": [[a, b / sc, f] for a, b, f in zip(t, y, flags, strict=True)],
+            "outdoor": [[a, b / osc] for a, b in zip(ot, oy, strict=True)],
+            "w": d.get("w"),
+        }
+    )
 
 
 def _retain_weight(c: _Cycle) -> float:
@@ -459,7 +527,7 @@ class CycleStore:
             _LOGGER.info("cycle_store: no cycle file yet, starting empty")
             return
         try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            raw = store_json.loads(self._path.read_bytes())
         except (OSError, ValueError) as err:
             self._log_corrupt("failed to read the cycle file, starting empty: %s", err)
             return
@@ -495,7 +563,7 @@ class CycleStore:
             with self._lock:
                 snap = list(self._cycles)
             payload = {"v": CYCLE_STORE_VERSION, "cycles": [_encode(c) for c in snap]}
-            serialized = json.dumps(payload, separators=(",", ":"))
+            serialized = store_json.dumps(payload)  # one cycle per line: no long single GIL hold (Issue #1730)
         except (TypeError, ValueError, RuntimeError, KeyError) as err:
             _LOGGER.error("cycle_store: failed to serialize the cycles: %s", err)
             return False
@@ -503,7 +571,7 @@ class CycleStore:
         tmp_path_str: str | None = None
         try:
             tmp_fd, tmp_path_str = tempfile.mkstemp(dir=self._path.parent, prefix=self._file_prefix, suffix=".tmp")
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            with os.fdopen(tmp_fd, "wb") as f:
                 f.write(serialized)
             os.replace(tmp_path_str, str(self._path))
             tmp_path_str = None

@@ -7,6 +7,7 @@
 | Question | Short answer | → Full answer |
 |---|---|---|
 | Where do the prediction-engine-v4 shadow files live, are they in the learning file, and what happens on rollback? | Three entry-scoped files (`climate_advisor_v4_archive_<id>.json`, `..._v4_model_<id>.json`, `..._v4_backtest_<id>.json`), all in `ENTRY_SCOPED_FILES` and deleted with the zone; the model is NOT in `LearningState`, and learning load ignores unknown keys, so a rollback cannot reset learning. | [v4 Shadow Spec](v4-shadow-spec.md#rollback-safety) |
+| How are the large stores laid out on disk, and can an older release read them (Issue #1730)? | One element per line, plain JSON, written by `store_json.py` (orjson; stdlib `lossless=True` for NaN-bearing stores). Older releases read it unchanged; no migration. | [Large store layout](#large-store-layout-issue-1730) |
 | What file does operational state persist to, and where is the path defined? | `climate_advisor_state.json` in the HA config root; path assembled from `STATE_FILE` constant in `const.py`. | [Scope](#scope) |
 | How does state survive HA restarts without corruption from a mid-write crash? | Atomic write: serialize to a uniquely-named `.tmp` file in the same directory, then `os.replace()` to rename it over the target. The original is never modified until the new file is complete. | [Atomic Write Pattern](#atomic-write-pattern) |
 | What happens to a zone's files when the zone is deleted, reloaded or unloaded? | Deleted: `async_remove_entry` (`__init__.py`) deletes the zone's state, learning, chart log, forecast archive, AI investigation history (#1415) and three v4 shadow files (archive, model, backtest) and its `weather_entity_not_found_<id>` / `reload_needed_<id>` Repairs issues. Reloaded or unloaded: nothing is deleted. | [Zone removal cleanup](#zone-removal-cleanup) |
@@ -102,6 +103,15 @@ card offering to "fix" a zone that no longer exists. Before 0.9.1 every one of t
 **Constant:** `STATE_FILE = "climate_advisor_state.json"` (defined in `const.py`)
 **Format:** UTF-8 JSON, 2-space indent
 **Serialization fallback:** `default=str` — non-serializable values (e.g., `datetime`) are coerced to strings rather than raising
+
+### Large store layout (Issue #1730)
+
+One whole-file `json.loads`/`json.dumps` of a 3-9 MB document is a single C call that holds the GIL for 84-230 ms on x86 (several times that on a Pi), and an executor thread does not release it ([claude.md Thread-Safety, second form](../claude.md)). The large stores therefore write and read through `custom_components/climate_advisor/store_json.py` (orjson, hass-free): **one element per line** (`dumps(obj, depth=N)` puts one member per line in every large or container-holding dict/list above nesting level `N`), so each call holds the GIL about 0.02 ms and the loop thread runs between elements.
+
+- **Format unchanged.** The file is plain JSON; only the newlines moved. `json.loads`, and so every older release, reads it. `store_json.loads` reads a one-line file from an older release (whole, by orjson) as well as the new layout; an unrecognised layout or one holding `NaN`/`Infinity` tokens is read whole, by orjson and then the stdlib. No migration, no version bump, rollback safe.
+- **NaN rule.** orjson writes NaN/Infinity as `null` (and non-ASCII as UTF-8). A store passes `lossless=True` (stdlib encoding, `NaN` tokens, still one element per line) when its readers would not all accept `null` where a NaN could be stored.
+- **Stores.** orjson: v4 archive (`depth=3`, one slot per line), cycle store (one cycle per line), forecast archive (one snapshot per line), chart log (one row per line). stdlib `lossless=True`: the learning state (`climate_advisor_learning.json`) and the worker pipe (`process_offload`, `depth=3`; a job sees the same floats in a worker as in a thread). The small v4 model file and the state file keep plain `json`.
+- **CycleStore decode (Issue #1730).** `cycle_store._decode` has a fast path that builds a cycle's samples directly from the columns; values past `_FAST_LIMIT` and version 1 files take the original `_compact` path. The stored format is unchanged and the decoded cycles are identical.
 
 ### Version Guard
 

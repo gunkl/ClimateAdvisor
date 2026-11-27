@@ -7872,6 +7872,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         night_replay.nightly_job_payload,
                         chart_entries=self._chart_log.raw_entries(),
                         snapshots_fn=self._forecast_archive.get_snapshots,
+                        raw_snapshots_fn=self._forecast_archive.get_snapshots_raw,
+                        chart_window_fn=self._chart_log.rows_between,
                         tz=now.tzinfo,
                         now=now,
                         primary=node["primary"],
@@ -8011,6 +8013,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             v4_shadow.fit_job_payload,
                             chart_entries=self._chart_log.raw_entries(),
                             snapshots_fn=self._forecast_archive.get_snapshots,
+                            raw_snapshots_fn=self._forecast_archive.get_snapshots_raw,
+                            chart_window_fn=self._chart_log.rows_between,
                             tz=tz,
                             now=now,
                             primary=primary,
@@ -8191,6 +8195,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     functools.partial(
                         v4_shadow.display_fit_job_payload,
                         chart_entries=self._chart_log.raw_entries(),
+                        chart_window_fn=self._chart_log.rows_between,
                         tz=now.tzinfo,
                         now=now,
                         primary=primary,
@@ -8220,9 +8225,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         try:
             node = self._v4_node_inputs()
             now = dt_util.now()
+            # Issue #1730: only the last 30 days are read; they are found by bisection (the log is time-sorted), not by
+            # copying and parsing every row of up to a year on the event loop. display_pending windows them again.
+            t = now.timestamp()
+            rows = self._chart_log.rows_between(t - V4_FIT_TRAIN_DAYS * 86400.0, t + 1.0)
             return v4_shadow.display_pending(
                 model_dict,
-                self._chart_log.raw_entries(),
+                rows if rows is not None else self._chart_log.raw_entries(),
                 now=now,
                 tz=now.tzinfo,
                 primary=node["primary"],
@@ -9375,6 +9384,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "unit": self.config.get("temp_unit", "fahrenheit"),
             "config_dir": Path(self.hass.config.config_dir),
             "chart_rows": self._chart_log.raw_entries(),
+            "chart_log": self._chart_log,  # Issue #1730: its sorted view is bisected
             "archive": self._v4_archive,
             "v3_archive": getattr(self, "_v3_archive", None),  # Issue #1492: v3 at 1/4/12/24 h for the scorecard
             "model": self.v4_model_summary(),

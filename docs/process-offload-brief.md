@@ -89,7 +89,7 @@ async def _process_job(self, job: str, payload_fn: Callable[[], dict], timeout_s
 | `v4_night_replay` | `night_replay.run_nightly_job` | `night_replay.nightly_job_payload` | `WORKER_TIMEOUT_V4_NIGHT_REPLAY_S` (1800 s) | `_v4_run_night_replay` |
 | `cycle_refit` | `cycle_model.refit_job` | `cycle_model.refit_job_payload` | `WORKER_TIMEOUT_CYCLE_REFIT_S` (600 s) | `_cycle_refit` |
 
-`_cycle_judge` (judges one just-closed cycle, about 26 ms) stays in the executor: a worker would cost more to start than the work takes. It is the one allowlisted entry in the offload guard.
+`_cycle_judge` (judges one just-closed cycle, typically about 28 ms, 420 ms worst case at 3 cycles x 400 samples) stays in the executor: a worker would cost more to start than the work takes. It is the one allowlisted entry in the offload guard.
 
 ## Data Structures
 
@@ -97,11 +97,11 @@ async def _process_job(self, job: str, payload_fn: Callable[[], dict], timeout_s
 
 One request, one response, per process.
 
-- **stdin:** `{"job": "<name>", "payload": {...}, "log_level": <int>}`, UTF-8 JSON, written once and closed. `log_level` is the caller logger's effective level; the child logs at it (a missing or non-integer value means INFO).
-- **stdout:** `{"ok": true, "result": <json>}` or `{"ok": false, "error": "<Type>: <message>"}` (error capped at 500 characters). Exit code 0 in both cases.
+- **stdin:** `{"job": "<name>", "payload": {...}, "log_level": <int>}`, UTF-8 JSON, one element per line (`store_json.dumps(depth=3, lossless=True)`, Issue #1730: no single long GIL hold; stdlib NaN tokens kept), written once and closed. `log_level` is the caller logger's effective level; the child logs at it (a missing or non-integer value means INFO).
+- **stdout:** (same one-element-per-line encoding, read with `store_json.loads`) `{"ok": true, "result": <json>}` or `{"ok": false, "error": "<Type>: <message>"}` (error capped at 500 characters). Exit code 0 in both cases.
 - **stderr:** one JSON object per line, `{"level": <int>, "name": <logger>, "msg": <text>}`; tracebacks are folded into `msg`.
 - **Payloads are data only.** The callables the in-process fits took are rebuilt in the child from data:
-  - `snapshots_fn` becomes `snapshots`, the forecast-archive rows prefetched in the executor (`None` = no archive; an unreadable archive becomes `[]`, as before);
+  - `snapshots_fn` becomes `snapshots_raw` (Issue #1730), the forecast-archive snapshots in their compact stored form from `ForecastArchive.get_snapshots_raw`, decoded in the worker by the hass-free `forecast_archive.decode_snapshot` (`v4_shadow.job_clock_and_archive`; one undecodable snapshot degrades the archive to `[]`, as before). A payload with a decoded `snapshots` list (no raw reader) still works; no `snapshots` key and no `snapshots_raw` = no archive;
   - `in_sleep` becomes `sleep_window`, `[sleep, wake]` as "HH:MM", evaluated by the existing hass-free `predictor_v4.in_sleep_window` (no second copy of the sleep rule);
   - `tz` becomes `{"key": <IANA>, "offset_s": n}` or `{"offset_s": n}` (the worker falls back to the offset, with a WARNING, if it cannot load the key) (`v4_shadow.encode_tz` / `decode_tz`);
   - `now` becomes an ISO string.
@@ -120,6 +120,7 @@ The child is started as `sys.executable -I -B -c <_BOOTSTRAP> <package dir> <its
 
 `_child_main()`:
 
+0. The wire codec is `store_json` (orjson and the stdlib only), imported lazily inside `process_offload._encode_value` / `_decode`; it is part of the import closure.
 1. Installs the `homeassistant.util.dt` stub (`_install_ha_stub`): `now`, `utcnow` and `as_utc`, which `time_utils` imports. Nothing else of Home Assistant exists in the child.
 2. Calls `os.nice(10)`; failure (no `nice` on the platform) is ignored.
 3. Reads stdin, then points fd 1 and `sys.stdout` at stderr (the real stdout is kept for the envelope), so a stray `print` or a write straight to fd 1 cannot corrupt the reply.
@@ -172,7 +173,7 @@ If the process cannot be spawned (`OSError`), `async_run_job` logs one WARNING (
 | Guard | What it fails on |
 |---|---|
 | `tests/test_executor_offload.py::TestHeavyFitsRunInWorkerProcess` | Any coordinator method that references `v4_shadow.run_fit` / `run_display_fit`, `night_replay.run_nightly` or `cycle_model.fit_cycles` (direct call, executor hand-over, `functools.partial` or from-import). `_cycle_judge` is the one allowlisted use; a stale allowlist entry also fails. |
-| `tests/test_process_offload_1722.py::test_import_closure_of_job_modules_is_hass_free` | A job module whose import closure reaches any `homeassistant` module other than `homeassistant.util.dt`. |
+| `tests/test_process_offload_1722.py::test_import_closure_of_job_modules_is_hass_free` | A job module (`v4_shadow`, `night_replay`, `cycle_model`, `predictor_v4`, `forecast_archive`, `store_json`) whose import closure reaches any `homeassistant` module other than `homeassistant.util.dt`. |
 | `tests/test_process_offload_1722.py::test_child_homeassistant_stub_is_minimal` | A stub that grows beyond `now`, `utcnow`, `as_utc`. |
 | `tests/test_process_offload_1722.py` (timeout, cancel, double cancel, spawn failure, isolation tests) | A worker that is not killed and reaped, a spawn failure that does not fall back once, or a child that sees the working directory or `PYTHONPATH`. |
 | `tests/test_process_offload_1722.py` (bytecode, environment tests) | A child that writes `__pycache__` into the folder it imports from (no `-B`), or that sees a planted `*_TOKEN` / `SUPERVISOR_TOKEN`, or loses `TZ`. |
@@ -180,7 +181,7 @@ If the process cannot be spawned (`OSError`), `async_run_job` logs one WARNING (
 | `tests_ha/test_process_offload_realha_1722.py` | On real Home Assistant: a refit that does not run in a child, or an unload, reload or HA stop that leaves the worker running or hangs on it. |
 | `tests/test_v4_shadow_structural.py` | The runner naming a v4 job outside its `JOBS` allowlist. |
 | `tests/test_process_offload_wiring_1722.py` | A call site that stops using `_process_job` with its payload built in the executor, a failed worker that does not keep the previous model, record or rates, or an unload that does not cancel a running replay or refit. |
-| `tests/test_executor_job_registry_1728.py` | A callable handed to `_executor_job`, `async_add_executor_job` or `_process_job` that is not classified in the registry (`io`, `short_cpu` under 0.5 s on x86, `worker`, `forwarder`, `over_budget`, `worker_fallback`), a stale entry, or a `worker` entry that is not a `JOBS` name. Add a new job here too. |
+| `tests/test_executor_job_registry_1728.py` | A callable handed to `_executor_job`, `async_add_executor_job` or `_process_job` that is not classified in the registry (`io`, `short_cpu` under 0.5 s on x86, `worker`, `forwarder`, `over_budget` (pinned set empty since Issue #1730), `worker_fallback`), a stale entry, or a `worker` entry that is not a `JOBS` name. Add a new job here too. |
 | `tests_ha/test_loop_responsiveness_1728.py` | On real Home Assistant: a v4 fit, night replay or cycle refit that makes the event loop lag (p99 above max(15 ms, 4 x idle p99), 25 ms on one core, or over 15% ticks lost). Thread-mode controls prove the probe sees the #1722 starvation. |
 
 ## Disclosure Path

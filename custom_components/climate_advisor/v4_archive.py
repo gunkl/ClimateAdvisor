@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import bisect
 import contextlib
+import heapq
 import json
 import logging
 import math
@@ -50,10 +51,12 @@ import os
 import sys
 import tempfile
 from array import array
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from . import store_json
 from .const import (
     V3_ARCHIVE_FILE,
     V3_ARCHIVE_LEADS,
@@ -117,7 +120,7 @@ class _Line:
         if i is None or col is None:
             return None
         v = col[i]
-        return None if v != v else round(float(v), 2)
+        return None if v != v else round(v, 2)
 
     def put_if_absent(self, epoch: int, lead: str, value: float) -> bool:
         if lead not in self.cols:
@@ -137,6 +140,48 @@ class _Line:
         n = len(self)
         cols = list(self.cols.values())
         return [self.base + i * _SLOT_S for i in range(n) if any(c[i] == c[i] for c in cols)]
+
+    def _window(self, start: float, end: float) -> tuple[int, int]:
+        """Index range ``[i0, i1)`` of the slots with ``start <= epoch < end``, from base and step (no scan)."""
+        if self.base is None:
+            return 0, 0
+        n = len(self)
+        top = self.base + n * _SLOT_S
+        if not (start < top and end > self.base and end > start):  # also false for NaN
+            return 0, 0
+        i0 = 0 if start <= self.base else math.ceil((start - self.base) / _SLOT_S)
+        i1 = n if end >= top else math.ceil((end - self.base) / _SLOT_S)
+        return i0, max(i0, i1)
+
+    def iter_slots(self, start: float = -math.inf, end: float = math.inf, *, reverse: bool = False) -> Iterator[int]:
+        """Epochs in ``[start, end)`` with at least one value, ascending (or descending), produced lazily."""
+        if self.base is None:
+            return
+        i0, i1 = self._window(start, end)
+        cols = list(self.cols.values())
+        for i in range(i1 - 1, i0 - 1, -1) if reverse else range(i0, i1):
+            if any(c[i] == c[i] for c in cols):
+                yield self.base + i * _SLOT_S
+
+    def series(self, lead: str, start: float, end: float) -> dict[int, float]:
+        """``{epoch: value}`` for one look-ahead with ``start <= epoch < end``; only the window is visited."""
+        col = self.cols.get(lead)
+        if col is None or self.base is None:
+            return {}
+        i0, i1 = self._window(start, end)
+        base = self.base
+        return {base + i * _SLOT_S: round(v, 2) for i, v in enumerate(col[i0:i1], i0) if v == v}
+
+    def span(self, lead: str) -> tuple[int, int] | None:
+        """``(first, last)`` epoch holding a value for ``lead``; scans only the leading/trailing NaN run."""
+        col = self.cols.get(lead)
+        if col is None or self.base is None:
+            return None
+        first = next((i for i, v in enumerate(col) if v == v), None)
+        if first is None:
+            return None
+        last = next(i for i in range(len(col) - 1, first - 1, -1) if col[i] == col[i])
+        return self.base + first * _SLOT_S, self.base + last * _SLOT_S
 
     def drop_before(self, cutoff: float) -> int:
         """Remove slots older than ``cutoff``; returns how many slot positions were dropped."""
@@ -347,7 +392,7 @@ class V4Archive:
             _LOGGER.info("v4_archive: no archive file yet, starting empty")
             return
         try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            raw = store_json.loads(self._path.read_bytes())
         except (OSError, ValueError) as err:
             _LOGGER.warning("v4_archive: failed to read archive file, starting fresh: %s", err)
             return
@@ -365,20 +410,9 @@ class V4Archive:
         for sensor, rows in sensors.items():
             if not isinstance(sensor, str) or not isinstance(rows, dict):
                 continue
-            line = _Line(self._leads)
-            for key, vals in rows.items():
-                try:
-                    epoch = int(key)
-                except TypeError, ValueError:
-                    continue
-                if epoch < cutoff or not isinstance(vals, list):
-                    continue
-                wrote = False
-                for lead, v in zip(leads, vals, strict=False):
-                    if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v):
-                        wrote |= line.put_if_absent(epoch, str(lead), float(v))
-                slots += 1 if wrote else 0
-            if len(line):
+            line, wrote = _parse_line(rows, leads, self._leads, cutoff)
+            slots += wrote
+            if line is not None:
                 self._lines[sensor] = line
         self._trim_stored_ca()  # derivable slots: do not hold the duplicate (older _ca-only slots stay)
         _LOGGER.info("v4_archive: loaded %d slots across %d sensor lines", slots, len(self._lines))
@@ -399,7 +433,7 @@ class V4Archive:
                     "at": round(last[0], 3),
                     "sensors": {sid: [[round(t, 3), v] for t, v in pts] for sid, pts in list(last[1].items())},
                 }
-            serialized = json.dumps(payload, separators=(",", ":"))
+            serialized = store_json.dumps(payload, depth=3)  # one slot per line: no long single GIL hold (Issue #1730)
         except (TypeError, ValueError, RuntimeError) as err:
             _LOGGER.error("v4_archive: failed to serialize archive: %s", err)
             return False
@@ -407,7 +441,7 @@ class V4Archive:
         tmp_path_str: str | None = None
         try:
             tmp_fd, tmp_path_str = tempfile.mkstemp(dir=self._path.parent, prefix=self._file_prefix, suffix=".tmp")
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            with os.fdopen(tmp_fd, "wb") as f:
                 f.write(serialized)
             os.replace(tmp_path_str, str(self._path))
             tmp_path_str = None
@@ -557,34 +591,112 @@ class V4Archive:
             out[CA_LINE] = len(self._ca_slots())
         return out
 
+    def sensors_with_slots(self) -> set[str]:
+        """Sensor ids holding at least one slot (``"_ca"`` when derivable): ``slot_count()``'s non-zero keys, found by
+        looking for one slot per line instead of listing them all (Issue #1730)."""
+        out = {s for s, line in list(self._lines.items()) if next(line.iter_slots(), None) is not None}
+        if self._ca_active():
+            if next(self._ca_candidates(-math.inf, math.inf), None) is not None:
+                out.add(CA_LINE)
+            else:
+                out.discard(CA_LINE)
+        return out
+
     def oldest_slot(self) -> int | None:
         """The earliest archived slot (Unix seconds) across every sensor, or None while the archive is empty."""
-        firsts = [slots[0] for slots in (line.slots() for line in self._lines.values()) if slots]
-        return min(firsts) if firsts else None
+        firsts = [next(line.iter_slots(), None) for line in list(self._lines.values())]
+        return min((f for f in firsts if f is not None), default=None)
+
+    def _ca_candidates(self, start: float, end: float, *, reverse: bool = False) -> Iterator[int]:
+        """Slots in ``[start, end)`` the derived ``"_ca"`` can answer: the primary node's and a stored ``"_ca"``'s."""
+        feeds = [self._lines[str(self.ca["primary"])].iter_slots(start, end, reverse=reverse)]
+        if CA_LINE in self._lines:
+            feeds.append(self._lines[CA_LINE].iter_slots(start, end, reverse=reverse))
+        last = None
+        for epoch in heapq.merge(*feeds, reverse=reverse):
+            if epoch != last:
+                last = epoch
+                yield epoch
 
     def series(self, sensor: str, lead: str, start: float, end: float) -> dict[int, float]:
         """``{slot_epoch: value}`` for one sensor and look-ahead with ``start <= slot < end`` (Unix seconds).
 
+        Only the window is visited (the index range comes from the line's base and the 30-minute step), so a short
+        window of a year-long line costs the window, not the line; ``-inf`` / ``inf`` give the whole line.
         Safe from an executor thread while the event loop records: it reads fixed-size columns by index.
         """
         if sensor == CA_LINE and self._ca_active():
             out: dict[int, float] = {}
-            for epoch in self._ca_slots():
-                if start <= epoch < end:
-                    v = self._ca_value(epoch, lead)
-                    if v is not None:
-                        out[epoch] = v
-            return out
-        line = self._lines.get(sensor)
-        if line is None:
-            return {}
-        out = {}
-        for epoch in line.slots():
-            if start <= epoch < end:
-                v = line.get(epoch, lead)
+            for epoch in self._ca_candidates(start, end):
+                v = self._ca_value(epoch, lead)
                 if v is not None:
                     out[epoch] = v
+            return out
+        line = self._lines.get(sensor)
+        return line.series(lead, start, end) if line is not None else {}
+
+    def series_leads(self, sensor: str, leads: Sequence[str], start: float, end: float) -> dict[str, dict[int, float]]:
+        """``{lead: series(sensor, lead, start, end)}`` for several look-aheads in one pass (Issue #1730).
+
+        The derived ``"_ca"`` picks, once per slot, the line each look-ahead reads (the bedroom line in the sleep
+        window, else the primary node's; a stored ``"_ca"`` line answers what that one cannot), not once per look-ahead.
+        """
+        if not (sensor == CA_LINE and self._ca_active()):
+            return {lead: self.series(sensor, lead, start, end) for lead in leads}
+        out: dict[str, dict[int, float]] = {lead: {} for lead in leads}
+        primary, sleep = self.ca.get("primary"), self.ca.get("sleep")
+        by_sleep = bool(sleep) and sleep != primary
+        views = [  # (base, slots, columns) per line, read once: what _Line.get does per value
+            (line.base, len(line), line.cols) if line is not None and line.base is not None else None
+            for line in (
+                self._lines.get(str(primary)),
+                self._lines.get(str(sleep)) if by_sleep else None,
+                self._lines.get(CA_LINE),
+            )
+        ]
+        node, sleep_line, stored = views
+        wanted = [(lead, out[lead]) for lead in leads]
+        for epoch in self._ca_candidates(start, end):
+            first = sleep_line if by_sleep and self._in_sleep(epoch) else node
+            i1 = i2 = None
+            if first is not None:
+                i = (epoch - first[0]) // _SLOT_S
+                i1 = i if 0 <= i < first[1] else None
+            if stored is not None:
+                i = (epoch - stored[0]) // _SLOT_S
+                i2 = i if 0 <= i < stored[1] else None
+            first_cols = first[2] if first is not None else {}
+            stored_cols = stored[2] if stored is not None else {}
+            for lead, dest in wanted:
+                v = None
+                col = first_cols.get(lead)
+                if i1 is not None and col is not None and col[i1] == col[i1]:
+                    v = col[i1]
+                else:
+                    col = stored_cols.get(lead)
+                    if i2 is not None and col is not None and col[i2] == col[i2]:
+                        v = col[i2]
+                if v is not None:
+                    dest[epoch] = round(v, 2)
         return out
+
+    def span(self, sensor: str, lead: str) -> tuple[int, int] | None:
+        """``(first, last)`` slot holding a value for ``sensor`` at ``lead``, or None; no whole-line scan."""
+        if sensor == CA_LINE and self._ca_active():
+            ends = [
+                next(
+                    (
+                        e
+                        for e in self._ca_candidates(-math.inf, math.inf, reverse=rev)
+                        if self._ca_value(e, lead) is not None
+                    ),
+                    None,
+                )
+                for rev in (False, True)
+            ]
+            return (ends[0], ends[1]) if ends[0] is not None and ends[1] is not None else None
+        line = self._lines.get(sensor)
+        return line.span(lead) if line is not None else None
 
     def snapshot(self) -> dict[str, dict[int, dict[str, float]]]:
         """A copy of the archive in the legacy dict shape that is safe to read from another thread."""
@@ -634,6 +746,78 @@ def _parse_last(raw: object) -> tuple[float, dict[str, list[tuple[float, float]]
         if curve:
             curves[sid] = curve
     return (float(raw["at"]), curves) if curves else None
+
+
+def _parse_line(rows: dict, file_leads: list, leads: tuple[str, ...], cutoff: float) -> tuple[_Line | None, int]:
+    """One sensor's stored rows -> ``(line | None, slots_written)``, as ``put_if_absent`` per value would build it.
+
+    Columnar (Issue #1730): the rows are written straight into float32 columns, lead by lead, instead of one method call
+    (with a bounds check and a possible resize) per value. Same rules: a row needs an integer-like key at or after
+    ``cutoff`` and a list value; only a finite non-bool number in a lead this archive keeps is written; the first value
+    for a slot and look-ahead wins; the line starts at the earliest slot that took a value and ends at the latest, so a
+    row with no usable value never grows it. Epochs that do not sit on one 30-minute grid (a hand-edited file) take the
+    per-value path, whose result depends on the order of the rows.
+    """
+    ep: list[int] = []
+    vl: list[list] = []
+    for key, vals in rows.items():
+        try:
+            epoch = int(key)
+        except TypeError, ValueError:
+            continue
+        if epoch < cutoff or not isinstance(vals, list):
+            continue
+        ep.append(epoch)
+        vl.append(vals)
+    if not ep:
+        return None, 0
+    base0 = min(ep)
+    if any((e - base0) % _SLOT_S for e in ep):
+        return _parse_line_by_value(ep, vl, file_leads, leads)
+    idx = [(e - base0) // _SLOT_S for e in ep]
+    n = max(idx) + 1
+    cols: dict[str, array] = {}
+    wrote = bytearray(len(ep))
+    for j, lead in enumerate(file_leads):
+        lead = str(lead)
+        if lead not in leads:
+            continue
+        col = cols.get(lead)
+        if col is None:
+            col = cols[lead] = array("f", [_NAN]) * n
+        for r, (i, vals) in enumerate(zip(idx, vl, strict=True)):
+            if j < len(vals):
+                v = vals[j]
+                t = type(v)
+                if (t is float or t is int) and v - v == 0 and col[i] != col[i]:  # finite, not a bool, first write wins
+                    col[i] = v
+                    wrote[r] = 1
+    written = sum(wrote)
+    if not written:
+        return None, 0
+    used = [idx[r] for r in range(len(ep)) if wrote[r]]
+    lo, hi = min(used), max(used) + 1
+    line = _Line(leads)
+    line.base = base0 + lo * _SLOT_S
+    for lead in leads:
+        col = cols.get(lead)
+        line.cols[lead] = col[lo:hi] if col is not None else array("f", [_NAN]) * (hi - lo)
+    return line, written
+
+
+def _parse_line_by_value(
+    ep: list[int], vl: list[list], file_leads: list, leads: tuple[str, ...]
+) -> tuple[_Line | None, int]:
+    """The per-value build (``put_if_absent`` for each value, rows in file order): what a load always did."""
+    line = _Line(leads)
+    slots = 0
+    for epoch, vals in zip(ep, vl, strict=True):
+        wrote = False
+        for lead, v in zip(file_leads, vals, strict=False):
+            if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v):
+                wrote |= line.put_if_absent(epoch, str(lead), float(v))
+        slots += 1 if wrote else 0
+    return (line, slots) if len(line) else (None, slots)
 
 
 def fill_tolerance_s(lead: str) -> float:

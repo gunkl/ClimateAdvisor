@@ -65,6 +65,7 @@ custom_components.climate_advisor.setpoint_verify_decision
 custom_components.climate_advisor.state
 custom_components.climate_advisor.status_text
 custom_components.climate_advisor.storage_paths
+custom_components.climate_advisor.store_json
 custom_components.climate_advisor.thermal_lead_time
 custom_components.climate_advisor.thermostat_recal
 custom_components.climate_advisor.time_utils

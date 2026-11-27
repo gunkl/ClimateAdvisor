@@ -863,6 +863,7 @@ source = { virtual = "." }
 [package.dev-dependencies]
 test = [
     { name = "hypothesis" },
+    { name = "orjson" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -883,6 +884,7 @@ test-ha = [
 [package.metadata.requires-dev]
 test = [
     { name = "hypothesis", specifier = ">=6.170.15" },
+    { name = "orjson", specifier = ">=3.10" },
     { name = "pre-commit", specifier = ">=4.0" },
     { name = "pytest", specifier = ">=7.0" },
     { name = "pytest-cov", specifier = ">=4.0" },

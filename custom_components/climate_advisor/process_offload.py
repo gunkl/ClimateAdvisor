@@ -6,7 +6,9 @@ Data goes in and out as JSON; the child's log records are relayed to the caller'
 
 Stdlib-only: this module must not import ``homeassistant`` or any sibling module at import
 time, because the child imports it before the job module. Job modules are resolved lazily
-from the fixed :data:`JOBS` allowlist.
+from the fixed :data:`JOBS` allowlist. The one exception is ``store_json`` (orjson and the stdlib only), imported inside
+the functions that encode or decode: the payload and the result travel one element per line (Issue #1730), so a few MB
+never hold the GIL (and so the event loop) in one long call.
 """
 
 from __future__ import annotations
@@ -122,8 +124,8 @@ def run_job(job: str, payload: dict[str, Any]) -> Any:
 
 def _thread_run(job: str, payload: dict[str, Any]) -> Any:
     """Thread-mode body: identical data types to process mode via a JSON round-trip."""
-    result = run_job(job, json.loads(json.dumps(payload)))
-    return json.loads(json.dumps(result))
+    result = run_job(job, _decode(_encode_value(payload)))
+    return _decode(_encode_value(result))
 
 
 def _encode(job: str, payload: dict[str, Any], log_level: int = logging.INFO) -> bytes:
@@ -132,12 +134,22 @@ def _encode(job: str, payload: dict[str, Any], log_level: int = logging.INFO) ->
     ``log_level`` (the caller logger's effective level) travels in the envelope, not the payload: the child logs at
     that level, so DEBUG lines are relayed exactly when the parent would show them.
     """
-    return json.dumps({"job": job, "payload": payload, "log_level": log_level}).encode()
+    return _encode_value({"job": job, "payload": payload, "log_level": log_level})
+
+
+def _encode_value(value: Any) -> bytes:
+    """``value`` as JSON bytes, one element per line. Lossless (the stdlib's NaN/Infinity tokens, not ``null``): a job
+    function can see the same floats in a worker process as in a thread."""
+    from . import store_json  # noqa: PLC0415 - lazy: nothing sibling is imported when this module loads
+
+    return store_json.dumps(value, depth=3, lossless=True)
 
 
 def _decode(raw: bytes) -> Any:
     """Decode the child's stdout envelope (any JSON; the caller checks it is an object)."""
-    return json.loads(raw.decode())
+    from . import store_json  # noqa: PLC0415
+
+    return store_json.loads(raw)
 
 
 def _cap_message(msg: str) -> str:
@@ -355,17 +367,17 @@ def _child_main() -> int:
     root.setLevel(logging.INFO)
     try:
         try:
-            msg = json.loads(raw.decode())
+            msg = _decode(raw)
             level = msg.get("log_level")  # the caller's effective level (see _encode)
             level = level if isinstance(level, int) and not isinstance(level, bool) else logging.INFO
             handler.setLevel(level)
             root.setLevel(level)
             envelope: dict[str, Any] = {"ok": True, "result": run_job(msg["job"], msg["payload"])}
-            body = json.dumps(envelope)
+            body = _encode_value(envelope)
         except Exception as err:  # noqa: BLE001 - reported to the parent
             logging.getLogger(__name__).error("Worker job failed", exc_info=True)
-            body = json.dumps({"ok": False, "error": _error_text(err)})
-        out.write(body.encode())
+            body = _encode_value({"ok": False, "error": _error_text(err)})
+        out.write(body)
         out.flush()
     finally:
         root.removeHandler(handler)

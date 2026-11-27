@@ -71,7 +71,7 @@ def test_file_is_compact_versioned_and_delta_encoded(tmp_path: Path) -> None:
     s.add(_cycle(T0), now=T0 + 3600)
     s.save()
     text = path.read_text()
-    assert " " not in text and "\n" not in text  # compact separators
+    assert " " not in text  # compact separators (newlines only between cycles, Issue #1730)
     raw = json.loads(text)
     # v2 (Issue #1512 finding 6): each series stores its own native decimal places instead of fixed centi-degrees
     assert raw["v"] == 2

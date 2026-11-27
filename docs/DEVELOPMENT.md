@@ -42,6 +42,8 @@ any pytest run, while `tests/conftest.py` stubs `homeassistant` for the whole pr
 this, and every command uses `--only-group`. `scripts/test.py` gives each tier its own venv and creates it on the first
 run: `.venv-test` and `.venv-test-ha` (on Windows, `~/.cache/climate-advisor/venv-test-ha` inside WSL).
 
+The `test` group includes `orjson` (Issue #1730): the integration's large stores use `store_json.py`, and Home Assistant core pins orjson in production, but the stubbed unit tier and `tools/simulate.py` (which run under `.venv-test`) need it named. An older `.venv-test` without it fails on import; refresh it.
+
 After editing dependencies, run `uv lock` and commit `uv.lock`. CI and `scripts/test.py` both use `--locked`.
 
 ## Running Tests
@@ -157,7 +159,7 @@ Three checks stop background work from freezing Home Assistant (the #1722 proble
 - `short_cpu`: pure Python CPU. Give `ms`, the measured worst case on x86 (thread CPU, GC off), and `at`, the input size you measured on. It must be under 0.5 s. If it can run longer, make it a worker job instead: see [process-offload-brief.md](process-offload-brief.md#adding-a-job).
 - `worker`: a `process_offload.JOBS` name run through `_process_job`.
 - `forwarder`: a wrapper that only passes its parameter on. Nothing to cost.
-- `over_budget`: known debt. Only `V4Archive.load` is pinned here. Do not add to it.
+- `over_budget`: known debt. The pinned set is empty (`V4Archive.load` was reclassified in Issue #1730). Do not add to it: a new heavy job becomes a worker job.
 - `worker_fallback`: the thread fallback that runs a whole worker job when a worker process cannot start. Only `process_offload._thread_run` is pinned here.
 
 An `io` entry with `cpu_ms`, or a `short_cpu` entry, above 60% of the budget must carry `near_budget=True` and say it is tracked for moving to a worker. Costs are measured with GC off; GC is a process-wide cost, reported by the perf probe.

@@ -229,3 +229,26 @@ def test_two_coordinators_share_the_cap(procs, monkeypatch) -> None:
         assert await ta == 1 and await tb == 1
 
     asyncio.run(go())  # a loop of its own: the shared harness loop would keep this test's limit
+
+
+def test_a_loop_that_cannot_be_weakly_referenced_still_shares_one_cap(procs, monkeypatch) -> None:
+    """The fallback table: a loop type without weak references (not asyncio's own) still gets one semaphore."""
+    monkeypatch.setattr(po, "worker_limit_override", 1)
+
+    class _NoWeakRefs:
+        def get(self, _loop):
+            raise TypeError("cannot create weak reference")
+
+    monkeypatch.setattr(po, "_SLOTS", _NoWeakRefs())
+    monkeypatch.setattr(po, "_SLOTS_FALLBACK", {})
+
+    async def go() -> None:
+        first, second = _run(), _run()
+        await _settle()
+        assert len(procs) == 1 and len(po._SLOTS_FALLBACK) == 1  # one slot, shared: the second job waits
+        procs[0].gate.set()
+        await _settle()
+        procs[1].gate.set()
+        assert await first + await second == 2
+
+    asyncio.run(go())

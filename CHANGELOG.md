@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.89] — 2026-11-27
+
+### Added
+- #1730: Climate Advisor now watches how responsive Home Assistant is and shows it on the Debug card: how late Home Assistant's event loop runs, and how much processor time Climate Advisor's own background jobs and plan build take. If Home Assistant's event loop keeps running late (for 10 of the last 60 minutes), Climate Advisor writes one warning to the log that says whether its own work is the likely cause or the delay probably comes from somewhere else in Home Assistant (another integration, the recorder, a backup). It writes one more line when things are back to normal, and a reminder once a day if it lasts. It only measures and reports; nothing else changes. On machines with few cores, Climate Advisor now runs at most one fewer learning process than the machine has cores at once, so Home Assistant always keeps a core.
+
 ## [0.9.88] — 2026-11-27
 
 ### Changed

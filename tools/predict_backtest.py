@@ -1043,6 +1043,7 @@ def fit_week_shared(
     min_train_days: float,
     info: dict[str, Any],
     carry_from: Any = None,
+    warm_start: Any = None,
 ) -> tuple[Any, str, list[str]] | None:
     """One week's fit through ``predictor_v4.choose_control_model`` - the live fit's own rule and gate (Issue #1432):
     A (the stitched ``_ca`` reading) or B (the primary entity + the inferred sleep sensor as a node), B only once both
@@ -1082,6 +1083,7 @@ def fit_week_shared(
             horizon_h=12,
             sample_filter=no_leak,
             **_carry_kw(pred.choose_control_model, carry_from),
+            **_warm_kw(pred.choose_control_model, warm_start),
         )
         model, primary, nodes = chosen.model, chosen.primary, list(chosen.nodes)
         info["primary"], info["nodes"] = primary, list(nodes)
@@ -1104,15 +1106,25 @@ def fit_week_shared(
     return model, primary, nodes
 
 
-def _carry_kw(fn: Any, carry_from: Any) -> dict[str, Any]:
-    """``{"carry_from": model}`` when there is one and ``fn`` takes it (an older predictor module does not)."""
-    if carry_from is None:
+def _model_kw(fn: Any, name: str, model: Any) -> dict[str, Any]:
+    """``{name: model}`` when there is one and ``fn`` takes it (an older predictor module does not)."""
+    if model is None:
         return {}
     try:
         params = inspect.signature(fn).parameters
     except TypeError, ValueError:
         return {}
-    return {"carry_from": carry_from} if "carry_from" in params else {}
+    return {name: model} if name in params else {}
+
+
+def _carry_kw(fn: Any, carry_from: Any) -> dict[str, Any]:
+    """Issue #1525: the season-carry source."""
+    return _model_kw(fn, "carry_from", carry_from)
+
+
+def _warm_kw(fn: Any, warm_start: Any) -> dict[str, Any]:
+    """Issue #1726: the live nightly fit's LM seed."""
+    return _model_kw(fn, "warm_start", warm_start)
 
 
 def grid_steps(anchor: datetime, count: int) -> list[datetime]:
@@ -1207,6 +1219,8 @@ def run_backtest(
         if model is None or (wi - last_fit_week) >= args.refit_every_weeks:
             # Issue #1525: the previous fit carries what this window does not show (the live nightly fit's rule)
             carry_from = model if not getattr(args, "no_carry", False) else None
+            # Issue #1726: the live nightly fit also seeds LM from the previous model; opt in to see warm-start effects
+            warm_start = model if getattr(args, "warm_start", False) else None
             lo_ep = W_ep - args.train_days * 86400 if args.train_days else -1e18
             train_rows = [r for t, r in zip(idx.t, idx.rows, strict=True) if lo_ep <= t < W_ep]
             snaps = [s for s in snaps_sorted if parse_ts(s["issued"], tz).timestamp() < W_ep]
@@ -1230,6 +1244,7 @@ def run_backtest(
                     min_train_days=args.min_train_days,
                     info=info,
                     carry_from=carry_from,
+                    warm_start=warm_start,
                 )
                 if fitted is None:
                     if info.get("fit_error"):
@@ -1290,6 +1305,7 @@ def run_backtest(
                         horizon_h=12,
                         **disp_kw,
                         **_carry_kw(pred.fit, carry_from),
+                        **_warm_kw(pred.fit, warm_start),
                     )
                     seen_nodes.update(dict.fromkeys(getattr(model, "display_nodes", None) or {}))
                     last_fit_week = wi
@@ -1633,6 +1649,7 @@ def run_backtest(
                 "window_plan_source": getattr(args, "window_plan_source", "record"),
                 "train_days": args.train_days,
                 "season_carry": not getattr(args, "no_carry", False),
+                "warm_start": bool(getattr(args, "warm_start", False)),
                 "refit_every_weeks": args.refit_every_weeks,
                 "anchor_step_hours": args.anchor_step_hours,
             },
@@ -2121,10 +2138,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="diagnostic: also score anchors whose setpoint in force is unknown (no logged setpoint, no target band); "
         "by default they are excluded for every model",
     )
-    p.add_argument(
+    # a warm start is also fit()'s default carry source, so --warm-start cannot be combined with --no-carry
+    seed = p.add_mutually_exclusive_group()
+    seed.add_argument(
         "--no-carry",
         action="store_true",
         help="diagnostic (Issue #1525): fit each week from its window alone, without the previous week's season carry",
+    )
+    seed.add_argument(
+        "--warm-start",
+        action="store_true",
+        help="diagnostic (Issue #1726): seed each week's fit from the previous week's model, as the live nightly fit "
+        "does (the default backtest fits every week cold, so it cannot see warm-start / restart changes); not with "
+        "--no-carry (the warm start would carry the season anyway)",
     )
     p.add_argument("--no-v3", action="store_true")
     p.add_argument("--no-diagnostic", action="store_true", help="skip the v4-with-actual-inputs variant")

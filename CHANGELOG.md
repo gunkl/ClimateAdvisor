@@ -3,6 +3,14 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.90] — 2026-11-27
+
+### Changed
+- #1734, #1727: when Climate Advisor decides whether to suggest opening the windows, it now weighs the benefit over the next 3 days (or until a day after the windows would close, if that is later), instead of over the whole week-long forecast. Before, today's suggestion could hinge on the forecast for 5 to 7 days out, which is much less reliable. In a small number of cases (well under 1 in 100 plans, and only with the newer prediction model) the next two days' window suggestions differ from before. Building the plan also takes about a third less processor time.
+
+### Fixed
+- On the night the clocks go forward, the plan's predicted heating and cooling could be slightly off when a window period started between about 2 and 4 am. This was a rare slip in the speedup added in 0.9.88.
+
 ## [0.9.88] — 2026-11-27
 
 ### Changed

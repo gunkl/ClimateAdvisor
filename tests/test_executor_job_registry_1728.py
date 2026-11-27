@@ -54,7 +54,8 @@ Classes (``REGISTRY[id]["cls"]``):
   it exists so the guard can be merged while the owner decides (move to a worker job, or make the work cheaper).
   Once the cost falls under the budget the entry must be reclassified (the test fails on a stale ``over_budget``). The
   SET of ``over_budget`` ids is pinned (``_ALLOWED_OVER_BUDGET``): a new heavy job must become a worker job, it cannot
-  be parked here.
+  be parked here. The set is empty since Issue #1730 (``V4Archive.load`` left it: a columnar load of 3 sensors x 7
+  leads x 400 days is about 175 ms).
 * ``worker_fallback``: ``process_offload._thread_run``, the whole worker job run in an executor thread. It can exceed
   the budget BY DESIGN, and only when a worker process cannot start (``OSError`` from the spawn, a degraded host); the
   production path is the process. The set of ids with this class is pinned (``_ALLOWED_FALLBACK``).
@@ -273,8 +274,8 @@ def over_budget(ms: float, at: str, reason: str) -> dict[str, Any]:
 
 
 _LEARN = (
-    "LearningEngine.save_state: json.dumps(asdict(state)) + atomic write; "
-    "89 ms at 90 records + 200 obs x 200 samples (6.4 MB)"
+    "LearningEngine.save_state: store_json.dumps(asdict(state), lossless) + atomic write; "
+    "85 ms at 90 records + 200 obs x 200 samples (3.6 MB)"
 )
 _MAX_LOG = "17,520-row (365-day) chart log"
 
@@ -285,60 +286,72 @@ REGISTRY: dict[str, dict[str, Any]] = {
     "__init__.py:_panel_asset_bytes": io("reads the panel pages and catalogs to hash them (5.3 MB, 7.6 ms)"),
     # ---- api.py -------------------------------------------------------------------------------------------------
     "api.py:coordinator.get_chart_data": short_cpu(
-        95,
-        f"range=1y, {_MAX_LOG}, 60 h forecast (30d: 33 ms, 7d: 14 ms)",
-        "dashboard chart: filter/bucket the chart log, v3 ODE curve",
+        450,
+        f"range=1y, {_MAX_LOG}, 60 h forecast, v4 archive 3 sensors x 7 leads x 400 days (quiet runs 404-450; one "
+        "loaded run 541; 30d: 120, 7d: 56, 24h: 38). 5 sensors at 1y: 550-650 ms, OVER the budget",
+        "dashboard chart: filter/bucket the chart log, v3 ODE curve, and the v4 block (build_chart_v4), which since "
+        "Issue #1730 reads only the requested window of the archive and the first/last slot for past_span (before: "
+        "1.5 s at 3 sensors for ANY range, 2.3 s at 5). NEAR BUDGET (90%): the 1y range is the whole archive, a Pi "
+        "holds the GIL ~2.3 s. Tracked for moving to a worker",
+        near_budget=True,
     ),
-    "api.py:coordinator.learning.save_state": io(_LEARN, cpu_ms=89, at="max learning state"),
+    "api.py:coordinator.learning.save_state": io(_LEARN, cpu_ms=85, at="max learning state"),
     "api.py:coordinator._save_investigation_reports": io("atomic JSON write of the report history"),
     "api.py:ClimateAdvisorPredictionAccuracyView.get._build": short_cpu(
-        330,
-        f"range=1y, {_MAX_LOG}, 1-year v4+v3 archive, 4 sensors x 4 leads (24h-30d: 190-200 ms)",
-        "prediction-accuracy payload; also reads the backtest file (io). NEAR BUDGET (66%): a Pi holds the GIL ~1.6 s; "
-        "tracked for moving to a worker",
+        285,
+        f"range=1y, {_MAX_LOG}, v4 archive 3 sensors x 7 leads x 400 days + v3 archive, _ca (a node sensor: 150 ms; "
+        "30d: 75 ms, 24h: 48 ms; before Issue #1730: 270-460 ms for every range)",
+        "prediction-accuracy payload; also reads the backtest file (io). Windows of the chart log are found by "
+        "bisection (ChartStateLog sorted view) and each row's time is parsed once",
         calls=("dt_util.now", "prediction_accuracy.build_prediction_accuracy", "prediction_accuracy.load_backtest"),
-        near_budget=True,
     ),
     # ---- claude_api.py / config_flow.py: the SDK client builds an SSL context and reads the CA bundle ---------------
     "claude_api.py:AsyncAnthropic": io("Anthropic SDK client construction (SSL context, CA bundle read)"),
     "config_flow.py:ClaudeAPIClient": io("client construction for the connection test (SSL context)"),
     # ---- coordinator.py: persistence ---------------------------------------------------------------------------
-    "coordinator.py:self._chart_log.load": io("chart log JSON read", cpu_ms=34, at=_MAX_LOG),
-    "coordinator.py:self._chart_log.save": io("chart log atomic JSON write", cpu_ms=29, at=_MAX_LOG),
+    "coordinator.py:self._chart_log.load": io("chart log JSON read", cpu_ms=45, at=_MAX_LOG),
+    "coordinator.py:self._chart_log.save": io("chart log atomic JSON write", cpu_ms=20, at=_MAX_LOG),
     "coordinator.py:self.learning.load_state": io("learning state JSON read"),
-    "coordinator.py:self.learning.save_state": io(_LEARN, cpu_ms=89, at="max learning state"),
+    "coordinator.py:self.learning.save_state": io(_LEARN, cpu_ms=85, at="max learning state"),
     "coordinator.py:self._state_persistence.load": io("small state JSON read"),
     "coordinator.py:self._state_persistence.save": io("small state JSON atomic write"),
     "coordinator.py:self._forecast_archive.load": io(
-        "forecast archive JSON read", cpu_ms=64, at="8,760 hourly snapshots"
+        "forecast archive JSON read", cpu_ms=55, at="8,760 hourly snapshots"
     ),
     "coordinator.py:self._forecast_archive.save": io(
-        "forecast archive atomic JSON write", cpu_ms=104, at="8,760 hourly snapshots (365 days)"
+        "forecast archive atomic JSON write", cpu_ms=30, at="8,760 hourly snapshots (365 days)"
     ),
     "coordinator.py:self._v4_store.load": io("v4 model store JSON read (one model dict)"),
     "coordinator.py:self._v4_store.save": io("v4 model store atomic JSON write (one model dict, 0.5 ms)"),
-    "coordinator.py:self._v3_archive.load": io("v3 archive JSON read", cpu_ms=125, at="1 sensor x 4 leads x 400 days"),
+    "coordinator.py:self._v3_archive.load": io("v3 archive JSON read", cpu_ms=75, at="1 sensor x 4 leads x 400 days"),
     "coordinator.py:self._v3_archive.save": io(
-        "v3 archive atomic JSON write", cpu_ms=70, at="1 sensor x 4 leads x 400 days"
+        "v3 archive atomic JSON write", cpu_ms=105, at="1 sensor x 4 leads x 400 days"
     ),
     "coordinator.py:self._v4_archive.save": io(
-        "v4 archive atomic JSON write (rebuilds the dict of every slot first; hourly at most). NEAR BUDGET (64%): a Pi "
-        "holds the GIL ~1.6 s. Tracked for moving to a worker",
-        cpu_ms=322,
-        at="3 sensors x 7 leads x 400 days (2 sensors: 224 ms)",
+        "v4 archive atomic JSON write (rebuilds the dict of every slot first, then one orjson call per slot; hourly at "
+        "most). NEAR BUDGET (70%): a Pi holds the GIL ~1.8 s. Tracked for moving to a worker. 5 sensors: 480-520 ms "
+        "(623 before Issue #1730), at the budget",
+        cpu_ms=350,
+        at="3 sensors x 7 leads x 400 days (2 sensors: 200-265 ms)",
         near_budget=True,
     ),
-    "coordinator.py:self._cycle_store.load": io("cycle store JSON read"),
+    "coordinator.py:self._cycle_store.load": io(
+        "cycle store JSON read (a fast decode of the stored cycles; 1.4-1.5 s before Issue #1730). NEAR BUDGET (94%): "
+        "a Pi holds the GIL ~2.3 s. Tracked for moving to a worker",
+        cpu_ms=470,
+        at="3,000 cycles x 400 samples = the store cap (medians 430-465, one loaded run 504; 72 samples: 100-110 ms)",
+        near_budget=True,
+    ),
     "coordinator.py:self._cycle_store.save": io(
-        "cycle store atomic JSON write (compacts every cycle). NEAR BUDGET (93%, worst case): a Pi holds the GIL "
-        "~2.3 s. Tracked for moving to a worker",
-        cpu_ms=464,
-        at="3,000 cycles x 400 samples = the store cap with every cycle at the sample cap (72-150 samples: 84-161 ms)",
+        "cycle store atomic JSON write (compacts every cycle). NEAR BUDGET (80%, worst case): a Pi holds the GIL "
+        "~2 s. Tracked for moving to a worker",
+        cpu_ms=400,
+        at="3,000 cycles x 400 samples = the store cap with every cycle at the sample cap (72 samples: 65-70 ms)",
         near_budget=True,
     ),
     "coordinator.py:store.save": io(
         "cycle store atomic JSON write at shutdown (see self._cycle_store.save). Tracked for moving to a worker",
-        cpu_ms=464,
+        cpu_ms=400,
         at="store cap, 400 samples",
         near_budget=True,
     ),
@@ -349,12 +362,11 @@ REGISTRY: dict[str, dict[str, Any]] = {
     "coordinator.py:self._save_investigation_reports": io("investigation report history atomic JSON write"),
     "coordinator.py:_ClaudeAPIClient": io("shared Anthropic client construction (SSL context, CA bundle read)"),
     # ---- coordinator.py: the findings -------------------------------------------------------------------------------
-    "coordinator.py:self._v4_archive.load": over_budget(
-        626,
-        "3 sensors x 7 leads x 400 days (the archive's own retention); median 503 ms; 2 sensors 363 ms median, 592 max",
-        "FINDING (#1728): json.loads + one Python put_if_absent per value, once at startup. "
-        "A Pi holds the GIL 2.5-3 s. "
-        "Owner decision: make load cheaper, or load it in a worker. Reclassify when it is under the budget",
+    "coordinator.py:self._v4_archive.load": io(
+        "v4 archive JSON read at startup: one orjson call per slot, then a columnar build (no put_if_absent per "
+        "value). Left the over_budget ratchet in Issue #1730 (626 ms before)",
+        cpu_ms=175,
+        at="3 sensors x 7 leads x 400 days (the archive's own retention; 2 sensors 100-120 ms, 5 sensors 250-315 ms)",
     ),
     # ---- coordinator.py: short CPU ---------------------------------------------------------------------------------
     "coordinator.py:_build_predicted_indoor_future": short_cpu(
@@ -392,20 +404,20 @@ REGISTRY: dict[str, dict[str, Any]] = {
         0.9, "200 samples (THERMAL_MAX_OBS_SAMPLES), 2-parameter OLS", "one thermal observation's OLS"
     ),
     "coordinator.py:v4_shadow.fit_job_payload": short_cpu(
-        114,
-        f"train_days=30 (production), {_MAX_LOG}, 8,760 hourly forecast snapshots",
-        "windows the chart rows and prefetches the forecast archive for the v4_fit worker. NOTE train_days=None is "
-        "1.3 s: production never passes it",
+        3,
+        f"train_days=30 (production), {_MAX_LOG}, 8,760 hourly forecast snapshots (was 114 ms)",
+        "finds the chart rows by bisection (ChartStateLog.rows_between) and ships the forecast snapshots in their "
+        "compact stored form; the v4_fit worker decodes them (forecast_archive.decode_snapshot; 0.1 s for the fit's "
+        "744). NOTE train_days=None reads every row: production never passes it",
     ),
     "coordinator.py:v4_shadow.display_fit_job_payload": short_cpu(
-        30, f"train_days=30, {_MAX_LOG}", "windows the chart rows for the v4_display_fit worker"
+        3, f"train_days=30, {_MAX_LOG} (was 30 ms)", "finds the chart rows by bisection for the v4_display_fit worker"
     ),
     "coordinator.py:night_replay.nightly_job_payload": short_cpu(
-        364,
-        f"105-day horizon (30 + 60 x 1.1 + 9), {_MAX_LOG}, 8,760 hourly snapshots; best 324 ms",
-        "windows rows and prefetches the forecast archive for the v4_night_replay worker. NEAR BUDGET (73%): a Pi "
-        "holds the GIL ~1.8 s once a night. Candidate to move into the worker; tracked for moving to a worker",
-        near_budget=True,
+        9,
+        f"105-day horizon (30 + 60 x 1.1 + 9), {_MAX_LOG}, 8,760 hourly snapshots (was 364 ms)",
+        "finds the rows by bisection and ships the 2,544 snapshots of the horizon compact; the v4_night_replay worker "
+        "decodes them (about 0.3 s there, off the GIL of Home Assistant). The payload is 3.2 MB, was 8.7 MB",
     ),
     "coordinator.py:process_job:v4_fit": worker("the v4 fit (21-24 s on x86)"),
     "coordinator.py:process_job:v4_display_fit": worker("the v4 display-only fit"),
@@ -413,14 +425,15 @@ REGISTRY: dict[str, dict[str, Any]] = {
     "coordinator.py:process_job:cycle_refit": worker("the pooled cycle-model refit (1.2-1.5 s on x86)"),
     # ---- process_offload.py: the callables async_run_job hands to its ``executor_job`` parameter ---------------------
     "process_offload.py:_encode": short_cpu(
-        52,
-        "json.dumps of a 5.1 MB envelope: all 17,520 chart rows (more than any real job windows) + 8,760 forecast "
-        "snapshots of 12 values",
-        "serialises the worker payload for the child's stdin (a 105-day night replay payload is about 2 MB, 24 ms)",
+        150,
+        "store_json.dumps of a 7 MB envelope: all 17,520 chart rows (more than any real job windows) + 8,760 forecast "
+        "snapshots of 12 values (one orjson call per element: 60-80 ms as one json.dumps before Issue #1730; the real "
+        "105-day night replay payload is 3.2 MB, 66 ms)",
+        "serialises the worker payload for the child's stdin; each element is its own short GIL hold",
     ),
     "process_offload.py:_decode": short_cpu(
-        45,
-        "json.loads of a 5.1 MB result (the real results are small model dicts, a few KB)",
+        85,
+        "store_json.loads of a 7 MB result (the real results are small model dicts, a few KB)",
         "decodes the worker's stdout envelope",
     ),
     "process_offload.py:_thread_run": worker_fallback(
@@ -445,8 +458,8 @@ REGISTRY: dict[str, dict[str, Any]] = {
     "fix_history.py:_recent_release_notes": short_cpu(
         6.4, "the real fix_history.jsonl (727 records), 5 versions, with the file read", "group and nlargest"
     ),
-    "services.py:coordinator.learning.save_state": io(_LEARN, cpu_ms=89, at="max learning state"),
-    "services.py:zone_coordinator.learning.save_state": io(_LEARN, cpu_ms=89, at="max learning state"),
+    "services.py:coordinator.learning.save_state": io(_LEARN, cpu_ms=85, at="max learning state"),
+    "services.py:zone_coordinator.learning.save_state": io(_LEARN, cpu_ms=85, at="max learning state"),
     "services.py:zone_coordinator.learning.reset": io("clears the learning state and writes it"),
 }
 
@@ -455,13 +468,13 @@ _BUDGET_MS = _EXECUTOR_CPU_BUDGET_S * 1000
 _NEAR_BUDGET_FRACTION = 0.6  # a short_cpu (ms) or io (cpu_ms) entry above this share carries near_budget=True
 
 # Pinned sets: adding to either is a reviewed decision in THIS file, never a side effect of adding a registry entry.
-_ALLOWED_OVER_BUDGET = frozenset({"coordinator.py:self._v4_archive.load"})  # known debt; do not add to it
+_ALLOWED_OVER_BUDGET: frozenset[str] = frozenset()  # empty since Issue #1730 (V4Archive.load); do not add to it
 _ALLOWED_FALLBACK = frozenset({"process_offload.py:_thread_run"})
 _EXPECTED_NEAR_BUDGET = frozenset(
     {
-        "api.py:ClimateAdvisorPredictionAccuracyView.get._build",
+        "api.py:coordinator.get_chart_data",
         "coordinator.py:ClimateAdvisorCoordinator._cycle_judge._job",
-        "coordinator.py:night_replay.nightly_job_payload",
+        "coordinator.py:self._cycle_store.load",
         "coordinator.py:self._cycle_store.save",
         "coordinator.py:self._v4_archive.save",
         "coordinator.py:store.save",
@@ -655,6 +668,13 @@ def test_over_budget_is_a_pinned_ratchet() -> None:
     )
 
 
+def test_the_over_budget_set_is_empty_and_a_new_entry_is_refused() -> None:
+    assert frozenset() == _ALLOWED_OVER_BUDGET
+    parked = {**REGISTRY, "coordinator.py:self._v4_archive.save": over_budget(900, "x", "parked")}
+    ids = {i for i, e in parked.items() if e["cls"] == "over_budget"}
+    assert ids != _ALLOWED_OVER_BUDGET  # test_over_budget_is_a_pinned_ratchet would fail on it
+
+
 def test_an_over_budget_entry_that_is_under_budget_fails() -> None:
     found = scan_package()
     victim = "coordinator.py:self._v4_archive.load"
@@ -686,7 +706,7 @@ def test_near_budget_entries_are_listed_and_marked_both_ways() -> None:
     assert near == _EXPECTED_NEAR_BUDGET, sorted(near)
     assert all("tracked for moving to a worker" in REGISTRY[i]["reason"].lower() for i in near)
     assert budget_problems(scan_package(), REGISTRY) == []
-    unmarked = {**REGISTRY, "coordinator.py:night_replay.nightly_job_payload": short_cpu(364, "x", "r")}
+    unmarked = {**REGISTRY, "coordinator.py:night_replay.nightly_job_payload": short_cpu(364, "x", "r")}  # 73%
     assert any("near_budget must be True" in p for p in budget_problems(scan_package(), unmarked))
     overmarked = {**REGISTRY, "fix_history.py:search_records": short_cpu(9, "x", "r", near_budget=True)}
     assert any("near_budget must be False" in p for p in budget_problems(scan_package(), overmarked))

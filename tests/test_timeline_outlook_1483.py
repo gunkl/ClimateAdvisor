@@ -10,7 +10,6 @@ so a change to day 5's forecast never rewrites today's plan, and the later days 
 from __future__ import annotations
 
 import dataclasses
-import time as _time
 from datetime import datetime, time, timedelta
 
 from custom_components.climate_advisor.operation_timeline import (
@@ -106,15 +105,6 @@ class TestOutlookSteps:
             d = NOW.date() + timedelta(days=k)
             kinds = {s.kind for s in tl.steps if s.ts.date() == d}
             assert {StepKind.WAKE_BAND, StepKind.SLEEP_BAND} <= kinds, (d, kinds)
-
-    def test_a_week_long_build_stays_cheap(self):
-        snap = _week_snap(days=7)
-        build_timeline(snap)  # warm
-        t0 = _time.perf_counter()
-        for _ in range(3):
-            build_timeline(snap)
-        ms = (_time.perf_counter() - t0) / 3 * 1000
-        assert ms < 250, f"a week-long plan took {ms:.0f} ms"
 
 
 class TestPromiseAndOutlook:

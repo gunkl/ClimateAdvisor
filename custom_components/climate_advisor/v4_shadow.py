@@ -181,6 +181,38 @@ def prefetch_snapshots(
         return []
 
 
+def snapshot_payload(
+    snapshots_fn: Callable[[datetime, datetime], list[dict]] | None,
+    raw_snapshots_fn: Callable[[datetime, datetime], list[dict]] | None,
+    window: tuple[datetime, datetime],
+    what: str,
+) -> dict[str, Any]:
+    """The archive part of a job payload (Issue #1722, #1730): with ``raw_snapshots_fn`` (``ForecastArchive.
+    get_snapshots_raw``) the snapshots travel in their compact stored form as ``snapshots_raw`` and the worker decodes
+    them (:func:`job_clock_and_archive`), so the executor does not build ~2,500 decoded snapshots on the GIL; else the
+    decoded ``snapshots`` of ``snapshots_fn`` as before (``None`` = no archive)."""
+    if raw_snapshots_fn is not None:
+        return {"snapshots_raw": prefetch_snapshots(raw_snapshots_fn, window, what)}
+    return {"snapshots": prefetch_snapshots(snapshots_fn, window, what)}
+
+
+def window_chart_rows(
+    entries: Sequence[Mapping[str, Any]],
+    now: datetime,
+    days: float,
+    window_fn: Callable[[float, float], list[dict[str, Any]] | None] | None = None,
+) -> list[Mapping[str, Any]]:
+    """:func:`rows_in_window`, with the rows found by bisection when ``window_fn`` (``ChartStateLog.rows_between``)
+    can answer (Issue #1730); it answers ``None`` for an out-of-order log, and the scan of ``entries`` is the same
+    answer, slower. The window is anchored on ``now`` (the request's clock), never on the wall clock."""
+    if window_fn is not None:
+        t = now.timestamp()
+        got = window_fn(t - days * 86400.0, t + 1.0)
+        if got is not None:
+            return rows_in_window(got, now, days)
+    return rows_in_window(entries, now, days)
+
+
 def fit_job_payload(
     *,
     chart_entries: Sequence[Mapping[str, Any]],
@@ -195,18 +227,22 @@ def fit_job_payload(
     train_days: float | None = None,
     sleep_sensor: str | None = None,
     climate_entity: str | None = None,
+    raw_snapshots_fn: Callable[[datetime, datetime], list[dict]] | None = None,
+    chart_window_fn: Callable[[float, float], list[dict[str, Any]] | None] | None = None,
 ) -> dict[str, Any]:
     """The JSON payload of :func:`run_fit_job` (Issue #1722): :func:`run_fit`'s arguments, callables as data.
 
     Runs in the EXECUTOR, never on the event loop: it windows the chart rows (``rows_in_window``) and reads the forecast
     archive through ``fit_snapshot_window``. ``sleep_window`` is ``[sleep, wake]`` ("HH:MM") or ``None`` (the
-    coordinator passes it only while a separate sleep sensor is configured)."""
+    coordinator passes it only while a separate sleep sensor is configured). ``raw_snapshots_fn`` ships the snapshots
+    compact for the worker to decode and ``chart_window_fn`` finds the chart rows by bisection (see
+    :func:`snapshot_payload`, :func:`window_chart_rows`; Issue #1730): the same job result."""
     entries = list(chart_entries)
     if train_days:
-        entries = rows_in_window(entries, now, train_days)
+        entries = window_chart_rows(entries, now, train_days, chart_window_fn)
     return {
         "chart_entries": entries,
-        "snapshots": prefetch_snapshots(snapshots_fn, fit_snapshot_window(now, train_days), "v4 fit"),
+        **snapshot_payload(snapshots_fn, raw_snapshots_fn, fit_snapshot_window(now, train_days), "v4 fit"),
         "tz": encode_tz(tz, now),
         "now": now.isoformat(),
         "primary": primary,
@@ -229,6 +265,17 @@ def job_clock_and_archive(
     tz = decode_tz(payload.get("tz"))
     now = datetime.fromisoformat(str(payload["now"])).astimezone(tz)
     snaps = payload.get("snapshots")
+    raw = payload.get("snapshots_raw")
+    if isinstance(raw, list):
+        # Issue #1730: compact snapshots, decoded here in the worker. One undecodable snapshot degrades the whole
+        # archive to empty, as ``ForecastArchive.get_snapshots`` does (fit from the chart log alone).
+        from .forecast_archive import decode_snapshot  # noqa: PLC0415 - hass-free; only a payload with raw snapshots
+
+        try:
+            snaps = [decode_snapshot(s) for s in raw]
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("v4 job: forecast archive unreadable; fitting from the chart log alone", exc_info=True)
+            snaps = []
     return tz, now, ((lambda _a, _b: snaps) if isinstance(snaps, list) else None)
 
 
@@ -264,12 +311,13 @@ def display_fit_job_payload(
     primary_aliases: Sequence[str] = (),
     sleep_window: Sequence[Any] | None = None,
     train_days: float | None = None,
+    chart_window_fn: Callable[[float, float], list[dict[str, Any]] | None] | None = None,
 ) -> dict[str, Any]:
     """The JSON payload of :func:`run_display_fit_job` (Issue #1722). Runs in the EXECUTOR, never on the event loop (it
-    windows the chart rows)."""
+    windows the chart rows, by bisection with ``chart_window_fn``; Issue #1730)."""
     entries = list(chart_entries)
     if train_days:
-        entries = rows_in_window(entries, now, train_days)
+        entries = window_chart_rows(entries, now, train_days, chart_window_fn)
     return {
         "chart_entries": entries,
         "tz": encode_tz(tz, now),

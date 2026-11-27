@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import bisect
 import contextlib
-import json
 import logging
 import os
 import sys
@@ -21,6 +20,7 @@ from typing import Any
 
 from homeassistant.util import dt as dt_util
 
+from . import store_json
 from .storage_paths import migrate_legacy_storage_file, resolve_entry_scoped_path
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,6 +57,39 @@ def _order_after(last: datetime | None, timestamps: Iterable[datetime | None]) -
             return False, None
         last = ts
     return True, last
+
+
+class _NaiveRow(Exception):
+    """A row whose ``ts`` has no UTC offset: its place in time depends on whose clock reads it (Issue #1730)."""
+
+
+def _aware_epoch(entry: dict[str, Any]) -> float:
+    """A row's ``ts`` as epoch seconds; raises for a missing/unparseable ``ts`` and for one without an offset."""
+    dt = datetime.fromisoformat(entry["ts"])
+    if dt.tzinfo is None:
+        raise _NaiveRow
+    return dt.timestamp()
+
+
+def epoch_range(rows: list[dict[str, Any]], n: int, lo: float, hi: float) -> tuple[int, int] | None:
+    """Issue #1730: ``(i, j)`` such that ``rows[i:j]`` of the time-sorted ``rows[:n]`` are the rows whose ``ts`` is
+    within ``[lo, hi]`` (epoch seconds), found by bisection (~2 log2(n) timestamp parses instead of one per row), or
+    ``None`` when a probed row cannot be read that way. Rows are written with an offset
+    (``dt_util.now().isoformat()``); a row without one makes this answer ``None`` if a probe meets it, so a caller that
+    reads a naive ``ts`` in its own zone keeps its own rule (the scan)."""
+    try:
+        i = bisect.bisect_left(rows, lo, 0, n, key=_aware_epoch)
+        j = bisect.bisect_right(rows, hi, i, n, key=_aware_epoch)
+    except _NaiveRow, KeyError, TypeError, ValueError, OverflowError, OSError:
+        return None
+    return i, j
+
+
+def epoch_window(rows: list[dict[str, Any]], n: int, lo: float, hi: float) -> list[dict[str, Any]] | None:
+    """The rows ``epoch_range`` selects, in log order, or ``None`` (the caller scans). A superset-provider: callers
+    re-apply their own exact predicate to the slice."""
+    got = epoch_range(rows, n, lo, hi)
+    return rows[got[0] : got[1]] if got is not None else None
 
 
 def _bucket_comfort_target(group: list[dict[str, Any]]) -> float | None:
@@ -188,9 +221,8 @@ class ChartStateLog:
             self._entries = []
             return
         try:
-            raw = self._path.read_text(encoding="utf-8")
-            data = json.loads(raw)
-        except (OSError, json.JSONDecodeError) as err:
+            data = store_json.loads(self._path.read_bytes())
+        except (OSError, ValueError) as err:
             _LOGGER.warning("chart_log: failed to read log file, starting fresh: %s", err)
             self._entries = []
             return
@@ -228,7 +260,8 @@ class ChartStateLog:
     def save(self) -> None:
         """Atomic write to disk (tempfile + os.replace). 0o600 on non-Windows."""
         try:
-            serialized = json.dumps({"entries": self._entries}, separators=(",", ":"))
+            # list() copy: one atomic snapshot, since the rows are now encoded one at a time while the loop appends
+            serialized = store_json.dumps({"entries": list(self._entries)})  # one row per line (Issue #1730)
         except (TypeError, ValueError) as err:
             _LOGGER.error("chart_log: failed to serialize entries: %s", err)
             return
@@ -239,7 +272,7 @@ class ChartStateLog:
             suffix=".tmp",
         )
         try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            with os.fdopen(tmp_fd, "wb") as f:
                 f.write(serialized)
             os.replace(tmp_path_str, str(self._path))
             if sys.platform != "win32":
@@ -528,6 +561,17 @@ class ChartStateLog:
                 return None
             self._order = (rows, n, last)
         return rows, n
+
+    def sorted_rows_view(self) -> tuple[list[dict[str, Any]], int] | None:
+        """``(rows, n)``: the first ``n`` rows, known to be time-sorted (see :meth:`_time_sorted_rows`), or ``None``."""
+        return self._time_sorted_rows()
+
+    def rows_between(self, lo: float, hi: float) -> list[dict[str, Any]] | None:
+        """Issue #1730: the rows with ``lo <= ts <= hi`` (epoch seconds) by bisection of the time-sorted log, in log
+        order; ``None`` when the log is out of order (or a probed row has no offset): the caller scans every row, as
+        ``get_entries`` does. A superset-provider (see :func:`epoch_window`): the caller re-applies its own filter."""
+        view = self._time_sorted_rows()
+        return epoch_window(view[0], view[1], lo, hi) if view is not None else None
 
     @staticmethod
     def _range_str_to_days(range_str: str) -> float:

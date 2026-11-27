@@ -45,8 +45,8 @@ On-disk schema (compact; one hourly grid per snapshot rather than a timestamp pe
 
 from __future__ import annotations
 
+import bisect
 import contextlib
-import json
 import logging
 import math
 import os
@@ -56,6 +56,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import store_json
 from .const import FORECAST_ARCHIVE_FILE, FORECAST_ARCHIVE_HORIZON_HOURS, FORECAST_ARCHIVE_MAX_DAYS
 from .storage_paths import resolve_entry_scoped_path
 
@@ -79,8 +80,28 @@ def _parse_iso(value: Any) -> datetime | None:
         return None
 
 
+def _issued(snap: dict[str, Any]) -> datetime | None:
+    """A stored snapshot's issue time (``None`` when unreadable)."""
+    return _parse_iso(snap["i"])
+
+
 def _floor_hour(dt: datetime) -> datetime:
     return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def decode_snapshot(snap: dict[str, Any]) -> dict:
+    """One on-disk snapshot ``{"i", "s", "h0", "t"}`` -> ``{"issued": iso, "source": str, "hours": [[iso, temp_f]]}``.
+
+    A hass-free module function so a worker process can decode compact snapshots (Issue #1730); hours with no provider
+    entry are omitted.
+    """
+    h0 = _parse_iso(snap["h0"])
+    hours: list[list[Any]] = []
+    if h0 is not None:
+        for idx, temp in enumerate(snap["t"]):
+            if isinstance(temp, (int, float)) and not isinstance(temp, bool):
+                hours.append([(h0 + timedelta(hours=idx)).isoformat(timespec="minutes"), temp])
+    return {"issued": snap["i"], "source": snap["s"], "hours": hours}
 
 
 class ForecastArchive:
@@ -102,6 +123,10 @@ class ForecastArchive:
         self._horizon_hours = horizon_hours
         # Encoded snapshots (on-disk shape), ascending by issue time.
         self._snapshots: list[dict[str, Any]] = []
+        # Issue #1730 (as ChartStateLog._order, Issue #1598): (that list object, how many leading snapshots have
+        # parseable, non-decreasing issue times, the newest of them); ``-1`` = that list is not time-sorted. One tuple,
+        # replaced whole, so an executor-thread reader never sees a half-updated record.
+        self._order: tuple[list[dict[str, Any]] | None, int, datetime | None] = (self._snapshots, 0, None)
         self._last_prune: datetime | None = None
 
     # ------------------------------------------------------------------
@@ -122,8 +147,8 @@ class ForecastArchive:
             _LOGGER.info("forecast_archive: no archive file yet, starting empty")
             return
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as err:
+            data = store_json.loads(self._path.read_bytes())
+        except (OSError, ValueError) as err:
             _LOGGER.warning("forecast_archive: failed to read archive file, starting fresh: %s", err)
             self._snapshots = []
             return
@@ -174,7 +199,7 @@ class ForecastArchive:
         """Atomic write to disk (tempfile + os.replace), 0o600 on non-Windows. Never raises."""
         try:
             # list() copy: the executor thread must not iterate the list while the event loop appends.
-            serialized = json.dumps({"snapshots": list(self._snapshots)}, separators=(",", ":"))
+            serialized = store_json.dumps({"snapshots": list(self._snapshots)})  # one snapshot per line (Issue #1730)
         except (TypeError, ValueError) as err:
             _LOGGER.error("forecast_archive: failed to serialize snapshots: %s", err)
             return
@@ -184,7 +209,7 @@ class ForecastArchive:
             tmp_fd, tmp_path_str = tempfile.mkstemp(
                 dir=self._path.parent, prefix="climate_advisor_forecast_archive_", suffix=".tmp"
             )
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            with os.fdopen(tmp_fd, "wb") as f:
                 f.write(serialized)
             os.replace(tmp_path_str, str(self._path))
             tmp_path_str = None
@@ -302,24 +327,67 @@ class ForecastArchive:
         provider entry are omitted. Temperatures are internal degrees F. Naive ``start``/``end`` are read as UTC.
         """
         try:
-            start_a, end_a = _aware(start), _aware(end)
-            out: list[dict] = []
-            for snap in list(self._snapshots):
-                issued = _parse_iso(snap["i"])
-                if issued is None or not (start_a <= issued < end_a):
-                    continue
-                out.append(self._decode(snap))
-            return out
+            return [self._decode(snap) for snap in self._select(start, end)]
         except Exception:  # noqa: BLE001
             _LOGGER.warning("forecast_archive: get_snapshots failed", exc_info=True)
             return []
 
+    def get_snapshots_raw(self, start: datetime, end: datetime) -> list[dict]:
+        """The stored (compact) form of the snapshots :meth:`get_snapshots` returns, same selection and order.
+
+        Issue #1730: the payload of a worker job ships these and the worker decodes them (:func:`decode_snapshot`), so
+        the executor does not build ~2,500 decoded snapshots on the GIL. The dicts are the archive's own (never
+        mutated; a snapshot is replaced, not edited). Never raises (returns [] on error).
+        """
+        try:
+            return self._select(start, end)
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("forecast_archive: get_snapshots failed", exc_info=True)
+            return []
+
+    def _select(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        """The stored snapshots issued in ``[start, end)``, in list order. Raises like a malformed row does."""
+        start_a, end_a = _aware(start), _aware(end)
+        view = self._time_sorted_snapshots()
+        if view is not None:
+            # Issue #1730 (as ChartStateLog.get_entries, Issue #1598): issue times in order, so the window is found by
+            # bisection; exactly the slice the scan below keeps.
+            rows, n = view
+            lo = bisect.bisect_left(rows, start_a, 0, n, key=_issued)
+            hi = bisect.bisect_left(rows, end_a, lo, n, key=_issued)
+            return rows[lo:hi]
+        out: list[dict[str, Any]] = []
+        for snap in list(self._snapshots):  # out of order (a clock stepped back) or an unreadable issue time: the scan
+            issued = _parse_iso(snap["i"])
+            if issued is None or not (start_a <= issued < end_a):
+                continue
+            out.append(snap)
+        return out
+
+    def _time_sorted_snapshots(self) -> tuple[list[dict[str, Any]], int] | None:
+        """``(snapshots, n)`` when the first ``n`` snapshots (all of them, now) have readable, non-decreasing issue
+        times, else ``None``. Only snapshots added since the last check are parsed; the newest verified one is parsed
+        again, since :meth:`_record` may replace it. A list the archive has not seen (assigned directly or pruned) is
+        checked once in full. Safe from an executor thread: ``rows`` is a stable reference and ``n`` bounds the use."""
+        rows = self._snapshots
+        n = len(rows)
+        known, verified, last = getattr(self, "_order", (None, 0, None))
+        if known is not rows or verified > n:
+            verified, last = 0, None
+        if verified < 0:
+            return None
+        if verified and _issued(rows[verified - 1]) != last:  # the newest verified one was replaced
+            verified, last = 0, None
+        if verified < n:
+            for snap in rows[verified:n]:
+                issued = _issued(snap)
+                if issued is None or (last is not None and issued < last):
+                    self._order = (rows, -1, None)
+                    return None
+                last = issued
+            self._order = (rows, n, last)
+        return rows, n
+
     @staticmethod
     def _decode(snap: dict[str, Any]) -> dict:
-        h0 = _parse_iso(snap["h0"])
-        hours: list[list[Any]] = []
-        if h0 is not None:
-            for idx, temp in enumerate(snap["t"]):
-                if isinstance(temp, (int, float)) and not isinstance(temp, bool):
-                    hours.append([(h0 + timedelta(hours=idx)).isoformat(timespec="minutes"), temp])
-        return {"issued": snap["i"], "source": snap["s"], "hours": hours}
+        return decode_snapshot(snap)

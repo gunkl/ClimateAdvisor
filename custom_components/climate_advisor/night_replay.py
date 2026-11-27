@@ -478,16 +478,20 @@ def nightly_job_payload(
     nights: int = NIGHT_REPLAY_NIGHTS,
     model_fitted_at: str | None = None,
     previous: Mapping[str, Any] | None = None,
+    raw_snapshots_fn: Callable[[datetime, datetime], list[dict]] | None = None,
+    chart_window_fn: Callable[[float, float], list[dict[str, Any]] | None] | None = None,
 ) -> dict[str, Any]:
     """The JSON payload of :func:`run_nightly_job` (Issue #1722): :func:`run_nightly`'s arguments with the two callables
     as data (``sleep_window`` = ``[sleep, wake]`` "HH:MM" or None).
 
-    Runs in the EXECUTOR, never on the event loop: it windows the chart rows and reads the forecast archive."""
+    Runs in the EXECUTOR, never on the event loop: it windows the chart rows and reads the forecast archive.
+    ``raw_snapshots_fn`` ships the snapshots compact for the worker to decode and ``chart_window_fn`` finds the chart
+    rows by bisection (``v4_shadow.snapshot_payload`` / ``window_chart_rows``; Issue #1730): the same job result."""
     horizon_days = nightly_horizon_days(train_days, nights)
     return {
-        "chart_entries": v4_shadow.rows_in_window(chart_entries, now, horizon_days),
-        "snapshots": v4_shadow.prefetch_snapshots(
-            snapshots_fn, nightly_snapshot_window(now, horizon_days), "night replay"
+        "chart_entries": v4_shadow.window_chart_rows(chart_entries, now, horizon_days, chart_window_fn),
+        **v4_shadow.snapshot_payload(
+            snapshots_fn, raw_snapshots_fn, nightly_snapshot_window(now, horizon_days), "night replay"
         ),
         "tz": v4_shadow.encode_tz(tz, now),
         "now": now.isoformat(),

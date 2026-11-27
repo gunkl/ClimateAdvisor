@@ -289,7 +289,7 @@ def test_child_homeassistant_stub_is_minimal() -> None:
 
 def test_import_closure_of_job_modules_is_hass_free() -> None:
     """Guard: the allowlisted job modules must import in the child without Home Assistant."""
-    mods = ["v4_shadow", "night_replay", "cycle_model", "predictor_v4"]
+    mods = ["v4_shadow", "night_replay", "cycle_model", "predictor_v4", "forecast_archive", "store_json"]
     ha = _run("t_import_closure", {"modules": mods}, "process")
     assert ha == ["homeassistant", "homeassistant.util", "homeassistant.util.dt"]
 

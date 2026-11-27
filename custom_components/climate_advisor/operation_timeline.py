@@ -1050,14 +1050,16 @@ def from_dict(d: Mapping[str, Any]) -> Timeline | None:
 # ---------------------------------------------------------------------------
 
 
-def _interp(points: Sequence[tuple[float, float]], t: float) -> float | None:
+def _interp(points: Sequence[tuple[float, float]], t: float, keys: Sequence[float] | None = None) -> float | None:
+    """Linear interpolation; ``keys`` (the points' x values) may be passed to skip rebuilding them per call."""
     if not points:
         return None
     if t <= points[0][0]:
         return points[0][1]
     if t >= points[-1][0]:
         return points[-1][1]
-    keys = [p[0] for p in points]
+    if keys is None:
+        keys = [p[0] for p in points]
     i = bisect.bisect_right(keys, t)
     (t0, v0), (t1, v1) = points[i - 1], points[i]
     return v0 if t1 <= t0 else v0 + (v1 - v0) * (t - t0) / (t1 - t0)
@@ -1352,56 +1354,103 @@ class _Simulator:
         self.end = end
         self.pts = sorted((d.timestamp(), float(v)) for d, v in snap.hourly if d.tzinfo is not None)
         self.start_t = snap.indoor_primary if snap.indoor_primary is not None else snap.indoor
+        self._grid_cache: list[tuple] | None = None
+        # The first no-window run: (mid-step epochs, its steps, per-step (t, mass, hvac, disc) after each step).
+        self._base: tuple[list[float], list[SimStep], list[tuple[float, float, float, float]]] | None = None
+        self.steps_simulated = 0  # work counter (tests): grid steps actually computed, prefix reuse excluded
+
+    def _grid(self) -> list[tuple]:
+        """The run-invariant part of every step, built once per build and shared by every run.
+
+        Per step: (end time, outdoor temp, segment, mid-step epoch, local hour, solar gain, hold floor, hold ceiling,
+        can_heat, can_cool). None of it depends on the simulated state or on the window spans."""
+        if self._grid_cache is not None:
+            return self._grid_cache
+        snap, r = self.snap, self.rates
+        keys = [p[0] for p in self.pts]
+        last_fc = self.pts[-1][0] + 1800
+        one_h = snap.now + timedelta(hours=1)
+        ts = snap.now
+        grid: list[tuple] = []
+        while True:
+            ts_next = ts + timedelta(minutes=SIM_STEP_MINUTES)
+            tn = ts_next.timestamp()
+            if ts_next > self.end or tn > last_fc:
+                break
+            out = _interp(self.pts, tn, keys)
+            assert out is not None
+            seg = self.index.at(ts)
+            assert seg is not None
+            local = ts_next.astimezone(snap.now.tzinfo) if snap.now.tzinfo is not None else ts_next
+            hold_floor, hold_ceiling = _sleep_loop_edges(snap, seg)
+            current = ts < one_h
+            grid.append(
+                (
+                    ts_next,
+                    out,
+                    seg,
+                    ts.timestamp() + SIM_STEP_MINUTES * 30,
+                    local.hour + local.minute / 60.0,
+                    (r.k_solar or 0.0) * solar_factor(ts.hour, r.phase_h),
+                    hold_floor,
+                    hold_ceiling,
+                    snap.can_heat or (current and "heat" in snap.released_now),
+                    snap.can_cool or (current and "cool" in snap.released_now),
+                )
+            )
+            ts = ts_next
+        self._grid_cache = grid
+        return grid
 
     def run(self, spans: Sequence[Span]) -> Sim | None:
         if self.start_t is None or not self.pts or not self.index.segments:
             return None
         r, snap = self.rates, self.snap
-        last_fc = self.pts[-1][0] + 1800
         dt_h = SIM_STEP_MINUTES / 60.0
+        grid = self._grid()
+        span_pts = [(a.timestamp(), b.timestamp()) for a, b in spans]
         t = float(self.start_t)
-        stepper = snap.house_stepper
         mass = t  # the model's hidden mass starts settled at the room
-        ts = snap.now
         steps: list[SimStep] = []
         hvac_total = 0.0
         disc_total = 0.0
-        span_pts = [(a.timestamp(), b.timestamp()) for a, b in spans]
-        while True:
-            ts_next = ts + timedelta(minutes=SIM_STEP_MINUTES)
-            if ts_next > self.end or ts_next.timestamp() > last_fc:
-                break
-            out = _interp(self.pts, ts_next.timestamp())
-            assert out is not None
-            seg = self.index.at(ts)
-            assert seg is not None
-            mid = ts.timestamp() + SIM_STEP_MINUTES * 30
+        i0 = 0
+        base = self._base
+        if base is not None and span_pts:
+            # Prefix reuse. Step i depends only on steps before it (the state t, mass and the running totals) and on
+            # whether its own mid-step lies in a span. A step whose mid-step is before every span's start is closed in
+            # this run exactly as in the no-window base run, so the two runs agree on every step before the first
+            # span; resume from the base run's state there. Keep this invariant when adding any lookahead to a step.
+            i0 = bisect.bisect_left(base[0], min(a for a, _b in span_pts))
+            if i0 > 0:
+                _mids, base_steps, traj = base
+                steps = base_steps[:i0]
+                t, mass, hvac_total, disc_total = traj[i0 - 1]
+        record = base is None and not span_pts
+        traj_out: list[tuple[float, float, float, float]] = []
+        stepper = snap.house_stepper
+        sw_h = r.swing_heat if r.swing_heat is not None else THERMAL_SWING_DEFAULT_F
+        sw_c = r.swing_cool if r.swing_cool is not None else THERMAL_SWING_DEFAULT_F
+        for ts_next, out, seg, mid, hour, q_sun, hold_floor, hold_ceiling, can_heat, can_cool in grid[i0:]:
             open_ = any(a <= mid < b for a, b in span_pts)
             if stepper is not None:
                 # the primary's own model: windows and the fan are inputs to its leak, the mass carries step to step
                 fan_on = open_ and fan_would_run(snap, seg, out, t)
-                local = ts_next.astimezone(snap.now.tzinfo) if snap.now.tzinfo is not None else ts_next
-                hour = local.hour + local.minute / 60.0
                 free, mass = stepper.step(t, mass, out, 1.0 if open_ else 0.0, 1.0 if fan_on else 0.0, hour)
                 heat_rate: float | None = stepper.heat_gain or None
                 cool_rate: float | None = stepper.cool_gain or None
             else:
                 k = open_hour_rate(snap, r, seg, out, t) if open_ else r.k_passive
-                q_sun = (r.k_solar or 0.0) * solar_factor(ts.hour, r.phase_h)
                 free = ode_step(t, out, k, q_sun, dt_h)
                 heat_rate = abs(r.k_active_heat) if r.k_active_heat else None
                 cool_rate = abs(r.k_active_cool) if r.k_active_cool else None
             nxt = free
             hvac_min = 0.0
             hvac_mode: str | None = None
-            hold_floor, hold_ceiling = _sleep_loop_edges(snap, seg)
             if not open_:
                 # The thermostat holds whichever edge the house would otherwise cross (both armed; an away or
                 # vacation band is just a wider band). The equipment rate is the learned one; the run is the
                 # fraction of the step needed to get back to the edge.
-                current = ts < snap.now + timedelta(hours=1)
-                can_heat = snap.can_heat or (current and "heat" in snap.released_now)
-                can_cool = snap.can_cool or (current and "cool" in snap.released_now)
                 if free < hold_floor and can_heat and heat_rate:
                     rate = heat_rate
                     gain = min(hold_floor - free, rate * dt_h)
@@ -1411,14 +1460,17 @@ class _Simulator:
                     gain = min(free - hold_ceiling, rate * dt_h)
                     nxt, hvac_min, hvac_mode = free - gain, gain / rate * 60.0, "cool"
             # Issue #1477: an unlearned swing is THERMAL_SWING_DEFAULT_F (1.5 F), as everywhere else (was 1.0 here)
-            sw_h = r.swing_heat if r.swing_heat is not None else THERMAL_SWING_DEFAULT_F
-            sw_c = r.swing_cool if r.swing_cool is not None else THERMAL_SWING_DEFAULT_F
             disc = max(0.0, hold_floor - sw_h - nxt) + max(0.0, nxt - hold_ceiling - sw_c)
             disc_fh = disc * dt_h
             steps.append(SimStep(ts_next, nxt, free, out, seg, open_, hvac_min, hvac_mode, disc_fh))
             hvac_total += hvac_min
             disc_total += disc_fh
-            t, ts = nxt, ts_next
+            t = nxt
+            if record:
+                traj_out.append((t, mass, hvac_total, disc_total))
+        self.steps_simulated += len(grid) - i0
+        if record:
+            self._base = ([g[3] for g in grid], list(steps), traj_out)
         return Sim(steps, hvac_total, disc_total)
 
 
@@ -1996,11 +2048,24 @@ def build_timeline(
         )
         return sid
 
+    final_ts = [s.ts for s in final.steps] if final else []
+
     def predicted_at(ts: datetime) -> float | None:
         if not final:
             return None
-        best = min(final.steps, key=lambda s: abs((s.ts - ts).total_seconds()), default=None)
-        return best.temp if best else None
+        # Nearest step by time (steps are strictly increasing in time); on a tie the earlier step, as ``min`` gave.
+        fsteps = final.steps
+        if not fsteps:
+            return None
+        i = bisect.bisect_left(final_ts, ts)
+        if i == 0:
+            return fsteps[0].temp
+        if i == len(fsteps):
+            return fsteps[-1].temp
+        before, after = fsteps[i - 1], fsteps[i]
+        if abs((before.ts - ts).total_seconds()) <= abs((after.ts - ts).total_seconds()):
+            return before.temp
+        return after.temp
 
     # --- band-driven steps (every boundary after the first segment, which starts now) ---
     for prev, seg in zip(segments, segments[1:], strict=False):

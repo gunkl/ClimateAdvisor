@@ -61,6 +61,16 @@ TIMELINE_SCHEMA_VERSION = 1
 # are rebuilt every cycle from the newest forecast and never latched (``timeline_end``, ``_merge_latched``).
 TIMELINE_HORIZON_HOURS = 48
 TIMELINE_OUTLOOK_MAX_HOURS = 168
+# Issue #1727: the build on the event loop stops here (``TimelineSnapshot.end_cap``); the rest of the outlook is built
+# in an executor thread and spliced in at a quiet point of ``[TIMELINE_SEAM_FROM_HOURS, TIMELINE_LOOP_CAP_HOURS]``
+# (``splice_outlook``). The 48 h promise is decided by the first ~54 h of the forecast, so 60 h loses nothing.
+TIMELINE_LOOP_CAP_HOURS = 60
+TIMELINE_SEAM_FROM_HOURS = 54
+# The outlook build is repeated every this many plan builds (a plan build is a cycle, a marked change's 5-minute tick,
+# an occupancy change or a briefing), sooner when the real forecast changes, the plan regenerates or the day turns; an
+# outlook older than ``TIMELINE_OUTLOOK_MAX_AGE_H`` is not shown (a failing job cannot leave a week-old outlook up).
+TIMELINE_OUTLOOK_EVERY_N_BUILDS = 3
+TIMELINE_OUTLOOK_MAX_AGE_H = 6
 SIM_STEP_MINUTES = 15
 YOU_STEP_LEAD_MIN = 30  # DP-4: a "you" step is shown this long before it is due (push is optional and off by default)
 DISCOMFORT_FH_PER_HVAC_H = 1.0  # DP-2: 1 F-hour outside the band (beyond the swing) weighs the same as 1 h of HVAC
@@ -776,6 +786,10 @@ class TimelineSnapshot:
     sensor_paths: Mapping[str, Sequence[tuple[datetime, float]]] = field(default_factory=dict)
     sensor_path_model: str = "v3"  # label the caller gives the engine behind ``sensor_paths``
     path_fn: Callable[[Sequence[tuple[datetime, datetime]]], Sequence[tuple[datetime, float]] | None] | None = None
+    # Issue #1727: stop the plan here, when it would otherwise run further (the forecast's end, at most a week). The
+    # loop-side build sets it to ``now + TIMELINE_LOOP_CAP_HOURS``; the outlook build leaves it None. Never below the
+    # 48 h promise. The path is cut to it as well, so a long selected-model path does not outlive the plan.
+    end_cap: datetime | None = None
     # engine armed state
     automation_enabled: bool = True
     manual_override_active: bool = False
@@ -1573,6 +1587,8 @@ def timeline_end(snap: TimelineSnapshot) -> datetime:
     last = max((t for t, _v in snap.hourly), default=None)
     if last is not None and last > end:
         end = min(last, snap.now + timedelta(hours=TIMELINE_OUTLOOK_MAX_HOURS))
+    if snap.end_cap is not None:
+        end = min(end, max(snap.end_cap, promise_end(snap.now)))
     return end
 
 
@@ -2447,6 +2463,16 @@ def _apply_holds(
 def _choose_path(
     snap: TimelineSnapshot, accepted: Sequence[Span], final: Sim | None
 ) -> tuple[list[tuple[datetime, float]], str]:
+    pts, source = _pick_path(snap, accepted, final)
+    if snap.end_cap is not None:  # Issue #1727: a capped plan's path ends where the plan does
+        end = timeline_end(snap)
+        pts = [p for p in pts if p[0] <= end]
+    return pts, source
+
+
+def _pick_path(
+    snap: TimelineSnapshot, accepted: Sequence[Span], final: Sim | None
+) -> tuple[list[tuple[datetime, float]], str]:
     planned = [(a, b) for _k, a, b in _planned_spans(snap, timeline_end(snap))]
     # the v3 path models today's window plan only: tomorrow's period (R3b) does not make it a different plan
     today = snap.now.date()
@@ -2719,6 +2745,183 @@ class TimelineLatch:
         kept = _merge_latched(self._timeline, fresh, snap.now, snap.unit)
         self._timeline = kept
         return LatchOutcome(kept, False, ())
+
+
+# ---------------------------------------------------------------------------
+# The outlook splice (Issue #1727)
+# ---------------------------------------------------------------------------
+#
+# The loop builds the plan only to ``now + TIMELINE_LOOP_CAP_HOURS`` (``TimelineSnapshot.end_cap``). The rest of the
+# outlook is built from the same snapshot, uncapped, in an executor thread, every few cycles. What the surfaces read is
+# the loop's plan with the outlook's part laid over it from a SEAM ``S``:
+#
+# * steps, window candidates, predicted runs, band segments and hourly equipment minutes: the loop's before ``S``, the
+#   outlook's from ``S`` (a candidate or run is "before" by its start; one the capped build cut off at its end is taken
+#   from the outlook, which has the whole of it);
+# * the predicted path: the loop's before ``S``, the outlook's from ``S`` shifted so the two meet at ``S`` (below);
+# * ``horizon_end``: the outlook's; ``hvac_minutes``: the sum of the spliced hourly minutes; the windows line of the
+#   summary: re-counted over the spliced candidates; every other field (generation, latch, grade, the runs and peak
+#   lines of the summary, which only look 24 h ahead) is the loop's, so it is as fresh as the cycle.
+#
+# Where ``S`` goes: the capped build clips a window period that crosses its end into a ``windows_close.horizon`` step
+# (and a fan stop), and a predicted run that crosses it into a shorter run. Neither is real. ``S`` is therefore a whole
+# hour in ``[now + 54 h, now + 60 h]`` that no accepted window period of EITHER build spans, so a period lies wholly on
+# one side and the clipped close, which is at or after ``now + 60 h``, is always on the outlook's side, where the
+# outlook's real close replaces it. When every hour there is spanned, the hours down to the promise end are tried; when
+# none is quiet there is no splice and the loop's own (capped) plan stands. Predicted runs need no quiet point (they
+# are long on hot and cold days, and a run that merely crosses ``S`` is whole in both builds); they hand over at the
+# earlier of ``S`` and a run's length before the loop plan's end.
+#
+# Path continuity: the two paths are independent runs; they agree before ``S`` when the outlook is fresh, and differ by
+# the drift since it was built when it is not. The outlook's path is shifted by the gap at ``S`` and the shift fades
+# linearly to zero over ``OUTLOOK_PATH_BLEND_HOURS``, so the line has no step at the seam. A fresh outlook has a gap of
+# exactly zero, so then the spliced path is the uncapped build's path.
+
+OUTLOOK_PATH_BLEND_HOURS = 6.0
+
+
+CANDIDATE_MATCH_TOLERANCE = timedelta(hours=1)  # the same period in two builds a few cycles apart starts within this
+
+
+def _spans(tl: DetailedTimeline) -> list[tuple[datetime, datetime]]:
+    """Accepted window periods: the spans a seam must not fall inside."""
+    return [(c.start, c.end) for c in tl.candidates if c.accepted]
+
+
+def _match_candidate(item: WindowCandidate, others: Sequence[WindowCandidate]) -> WindowCandidate | None:
+    """The candidate of ``others`` that is ``item`` in another build (same kind, nearest start), or None."""
+    near = [o for o in others if o.kind == item.kind and abs(o.start - item.start) <= CANDIDATE_MATCH_TOLERANCE]
+    return min(near, key=lambda o: abs(o.start - item.start), default=None)
+
+
+def find_seam(now: datetime, loop: DetailedTimeline, outlook: DetailedTimeline) -> datetime | None:
+    """The quiet whole hour the loop's plan hands over to the outlook at, or None (see the section comment)."""
+    first = now + timedelta(hours=TIMELINE_SEAM_FROM_HOURS)
+    base = first.replace(minute=0, second=0, microsecond=0)
+    if base < first:
+        base += timedelta(hours=1)
+    last = now + timedelta(hours=TIMELINE_LOOP_CAP_HOURS)
+    floor = promise_end(now)
+    ahead = []
+    t = base
+    while t <= last:
+        ahead.append(t)
+        t += timedelta(hours=1)
+    behind = []
+    t = base - timedelta(hours=1)
+    while t >= floor:
+        behind.append(t)
+        t -= timedelta(hours=1)
+    spans = _spans(loop) + _spans(outlook)
+    for t in ahead + behind:
+        if t >= outlook.horizon_end or t > loop.horizon_end:
+            continue
+        # a period or run that starts, ends or runs through ``t`` is not quiet: its pieces would sit on both sides
+        if not any(a <= t <= b for a, b in spans):
+            return t
+    return None
+
+
+def _interp_path(points: Sequence[PathPoint], ts: datetime) -> float | None:
+    if not points:
+        return None
+    return _interp([(p.ts.timestamp(), p.temp_f) for p in points], ts.timestamp())
+
+
+def _splice_path(loop: Sequence[PathPoint], outlook: Sequence[PathPoint], seam: datetime) -> tuple[PathPoint, ...]:
+    sensors = {p.sensor for p in loop} | {p.sensor for p in outlook}
+    out: list[PathPoint] = []
+    blend = OUTLOOK_PATH_BLEND_HOURS * 3600.0
+    for sensor in sorted(sensors):
+        a = [p for p in loop if p.sensor == sensor]
+        b = [p for p in outlook if p.sensor == sensor]
+        if not b:
+            out.extend(a)  # the outlook has no such line (a sensor that only the loop-side plan carries)
+            continue
+        if not a:
+            continue  # a line the loop plan does not carry stays out: it was never promised
+        la, lb = _interp_path(a, seam), _interp_path(b, seam)
+        gap = 0.0 if la is None or lb is None else la - lb
+        out.extend(p for p in a if p.ts < seam)
+        for p in b:
+            if p.ts < seam:
+                continue
+            w = max(0.0, 1.0 - (p.ts - seam).total_seconds() / blend)
+            out.append(p if gap == 0.0 or w == 0.0 else replace(p, temp_f=p.temp_f + gap * w))
+    out.sort(key=lambda p: (p.sensor, p.ts))
+    return tuple(out)
+
+
+def _splice_summary(
+    loop: DetailedTimeline, candidates: Sequence[WindowCandidate]
+) -> tuple[tuple[str, ...], tuple[i18n.Msg, ...]]:
+    """The loop's summary with its windows line re-counted over the spliced candidates (the count looks at the whole
+    plan, outlook included, exactly as the uncapped build's did)."""
+    msgs = list(loop.summary_msgs)
+    open_key, closed_key = STEP_MSG_PREFIX + "summary.windows_open", STEP_MSG_PREFIX + "summary.windows_closed"
+    if msgs and msgs[0].key in (open_key, closed_key):
+        hours = msgs[0].params.get("hours")
+        accepted = sum(1 for c in candidates if c.accepted)
+        if accepted:
+            msgs[0] = i18n.Msg(open_key, count=accepted, hours=hours)
+        else:
+            msgs[0] = i18n.Msg(closed_key, hours=hours, checked=len(candidates))
+    return tuple(_en(m) for m in msgs), tuple(msgs)
+
+
+def splice_outlook(
+    now: datetime, loop: DetailedTimeline, outlook: DetailedTimeline | None
+) -> tuple[DetailedTimeline, datetime | None]:
+    """``loop`` with ``outlook``'s part from the seam on, and the seam; ``(loop, None)`` when there is nothing to splice
+    (no outlook, built on another day, built after ``now``, or no quiet hour). Never raises on odd input shapes."""
+    if (
+        outlook is None
+        or outlook.day != now.date()
+        or loop.day != now.date()
+        or outlook.generated_at > now
+        or now - outlook.generated_at > timedelta(hours=TIMELINE_OUTLOOK_MAX_AGE_H)
+        or outlook.zone != loop.zone
+    ):
+        return loop, None
+    seam = find_seam(now, loop, outlook)
+    if seam is None:
+        return loop, None
+    steps = [s for s in loop.steps if s.ts < seam] + [s for s in outlook.steps if s.ts >= seam]
+    steps.sort(key=lambda s: (s.ts, 0 if s.actor == Actor.CA else 1, s.kind.value))
+    candidates_before: list[WindowCandidate] = []
+    for c in loop.candidates:
+        if c.start >= seam:
+            continue
+        keep: WindowCandidate | None = c
+        if c.end >= loop.horizon_end:  # clipped at the loop plan's end: the outlook's candidate has its real end
+            keep = _match_candidate(c, outlook.candidates)
+        if keep is not None:
+            candidates_before.append(keep)
+    candidates = tuple(candidates_before) + tuple(c for c in outlook.candidates if c.start >= seam)
+    # A run is at most RUN_MAX_SPAN_H long, so one that starts that long (and a step) before the loop plan's end is
+    # whole in both builds; a later one may have been cut short or dropped as too short (the cap), so the outlook's
+    # runs take over from there, or from the seam when that is earlier.
+    run_seam = min(seam, loop.horizon_end - timedelta(hours=RUN_MAX_SPAN_H, minutes=SIM_STEP_MINUTES))
+    runs = tuple(r for r in loop.runs if r.start < run_seam) + tuple(r for r in outlook.runs if r.start >= run_seam)
+    hourly = tuple(h for h in loop.hvac_hourly if h[0] < seam) + tuple(h for h in outlook.hvac_hourly if h[0] >= seam)
+    summary, summary_msgs = _splice_summary(loop, candidates)
+    return (
+        replace(
+            loop,
+            horizon_end=outlook.horizon_end,
+            steps=tuple(steps),
+            path=_splice_path(loop.path, outlook.path, seam),
+            band=tuple(b for b in loop.band if b[0] < seam) + tuple(b for b in outlook.band if b[0] >= seam),
+            runs=runs,
+            candidates=candidates,
+            summary=summary,
+            summary_msgs=summary_msgs,
+            hvac_minutes=None if loop.hvac_minutes is None else sum(m for _h, m in hourly),
+            hvac_hourly=hourly,
+            dropped=tuple(dict.fromkeys(loop.dropped + outlook.dropped)),
+        ),
+        seam,
+    )
 
 
 # Steps whose time is the engine's live answer each cycle (a rescheduled pre-cool, the plan's ceiling breach, the

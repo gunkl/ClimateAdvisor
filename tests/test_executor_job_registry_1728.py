@@ -374,6 +374,14 @@ REGISTRY: dict[str, dict[str, Any]] = {
         "168 h hourly forecast, physics ODE with a band schedule",
         "v3 ODE curve, linear in forecast hours (3 call sites)",
     ),
+    "coordinator.py:build_timeline": short_cpu(
+        80,
+        "hot 8-day forecast, v4 house model, 193 hourly points (quiet runs 45-75 ms, 'hot' is the worst day type; warm "
+        "7-day v3: 19-31 ms) plus the v3 path walk it calls (3.9 ms, 168 h)",
+        "Issue #1727: the full-horizon outlook plan, built from a snapshot captured on the loop. Pure Python, no "
+        "reads of coordinator state (path_fn and band_at close over copies). Runs at most once per zone at a time, "
+        "every few plan builds. The loop-side build (to now + 60 h) stays on the loop at 8-9 ms",
+    ),
     "coordinator.py:v4_shadow.run_cycle": short_cpu(
         2.6,
         "672 grid steps (168 h forecast), 1 sensor, display and baseline paths; whole shadow cycle 11.5 ms",

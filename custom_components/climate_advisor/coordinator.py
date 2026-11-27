@@ -458,7 +458,17 @@ from .nat_vent_plan import (
 )
 from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .ode_ceiling_guard import OdeCeilingGuardInputs, OdeCeilingGuardOutcome, decide_ode_ceiling_guard
-from .operation_timeline import TIMELINE_OUTLOOK_MAX_HOURS, TIMELINE_TRIGGER_EVENTS, TimelineLatch, TimelineSnapshot
+from .operation_timeline import (
+    TIMELINE_LOOP_CAP_HOURS,
+    TIMELINE_OUTLOOK_EVERY_N_BUILDS,
+    TIMELINE_OUTLOOK_MAX_HOURS,
+    TIMELINE_TRIGGER_EVENTS,
+    TimelineLatch,
+    TimelineSnapshot,
+    build_timeline,
+    splice_outlook,
+    timeline_end,
+)
 from .operation_timeline import detail_dict as timeline_detail_dict
 from .operation_timeline import to_dict as timeline_to_dict
 from .override_confirm_split import ca_expected_mode
@@ -1516,6 +1526,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._timeline_last: dict[str, Any] = {}
         self._timeline_failed_logged = False
         self._timeline_dirty: str | None = None
+        # Issue #1727: the full-horizon outlook is built in an executor thread (``_timeline_outlook_step``), at most one
+        # at a time, and spliced into what the surfaces read (``_timeline_view``); the loop plan is never touched by it.
+        self._timeline_outlook: Any = None  # the last finished outlook build (a DetailedTimeline)
+        self._timeline_outlook_task: asyncio.Task[Any] | None = None
+        self._timeline_outlook_age = 0  # plan builds since the last outlook build was started
+        self._timeline_outlook_sig: tuple[tuple[float, float], ...] | None = None  # real forecast it was built from
+        self._timeline_outlook_info: dict[str, Any] = {}
+        self._timeline_outlook_failed_logged = False
+        self._timeline_view: tuple[Any, Any] | None = None  # (the loop plan it was made from, loop plan + outlook)
+        self._timeline_build_now: datetime | None = None  # the instant of the loop plan's last build
         # Issue #1230 R6: tonight's bedroom strategy (advice) is computed beside the timeline and applied to it.
         self._timeline_night: dict[str, Any] | None = None
         self._timeline_night_failed_logged = False
@@ -8286,11 +8306,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         self._timeline_dirty = None
         started = _perf_counter()
-        snap = self._timeline_snapshot(c)
+        full = self._timeline_snapshot(c)
+        # Issue #1727: the loop plans to now + 60 h; the rest of the outlook is the executor's (below), so the cost of
+        # a build here no longer grows with a long forecast. A forecast that ends inside 60 h is planned whole.
+        cap = full.now + timedelta(hours=TIMELINE_LOOP_CAP_HOURS)
+        capped = timeline_end(full) > cap
+        snap = full
+        if capped:
+            path_fn = full.path_fn
+            snap = dataclasses.replace(
+                full,
+                end_cap=cap,
+                path_fn=None if path_fn is None else functools.partial(path_fn, until=cap + timedelta(hours=1)),
+            )
         force = trigger if trigger in ("occupancy",) else None
         outcome = latch.update(snap, force=force)
         self._timeline_night_apply(snap, outcome.regenerated)
         cost_ms = (_perf_counter() - started) * 1000.0
+        self._timeline_build_now = snap.now
+        if capped:
+            self._timeline_outlook_step(full, outcome.regenerated)
+        else:
+            self._timeline_outlook = None  # the loop plan already reaches the forecast's end: nothing to splice
+        self._timeline_view_refresh()
         self._timeline_last = {
             "at": snap.now.isoformat(),
             "trigger": trigger,
@@ -8299,6 +8337,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "reasons": list(outcome.reasons),
             "steps": len(outcome.timeline.steps),
             "generation": outcome.timeline.generation,
+            "capped": capped,
         }
         if outcome.regenerated:
             _LOGGER.info(
@@ -8310,9 +8349,118 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         else:
             _LOGGER.debug("Operation timeline (shadow) kept: %d steps, %.1f ms", len(outcome.timeline.steps), cost_ms)
 
+    def _timeline_outlook_step(self, full: TimelineSnapshot, regenerated: bool) -> None:
+        """Start an outlook build when one is due and none is running (Issue #1727). Never raises, never waits.
+
+        Due: no outlook yet, one from another local day, a changed real forecast, a regenerated plan, or
+        ``TIMELINE_OUTLOOK_EVERY_N_BUILDS`` plan builds since the last start. Single flight per zone: while a build
+        runs a due build is skipped (counted), not queued; the next plan build asks again."""
+        info = self._timeline_outlook_info
+        try:
+            hourly_until = full.hourly_until
+            sig = tuple(
+                sorted(
+                    (d.timestamp(), float(v))
+                    for d, v in full.hourly
+                    if d.tzinfo is not None and (hourly_until is None or d <= hourly_until)
+                )
+            )
+            self._timeline_outlook_age += 1
+            outlook = self._timeline_outlook
+            due = (
+                outlook is None
+                or outlook.day != full.now.date()
+                or sig != self._timeline_outlook_sig
+                or regenerated
+                or self._timeline_outlook_age >= TIMELINE_OUTLOOK_EVERY_N_BUILDS
+            )
+            if not due:
+                return
+            task = self._timeline_outlook_task
+            if task is not None and not task.done():
+                info["skipped"] = int(info.get("skipped", 0)) + 1
+                return
+            self._timeline_outlook_age = 0
+            coro = self._timeline_outlook_run(full, sig)
+            try:
+                self._timeline_outlook_task = self._spawn(coro, background=True)
+            except Exception:
+                coro.close()
+                raise
+        except Exception:  # noqa: BLE001 - the outlook is display only; the loop plan is already built
+            _LOGGER.debug("timeline outlook could not be started", exc_info=True)
+
+    async def _timeline_outlook_run(self, full: TimelineSnapshot, sig: tuple[tuple[float, float], ...]) -> None:
+        """Build the full-horizon plan in an executor thread and keep it for the surfaces (Issue #1727).
+
+        ``full`` was captured on the loop (``_timeline_snapshot``): the thread reads nothing live. A failure is logged
+        (WARNING once, then DEBUG) and changes nothing: the loop plan and the previous outlook stay as they were."""
+        started = _perf_counter()
+        try:
+            built = await self._executor_job(functools.partial(build_timeline, full))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - display only; the loop plan is untouched
+            self._timeline_outlook_info["failed"] = int(self._timeline_outlook_info.get("failed", 0)) + 1
+            if not self._timeline_outlook_failed_logged:
+                self._timeline_outlook_failed_logged = True
+                _LOGGER.warning(
+                    "operation timeline outlook failed; the plan and the house are unaffected", exc_info=True
+                )
+            else:
+                _LOGGER.debug("operation timeline outlook failed again", exc_info=True)
+            return
+        if getattr(self, "_shut_down", False) is True:
+            return
+        self._timeline_outlook_failed_logged = False
+        self._timeline_outlook = built
+        self._timeline_outlook_sig = sig
+        self._timeline_outlook_info.update(
+            built_for=full.now.isoformat(), wall_ms=round((_perf_counter() - started) * 1000.0, 1)
+        )
+        _LOGGER.debug("Operation timeline outlook built for %s: %d steps", full.now.isoformat(), len(built.steps))
+        self._timeline_view_refresh()
+
+    def _timeline_view_refresh(self) -> None:
+        """Lay the outlook over the loop plan for the surfaces (``splice_outlook``). Never raises."""
+        try:
+            latch = getattr(self, "_timeline_latch", None)
+            tl = latch.timeline if latch is not None else None
+            now = getattr(self, "_timeline_build_now", None)
+            self._timeline_view = None
+            seam = None
+            if tl is not None and now is not None and self._timeline_outlook is not None:
+                spliced, seam = splice_outlook(now, tl, self._timeline_outlook)
+                if seam is not None:
+                    self._timeline_view = (tl, spliced)
+            self._timeline_outlook_info["seam"] = None if seam is None else seam.isoformat()
+        except Exception:  # noqa: BLE001 - display only; the surfaces fall back to the loop plan
+            self._timeline_view = None
+            _LOGGER.debug("timeline outlook splice failed", exc_info=True)
+
+    def _timeline_plan(self) -> Any:
+        """The plan the surfaces read: the loop plan with the outlook spliced over it when there is one."""
+        latch = getattr(self, "_timeline_latch", None)
+        tl = latch.timeline if latch is not None else None
+        view = getattr(self, "_timeline_view", None)
+        if view is not None and view[0] is tl:
+            return view[1]
+        return tl
+
     def _timeline_snapshot(self, c: DayClassification) -> TimelineSnapshot:
-        """Everything the timeline reads, taken from the live plan (read-only)."""
+        """Everything the timeline reads, taken from the live plan (read-only).
+
+        Issue #1727: the outlook build runs this snapshot in an executor thread, so nothing in it may read a live
+        coordinator attribute after it is returned. The closures (``band_at``, ``path_fn``) read private copies taken
+        here (the classification is mutated in place elsewhere, and so is one key of ``self.config``); the forecast
+        list is copied (its entries are dicts nobody mutates) and the band schedule is a list the coordinator replaces
+        and never mutates; the thermal model, the plan days and the day modes are built fresh below; ``house_stepper``
+        is stateless (``prediction_engines.control_stepper``)."""
         now = dt_util.now()
+        c_view = dataclasses.replace(c)
+        config_view = dict(self.config)
+        forecast_view = list(self._hourly_forecast_temps) if self._hourly_forecast_temps else None
+        service = _zone_service_of(self)
         ae = self.automation_engine
         local_tz = now.tzinfo
         hourly = [
@@ -8341,12 +8489,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         model = dict(self.control_thermal_model(dict(self._thermal_model or {})) or {})
         band_schedule = self._target_band_schedule
         tou_window = self._tou_precondition_window_tuple()
-        config = self.config
+        config = config_view
         occupancy = self._occupancy_mode
         thermal_model = model
 
-        def _path_fn(spans: Any) -> list[tuple[datetime, float]] | None:
-            """Today's v3 predicted path with these window periods (v3 takes one span: the longest)."""
+        def _path_fn(spans: Any, until: datetime | None = None) -> list[tuple[datetime, float]] | None:
+            """Today's v3 predicted path with these window periods (v3 takes one span: the longest).
+
+            Reads only what was captured above (it may run in the outlook thread); ``until`` stops the walk there
+            (the loop-side build asks for the capped plan's end, the outlook for everything)."""
             # v3 takes one period per day (the longest): today's on today's date, tomorrow's on tomorrow's (#1391).
             day0 = now.date()
             today_sp = [ab for ab in spans if ab[0].date() == day0]
@@ -8354,16 +8505,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if today_sp:
                 a, b = max(today_sp, key=lambda ab: ab[1] - ab[0])
                 c2 = dataclasses.replace(
-                    c, windows_recommended=True, window_open_time=a.time(), window_close_time=b.time()
+                    c_view, windows_recommended=True, window_open_time=a.time(), window_close_time=b.time()
                 )
             else:
-                c2 = dataclasses.replace(c, windows_recommended=False)
+                c2 = dataclasses.replace(c_view, windows_recommended=False)
             tomorrow_w = None
             if tomorrow_sp:
                 a, b = max(tomorrow_sp, key=lambda ab: ab[1] - ab[0])
                 tomorrow_w = (True, a.time(), b.time())
             out = _build_predicted_indoor_future(
-                self._hourly_forecast_temps,
+                forecast_view,
                 config,
                 now,
                 current_indoor_temp=reading.primary_value,
@@ -8373,7 +8524,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 band_schedule=band_schedule,
                 tou_precondition_window=tou_window,
                 tomorrow_window=tomorrow_w,
-                zone_service=_zone_service_of(self),
+                zone_service=service,
+                until=until,
             )
             pts = []
             for entry in out:
@@ -8457,7 +8609,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             day_modes.setdefault(_pd["date"], _pd["hvac_mode"])
         # Issue #1542: the plan simulates and promises only the families this zone serves now (equipment, lockouts
         # and season through the zone capability resolver); operation_timeline.zone_masked() applies it.
-        service = _zone_service_of(self)
         return TimelineSnapshot(
             now=now,
             zone=self._entry_id,
@@ -8476,7 +8627,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             sleep_sensor_label="bedroom sensor" if sleep_entity else None,
             sleep_gap_f=self._sleep_gap_f(reading.primary_value, sleep_entity),
             primary_sensor_label="thermostat",
-            band_at=band_resolver_for(c, self.config),
+            band_at=band_resolver_for(c_view, config_view),
             occupancy_mode=self._occupancy_mode,
             day_modes=day_modes,
             day_type=c.day_type,
@@ -8748,7 +8899,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if latch is None or getattr(self, "_shut_down", False) is True or self._current_classification is None:
             return None
         try:
-            tl = latch.timeline
+            tl = self._timeline_plan()
             if tl is None or tl.day != dt_util.now().date():
                 return None
             return self._apply_live_direction_veto(tl) if live else tl
@@ -8813,12 +8964,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def timeline_debug(self) -> dict[str, Any]:
         """The timeline for the debug payload: steps, path, runs, window candidates, the last run's cost."""
         try:
-            latch = getattr(self, "_timeline_latch", None)
-            tl = latch.timeline if latch is not None else None
+            tl = self._timeline_plan()
             out: dict[str, Any] = {
                 "shadow": False,  # Issue #1230 R3b: authoritative - the surfaces read this
                 "unit": self.config.get("temp_unit", "fahrenheit"),
                 "last_run": dict(getattr(self, "_timeline_last", {})),
+                "outlook": dict(getattr(self, "_timeline_outlook_info", {})),  # Issue #1727
             }
             if tl is not None:
                 # The frozen contract dict (temperatures in internal degrees F) plus the builder's working data.
@@ -21914,6 +22065,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         finally:
             # Issue #1102: release always runs, even if a save above raised.
             self._v4_cancel_fit()  # Issue #1230 R1: a running fit's result is dropped; the executor thread just ends
+            outlook_task = getattr(self, "_timeline_outlook_task", None)  # Issue #1727: its result is dropped too
+            if outlook_task is not None and not outlook_task.done():
+                outlook_task.cancel()
+            self._timeline_outlook_task = None
             # Cancel any pending occupancy away setback timer
             self._cancel_occupancy_away_timer()
             # Issue #899: cancel any pending TOU away/vacation T_start guard timer
@@ -22913,8 +23068,13 @@ def _build_predicted_indoor_future(
     tou_precondition_window: tuple[datetime, datetime, float, str] | None = None,
     tomorrow_window: tuple[bool, Any, Any] | None = None,
     zone_service: zc.ZoneService | None = None,
+    until: Any | None = None,
 ) -> list[dict]:
     """Build future predicted indoor temps from the automation plan.
+
+    ``until`` (Issue #1727): stop walking the forecast after the first entry past this instant. The walk is causal, so
+    the points returned are exactly the leading points of the full walk (the day modes still read the whole forecast);
+    the loop-side timeline build asks for its capped plan's end and does not pay for the rest of the week.
 
     ``zone_service`` (Issue #1544): the families the zone serves. A day mode the zone cannot run (cool on a heat-only
     zone, heat on a cool-only one, or a side a lockout / the season takes away) is simulated as passive drift, the
@@ -23160,6 +23320,8 @@ def _build_predicted_indoor_future(
         if local_ts <= now:
             skipped_past += 1
             continue
+        if until is not None and local_ts > until:
+            break
         outdoor = entry.get("temperature")
         mode = day_modes.get(local_ts.date(), "off")
         if not _service.serves(mode):

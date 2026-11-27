@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "प्राकृतिक वेंटिलेशन और इकोनॉमाइज़र",
   "dashboard.debug.group.occupancy": "उपस्थिति",
   "dashboard.debug.group.plan": "योजना",
+  "dashboard.debug.group.performance": "प्रदर्शन",
   "dashboard.debug.group.units": "इकाइयां",
   "dashboard.debug.load_failed": "लोड नहीं हो सका: {error}",
   "dashboard.debug.no": "नहीं",

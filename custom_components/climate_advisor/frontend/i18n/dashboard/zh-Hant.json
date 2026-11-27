@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "自然通風與外氣節能",
   "dashboard.debug.group.occupancy": "在家狀態",
   "dashboard.debug.group.plan": "計畫",
+  "dashboard.debug.group.performance": "效能",
   "dashboard.debug.group.units": "單位",
   "dashboard.debug.load_failed": "載入失敗：{error}",
   "dashboard.debug.no": "否",

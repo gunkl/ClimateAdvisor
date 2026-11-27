@@ -99,6 +99,7 @@
     "remote_offset.py": 98.4,
     "repairs.py": 100.0,
     "scheduler.py": 98.8,
+    "self_measure.py": 97.3,
     "sensor.py": 100.0,
     "services.py": 98.9,
     "setpoint_combinations.py": 98.4,

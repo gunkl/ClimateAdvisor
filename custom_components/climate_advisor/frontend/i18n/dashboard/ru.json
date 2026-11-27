@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "Естественная вентиляция и экономайзер",
   "dashboard.debug.group.occupancy": "Присутствие",
   "dashboard.debug.group.plan": "План",
+  "dashboard.debug.group.performance": "Производительность",
   "dashboard.debug.group.units": "Единицы",
   "dashboard.debug.load_failed": "Не удалось загрузить: {error}",
   "dashboard.debug.no": "нет",

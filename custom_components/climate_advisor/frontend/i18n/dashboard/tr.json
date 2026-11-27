@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "Doğal havalandırma ve ekonomizör",
   "dashboard.debug.group.occupancy": "Evde olma durumu",
   "dashboard.debug.group.plan": "Plan",
+  "dashboard.debug.group.performance": "Performans",
   "dashboard.debug.group.units": "Birimler",
   "dashboard.debug.load_failed": "Yüklenemedi: {error}",
   "dashboard.debug.no": "hayır",

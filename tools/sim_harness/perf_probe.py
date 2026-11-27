@@ -7,6 +7,9 @@ While active it records, without touching production code:
 * ``loop``       - thread CPU + wall per event-loop callback step. The hook is ``asyncio.events.Handle._run``
                    (what asyncio debug mode's ``slow_callback_duration`` measures). That is an asyncio internal;
                    it is used because the harness has no loop-level hook. It is restored on exit.
+* ``callback``   - thread CPU + wall per ``FakeScheduler`` timer callback (the synchronous part: a coroutine it returns
+                   runs later as a ``task``). Named after the registered callable, looking through the scheduler's
+                   interval/daily re-arming closures. Issue #1730.
 * ``task``       - the same per scheduler task: ``FakeScheduler.enqueue_task`` coroutines. ``FakeScheduler`` and
                    ``run_coro`` run a whole coroutine in one loop step, so this is the useful granularity.
 * ``worker``     - wall per ``process_offload.async_run_job`` call (a child process in production; inline in sim).
@@ -24,6 +27,11 @@ Memory is bounded: per name, count / total / max are exact and percentiles come 
 GC does raise the process's resident memory: ``peak_rss`` read about 370-450 MB with the probe against about 150 MB
 without (it levels off), so read memory from a run without ``--perf-report``.
 
+Nested executor spans (the harness runs executor jobs inline) are subtracted from the ``loop``, ``task`` and
+``callback`` rows that contain them, so a row is the loop's own cost and the job is read in the ``executor`` rows
+(Issue #1730). ``run_heavy_household`` adds one generated household with a 7-day hourly forecast and a v4 model as
+separate ``household_*`` rows; it is report-only.
+
 Nothing here changes simulation results or exit status; budgets only flag rows in the report.
 """
 
@@ -31,7 +39,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
 import gc
 import json
 import random
@@ -58,19 +65,12 @@ HOT_FUNCTIONS = (
 
 
 def callable_name(fn: Any) -> str:
-    """``module.qualname`` of a callable, looking through ``functools.partial`` wrappers and bound-zone wrappers."""
-    seen = 0
-    while seen < 8:
-        seen += 1
-        if isinstance(fn, functools.partial):
-            fn = fn.func
-        elif hasattr(fn, "__wrapped__"):
-            fn = fn.__wrapped__
-        else:
-            break
-    qual = getattr(fn, "__qualname__", None) or type(fn).__name__
-    mod = getattr(fn, "__module__", "") or ""
-    return f"{mod.rsplit('.', 1)[-1]}.{qual}" if mod else qual
+    """``module.qualname`` of a callable: the production helper (``self_measure``, hass-free, shared since #1730).
+
+    Imported on first use: importing the package needs the Home Assistant stubs, which ``__enter__`` installs."""
+    from custom_components.climate_advisor.self_measure import callable_name as _callable_name  # noqa: PLC0415
+
+    return _callable_name(fn)
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:
@@ -126,6 +126,9 @@ class PerfProbe:
         self._gc_cum_cpu = 0.0
         self._gc_start: tuple[float, float] | None = None
         self._depth = 0
+        self._stack: list[list[float]] = []  # per open span: [nested executor cpu, nested executor wall]
+        self.household: dict | None = None  # what run_heavy_household ran (None: it did not)
+        self.phase = ""  # "" or "household_": booked kinds are prefixed by it (Issue #1730)
         self._last_collect = 0.0
         self._last_full_collect = 0.0
         self._restore: list[Any] = []
@@ -151,6 +154,7 @@ class PerfProbe:
     # -- span bookkeeping ----------------------------------------------
     def _begin(self) -> tuple[float, float, float, float]:
         self._depth += 1
+        self._stack.append([0.0, 0.0])
         return time.thread_time(), time.perf_counter(), self._gc_cum_cpu, self._gc_cum_wall
 
     def _end(self, kind: str, name: Any, token: tuple[float, float, float, float], namer: Any = None) -> None:
@@ -158,11 +162,24 @@ class PerfProbe:
         counted in ``probe_errors`` and the simulated call's own result or exception goes through unchanged."""
         self._depth -= 1
         try:
+            frame = self._stack.pop() if self._stack else [0.0, 0.0]
             c0, w0, gc_c0, gc_w0 = token
             cpu = time.thread_time() - c0 - (self._gc_cum_cpu - gc_c0)
             wall = time.perf_counter() - w0 - (self._gc_cum_wall - gc_w0)
+            parent = self._stack[-1] if self._stack else None
+            if kind == "executor":
+                # the job is booked in full; its parent row must not pay for it again
+                if parent is not None:
+                    parent[0] += max(cpu, 0.0)
+                    parent[1] += max(wall, 0.0)
+            else:
+                cpu -= frame[0]
+                wall -= frame[1]
+                if parent is not None:  # executor spans below this one stay out of every row above it too
+                    parent[0] += frame[0]
+                    parent[1] += frame[1]
             label = namer(name) if namer is not None else name
-            self.samples[kind][label].add(max(cpu, 0.0), max(wall, 0.0))
+            self.samples[self.phase + kind][label].add(max(cpu, 0.0), max(wall, 0.0))
             self._maybe_collect()
         except Exception:  # noqa: BLE001 - the probe must never change the run
             self.probe_errors += 1
@@ -221,6 +238,20 @@ class PerfProbe:
 
         self._patch(fh.FakeHass, "async_add_executor_job", executor_job)
 
+        orig_entry_init = fs._ScheduledCallback.__init__
+
+        def entry_init(entry: Any, fire_at: Any, callback: Any) -> None:
+            def timed_callback(now: Any, _cb: Any = callback) -> Any:
+                tok = probe._begin()
+                try:
+                    return _cb(now)
+                finally:
+                    probe._end("callback", _cb, tok, probe._scheduler_name)
+
+            orig_entry_init(entry, fire_at, timed_callback)
+
+        self._patch(fs._ScheduledCallback, "__init__", entry_init)
+
         orig_enqueue = fs.FakeScheduler.enqueue_task
 
         def enqueue_task(sched_self: Any, coro: Any) -> Any:
@@ -258,7 +289,7 @@ class PerfProbe:
             finally:
                 try:
                     wall = time.perf_counter() - w0
-                    probe.samples["worker"][job].add(wall, wall)  # wall time stands in for CPU
+                    probe.samples[probe.phase + "worker"][job].add(wall, wall)  # wall time stands in for CPU
                 except Exception:  # noqa: BLE001 - the probe must never change the run
                     probe.probe_errors += 1
 
@@ -280,6 +311,24 @@ class PerfProbe:
         if self._gc_was_enabled:
             gc.enable()
         self._active = False
+
+    @staticmethod
+    def _scheduler_name(cb: Any) -> str:
+        """The callable a timer was registered for: the scheduler's interval/daily closures are looked through."""
+        try:
+            for _ in range(4):
+                code = getattr(cb, "__code__", None)
+                if (
+                    code is not None
+                    and getattr(cb, "__qualname__", "").endswith("_fire_and_reschedule")
+                    and "callback" in code.co_freevars
+                ):
+                    cb = cb.__closure__[code.co_freevars.index("callback")].cell_contents
+                else:
+                    break
+            return callable_name(cb)
+        except Exception:  # noqa: BLE001 - a name must never break the run
+            return "<unknown timer>"
 
     @staticmethod
     def _handle_name(handle: Any) -> str:
@@ -381,13 +430,15 @@ class PerfProbe:
                 "total_ms": round(sum(pauses), 3),
                 "max_ms": round(pauses[-1], 3) if pauses else 0.0,
             },
-            "metrics": {k: ("wall" if k == "worker" else "thread_cpu") for k in kinds},
+            "metrics": {k: ("wall" if k.endswith("worker") else "thread_cpu") for k in kinds},
+            "household": self.household,
             "kinds": kinds,
             "line_counts": dict(sorted(self.line_counts.items())) if self.lines else None,
         }
 
     @staticmethod
     def _flag(kind: str, ms: float) -> str:
+        kind = kind.removeprefix(HOUSEHOLD_PREFIX)
         if kind == "executor" and ms > EXECUTOR_BUDGET_MS:
             return "OVER_BUDGET"
         if kind == "loop":
@@ -398,7 +449,9 @@ class PerfProbe:
         return ""
 
 
+HOUSEHOLD_PREFIX = "household_"
 _TITLES = {
+    "callback": "Scheduler timer callbacks (synchronous part; nested executor jobs subtracted; report only)",
     "executor": f"Executor jobs (thread CPU; budget {EXECUTOR_BUDGET_MS:g} ms)",
     "loop": f"Loop callbacks (thread CPU; flag {LOOP_FLAG_MS:g} ms, highlight {LOOP_HIGHLIGHT_MS:g} ms)",
     "task": "Scheduler tasks (whole coroutine; report only)",
@@ -416,12 +469,26 @@ def format_table(report: dict, top: int = 15) -> str:
     out.append("Memory: with GC deferred, peak_rss reads about 300 MB high; use a run without --perf-report for memory")
     if report.get("probe_errors"):
         out.append(f"Probe errors: {report['probe_errors']} span(s) not booked (the run itself is unaffected)")
-    for kind in ("executor", "loop", "task", "worker"):
+    hh = report.get("household")
+    if hh:
+        out.append(
+            f"Household (generated; {hh.get('forecast_days')}-day hourly forecast, v4 primary, day_seed "
+            f"{hh.get('day_seed')}): rows below are prefixed 'household'"
+        )
+    for kind in (
+        "executor",
+        "loop",
+        "callback",
+        "task",
+        "worker",
+        *(HOUSEHOLD_PREFIX + k for k in ("executor", "loop", "callback", "task", "worker")),
+    ):
         rows = report["kinds"].get(kind)
         if not rows:
             continue
         out.append("")
-        out.append(f"-- {_TITLES[kind]}")
+        base = kind.removeprefix(HOUSEHOLD_PREFIX)
+        out.append(f"-- {'Household: ' if kind != base else ''}{_TITLES[base]}")
         out.append(f"{'count':>7} {'total_ms':>10} {'p50_ms':>8} {'p99_ms':>8} {'max_ms':>8}  flag        name")
         for r in rows[:top]:
             mx = r["max_cpu_ms"]
@@ -441,3 +508,57 @@ def write_json(report: dict, path: str) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2, sort_keys=True)
         fh.write("\n")
+
+
+# -- the heavy household (Issue #1730) ---------------------------------------------------------------------------------
+HOUSEHOLD_DAY_SEED = 1730  # fixed: the report compares night to night
+HOUSEHOLD_FORECAST_DAYS = 7
+HOUSEHOLD_V4_SPEC = {"confidence": "ok", "house": {"a_o": 0.03, "a_w": 0.5, "q_c": 9.0, "q_h": 9.0, "s": 0.0}}
+
+
+def household_extras(plan: Any, days: int = HOUSEHOLD_FORECAST_DAYS) -> dict:
+    """Scenario keys for the heavy household: an hourly forecast ``days`` long from the plan's own high/low (a slow
+    drift day to day, a sine inside each) and a fitted-looking v4 model. Pure and deterministic."""
+    import math  # noqa: PLC0415
+    from datetime import timedelta  # noqa: PLC0415
+
+    from tools.sim_harness.generator import DAY0  # noqa: PLC0415
+
+    start = DAY0.replace(hour=0, minute=0, second=0)
+    hi0, lo0 = float(plan.forecast["high"]), float(plan.forecast["low"])
+    hourly = []
+    for k in range(days):
+        drift = 4.0 * math.sin(k * 1.1)
+        mid, amp = (hi0 + lo0) / 2.0 + drift, (hi0 - lo0) / 2.0
+        for h in range(24):
+            t = start + timedelta(days=k, hours=h)
+            hourly.append(
+                {
+                    "datetime": t.isoformat() + "+00:00",
+                    "temperature": round(mid + amp * math.cos(2 * math.pi * (h - 16) / 24), 1),
+                }
+            )
+    return {"hourly_forecast": hourly, "v4_model": dict(HOUSEHOLD_V4_SPEC)}
+
+
+def run_heavy_household(probe: PerfProbe, *, day_seed: int = HOUSEHOLD_DAY_SEED) -> None:
+    """Run ONE generated coordinator household with a 7-day forecast and a v4 primary under ``probe`` and book its
+    spans as ``household_*`` rows. Report only: any failure is swallowed and noted, and the run's result and exit status
+    are never touched (call it AFTER the judged run)."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    from tools.sim_harness import generator  # noqa: PLC0415
+
+    probe.phase = HOUSEHOLD_PREFIX
+    probe.household = {"day_seed": day_seed, "forecast_days": HOUSEHOLD_FORECAST_DAYS, "v4": True, "ran": False}
+    try:
+        plan = generator.build_plan(day_seed, "coordinator")
+        plan = replace(
+            plan, use_coordinator=True, config={**plan.config, "primary_engine": "v4", "shadow_engine": "v3"}
+        )
+        rec = generator.run_plan(plan, probe=False, extra_scenario=household_extras(plan))
+        probe.household.update(ran=True, seconds=round(rec.seconds, 2), callback_errors=rec.callback_errors)
+    except Exception as exc:  # noqa: BLE001 - report only
+        probe.household["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    finally:
+        probe.phase = ""

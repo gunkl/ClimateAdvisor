@@ -49,6 +49,7 @@ The rule for new code is in [claude.md, Thread-Safety Requirements](../claude.md
 
 ## Responsibilities
 
+- Keep the number of concurrent workers at or under `worker_limit()` (cores - 1, at least 1).
 - Run an allowlisted job in a short-lived `sys.executable -I -B` child, with an environment stripped of secrets, and return its decoded JSON result.
 - Refuse any job name that is not on the allowlist, in both modes, before anything starts.
 - Kill and reap the child on timeout and on cancel (unload, HA stop), even when cancelled twice.
@@ -130,6 +131,10 @@ The child is started as `sys.executable -I -B -c <_BOOTSTRAP> <package dir> <its
 ### Timeouts and cancel
 
 The timeouts are in `const.py` (`WORKER_TIMEOUT_V4_FIT_S` 900, `WORKER_TIMEOUT_V4_DISPLAY_FIT_S` 600, `WORKER_TIMEOUT_V4_NIGHT_REPLAY_S` 1800, `WORKER_TIMEOUT_CYCLE_REFIT_S` 600). They are set well above the estimated Pi times (about 5x the x86 measurements: a fit about 120 s, a replay about 3 min; the reported Pi fit took 99 s) so only a hung worker reaches them. A hung worker would otherwise hold the domain-wide v4 fit lock forever.
+
+### Worker cap (Issue #1730)
+
+At most `worker_limit()` workers run at once per event loop, across every zone and job kind: cores - 1 (`os.process_cpu_count()` on Python 3.13+, else `os.cpu_count()`), at least 1; `worker_limit_override` wins (tests). The semaphore lives in a `WeakKeyDictionary` keyed by the running loop, so a restart or a test loop never inherits another's slots. A job over the cap waits in `async_run_job` before it takes a slot and before its payload is encoded. The caller has already built the payload dict, so a waiting job still holds that memory; only the encoded bytes wait. The timeout (`timeout_s`) is measured from the moment the slot is acquired (`_run_in_slot`), not from the call, so waiting never eats a job's time. A waiter that is cancelled (unload) leaves the queue and takes no slot; `async with` frees the slot on every exit. A DEBUG line is logged when a job has to wait. Tests: `tests/test_worker_cap_1730.py`.
 
 On timeout, `_kill_and_reap` kills the child and waits for it, and `ProcessJobError("... timed out after N s")` is raised. On cancel (unload, HA stop) the child is killed and reaped and the cancel propagates; a second cancel during the reap is held until the child is gone, so no zombie is left. The timeout applies in process mode only.
 

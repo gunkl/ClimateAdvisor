@@ -7,7 +7,7 @@ every run recomputed from scratch. ``build_timeline`` must give the same plan wi
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -32,8 +32,9 @@ from tests.test_timeline_outlook_1483 import NOW, _later_day, _week_hourly, _wee
 from tests.timeline_fixtures import DAY_TYPES
 
 
-def _reference_run(self, spans):
-    """The pre-#1727 ``_Simulator.run``, verbatim: nothing precomputed, nothing reused."""
+def _reference_run(self, spans, until=None):
+    """The pre-#1727 ``_Simulator.run``, verbatim: nothing precomputed, nothing reused (plus #1734's ``until``: stop
+    at the last step that ends at or before it)."""
     if self.start_t is None or not self.pts or not self.index.segments:
         return None
     r, snap = self.rates, self.snap
@@ -49,7 +50,7 @@ def _reference_run(self, spans):
     span_pts = [(a.timestamp(), b.timestamp()) for a, b in spans]
     while True:
         ts_next = ts + timedelta(minutes=SIM_STEP_MINUTES)
-        if ts_next > self.end or ts_next.timestamp() > last_fc:
+        if ts_next > self.end or ts_next.timestamp() > last_fc or (until is not None and ts_next > until):
             break
         out = _interp(self.pts, ts_next.timestamp())
         seg = self.index.at(ts)
@@ -168,15 +169,16 @@ def _steps_for(snap) -> int:
 def test_a_hot_v4_week_build_stays_within_its_step_budget():
     """Deterministic work guard (replaces a wall-time test): simulated steps per build, prefix reuse excluded.
 
-    A 7-day hot v4 build with a window period every day measures 8,506 steps with the prefix reuse; re-simulating
-    every candidate from the start measures 12,800. A regression to re-simulating each candidate from the start
-    (or a per-run grid rebuild) pushes this past the bound."""
+    A 7-day hot v4 build with a window period every day measures 4,525 steps with the prefix reuse and the #1734
+    judged horizon (every candidate stops at max(now + 72 h, close + 24 h)); 8,506 before #1734 (judged to the plan's
+    end) and 12,800 re-simulating every candidate from the start. A regression to either (or a per-run grid rebuild)
+    pushes this past the bound."""
     snap = _snap("hot", 7, True)
     n = _steps_for(snap)
     assert 0 < n <= STEP_BUDGET, n
 
 
-STEP_BUDGET = 9500
+STEP_BUDGET = 5000
 
 
 def test_the_nearest_step_by_bisection_is_the_nearest_step_by_min():
@@ -193,3 +195,46 @@ def test_the_nearest_step_by_bisection_is_the_nearest_step_by_min():
         ref = min(steps, key=lambda s: abs((s.ts - ts).total_seconds())).temp
         assert ot._nearest_step_temp(steps, times, ts) == ref, ts
     assert ot._nearest_step_temp([], [], NOW) is None
+
+
+def _on_night(day_type: str, v4: bool, now: datetime):
+    """The week snapshot moved, by calendar days, so that ``now`` falls on a DST night (wall-clock arithmetic)."""
+    snap = _snap(day_type, 5, v4)
+    days = timedelta(days=(now.date() - NOW.date()).days)
+    plan_days = tuple({**d, "date": d["date"] + days} for d in snap.plan_days)
+    return replace(
+        snap,
+        now=now,
+        hourly=[(t + days, v) for t, v in snap.hourly],
+        hourly_until=snap.hourly_until + days,
+        plan_days=plan_days,
+        day_modes={d["date"]: d["hvac_mode"] for d in plan_days},
+    )
+
+
+@pytest.mark.parametrize("v4", [False, True], ids=["v3", "v4"])
+@pytest.mark.parametrize(
+    "now",
+    [datetime(2026, 3, 7, 21, 45, tzinfo=NOW.tzinfo), datetime(2026, 10, 31, 21, 45, tzinfo=NOW.tzinfo)],
+    ids=["spring-forward", "fall-back"],
+)
+def test_prefix_reuse_is_exact_across_dst_nights(now, v4):
+    """Issue #1734: the grid steps by wall-clock arithmetic, so on a spring-forward night its mid-step epochs are not
+    sorted (02:00-02:45 repeats 03:00-03:45) and a bisect for the first span resumed at the wrong step."""
+    snap = _on_night("hot", v4, now)
+    end = ot.timeline_end(snap)
+    sim = ot._Simulator(snap, ot.model_rates(snap.thermal_model), ot._SegmentIndex(ot.build_segments(snap, end)), end)
+    assert sim.run([]) is not None
+    night = now.replace(hour=0, minute=0) + timedelta(days=1)
+    checked = 0
+    for start_min in range(60, 241, 15):  # span starts 01:00-04:00 local
+        a = night.replace(hour=0, minute=0) + timedelta(minutes=start_min)
+        for hours in (1, 3):
+            for until in (None, a + timedelta(hours=8)):
+                spans = [(a, a + timedelta(hours=hours))]
+                got, ref = sim.run(spans, until), _reference_run(sim, spans, until)
+                assert got is not None and ref is not None
+                assert got.steps == ref.steps, (a, hours, until)
+                assert (got.hvac_minutes, got.discomfort_fh) == (ref.hvac_minutes, ref.discomfort_fh)
+                checked += 1
+    assert checked

@@ -24,12 +24,13 @@
     ['Occupancy', ['occupancy_mode', 'occupancy_away_timer_pending']],
     ['Units', ['unit', 'configured_unit', 'provider_unit', 'ha_system_unit', 'unit_mismatch', 'ha_unit_mismatch', 'sensor_unit_mismatches']],
     ['Prediction engines (v4 shadow)', ['v4_model', 'control_feed']],
-    ['Plan', ['operation_timeline']]
+    ['Plan', ['operation_timeline']],
+    ['Performance', ['performance']]
   ];
   // English group title -> catalog key (the English titles stay in GROUPS: tests/test_new_dashboard.py parses that block).
   var TITLE_KEY = { 'Control': 'group.control', 'Manual override & grace': 'group.manual', 'Doors, windows & pause': 'group.doors',
     'Fan': 'group.fan', 'Natural ventilation & economizer': 'group.natvent', 'Comfort edge': 'group.comfort_edge', 'Occupancy': 'group.occupancy',
-    'Units': 'group.units', 'Prediction engines (v4 shadow)': 'group.engines', 'Plan': 'group.plan' };
+    'Units': 'group.units', 'Prediction engines (v4 shadow)': 'group.engines', 'Plan': 'group.plan', 'Performance': 'group.performance' };
   var NESTED = { classification: 1, thermal_pipeline: 1 };      // expanded into their own groups
   var MOVED = { promise_summary: 'Analysis' };                    // shown in Analysis, not repeated here
   // Issue #1399: keys deliberately not shown on this tab; their full data is in Download diagnostics (this tab's button
@@ -37,7 +38,7 @@
   // get_debug_state() must be in a GROUPS list, NESTED, MOVED or here: tests/test_new_dashboard.py enforces it.
   var DOWNLOAD_ONLY = ['last_action_reason_msg', 'next_automation_action_msg', 'next_automation_time_msg', 'comfort_family_hold_msg'];  // #1341: the wire siblings of prose fields shown above (render by the language, not displayed raw)
   // Object-valued keys rendered as plain-language rows by their own builders below (engineRows, planRows).
-  var CUSTOM = { v4_model: 1, control_feed: 1, operation_timeline: 1 };
+  var CUSTOM = { v4_model: 1, control_feed: 1, operation_timeline: 1, performance: 1 };
   var DASH = '—';
   var HINTS = {
     occupancy_mode: 'Guest > Vacation > Home/Away',
@@ -57,6 +58,9 @@
     'v3 model': 'v3\u2019s own model version and checks; it drives decisions only when v3 is the primary engine',
     comfort_family_armed: 'Which comfort edge the thermostat is guarding, and the last heat/cool switch',
     comfort_family_hold: 'The thermostat is deliberately not flipping heat/cool yet: the house is only slightly past an edge shortly after the other side ran',
+    'Timeline build': 'CPU time of the plan build on the event loop. Budget 50 ms (a Raspberry Pi runs about 4-6 times slower than a PC)',
+    'Loop lag': 'How late a once-a-second timer fires on the Home Assistant event loop, over the last ten minutes. 50 ms is the budget',
+    'Over budget': 'Yes after the loop lag or one of Climate Advisor\u2019s own jobs stayed over budget for 10 of the last 60 minutes; clears after an hour within budget. It is measured and logged only: nothing changes',
     'classification.day_type': 'Drives HVAC strategy', 'classification.windows_recommended': 'Open windows instead of HVAC',
     'classification.pre_condition': 'Pre-heat/cool before peak', 'classification.setback_modifier': 'Trend-based setpoint adjust',
     'classification.today_high': 'The higher of the forecast high and the warmest reading so far today',
@@ -274,6 +278,21 @@
     return rows;
   }
 
+  // ---------- Performance (Issue #1730): what Climate Advisor costs Home Assistant; labels stay English ----------
+  function perfRows(p) {
+    if (!p || typeof p !== 'object' || !Object.keys(p).length) return [['Performance', 'not measured yet']];
+    var ms = function (x) { return ND.num(x, 1) + ' ms'; }, rows = [];
+    var tb = p.timeline_build || {};
+    rows.push(['Timeline build', tb.count ? 'last ' + ms(tb.last_ms) + ' · max ' + ms(tb.max_ms) + ' · average ' + ms(tb.ewma_ms) + ' · ' + count(tb.count, 'build', 'builds') : DASH]);
+    var lag = p.loop_lag || {};
+    rows.push(['Loop lag', lag.running ? 'max ' + ms(lag.max_ms) + ' · p99 ' + ms(lag.p99_ms) + ' · ' + count(lag.samples || 0, 'sample', 'samples') : 'not measured (the timer is not running)']);
+    (p.executor_jobs || []).forEach(function (j) {
+      rows.push(['job ' + j.name, 'max ' + ms(j.max_ms) + ' · last ' + ms(j.last_ms) + ' · average ' + ms(j.ewma_ms) + ' · ' + count(j.count, 'run', 'runs')]);
+    });
+    rows.push(['Over budget', p.overloaded ? 'yes, over budget in ' + (p.over_minutes || 0) + ' of the last 60 minutes' + (p.episodes > 1 ? ' (' + p.episodes + ' times since start)' : '') : 'no']);
+    return rows;
+  }
+
   function buildGroups() {
     var groups = [];
     function row(k, v, hintKey) { return { k: k, v: v, hint: HINTS[hintKey || k] || '' }; }
@@ -295,6 +314,7 @@
         }
       }
       if (TITLE_KEY[g[0]] === 'group.plan' && A && 'operation_timeline' in A) rows = rowsOf(planRows(A.operation_timeline));
+      if (TITLE_KEY[g[0]] === 'group.performance' && A && 'performance' in A) rows = rowsOf(perfRows(A.performance));
       groups.push({ title: T(TITLE_KEY[g[0]]), rows: rows });
     });
     if (A && A.classification) { groups.splice(8, 0, { title: T('group.classification'), rows: classificationRows(A.classification) }); }

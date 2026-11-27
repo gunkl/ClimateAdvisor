@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "Ventilação natural e arrefecimento gratuito",
   "dashboard.debug.group.occupancy": "Ocupação",
   "dashboard.debug.group.plan": "Plano",
+  "dashboard.debug.group.performance": "Desempenho",
   "dashboard.debug.group.units": "Unidades",
   "dashboard.debug.load_failed": "Falha ao carregar: {error}",
   "dashboard.debug.no": "não",

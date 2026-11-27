@@ -56,6 +56,13 @@ async function openDebug(page, opts) {
     unit: celsius ? 'celsius' : 'fahrenheit', v4_model: v4,
     control_feed: opts.controlFeed || { mode: 'v4', path_points: 47, own_path: true },
     operation_timeline: timeline(),
+    // coordinator.performance_debug() (Issue #1730)
+    performance: {
+      timeline_build: { count: 12, last_ms: 9.5, max_ms: 31.2, ewma_ms: 10.4 },
+      loop_lag: { running: true, samples: 600, window_s: 600, max_ms: 7.5, p99_ms: 3.1 },
+      executor_jobs: [{ name: 'coordinator.ClimateAdvisorCoordinator._cycle_judge._job', count: 4, last_ms: 20, max_ms: 28, ewma_ms: 22 }],
+      overloaded: false, over_minutes: 0, episodes: 0,
+    },
     comfort_family_last_switch: { ts: at(5, 10), from: 'heating', to: 'cooling', reason: 'warm afternoon' },
   });
   // coordinator.decision_rates_summary(): v4 primary with a usable fit -> its rate scalars, v3's vent/solar observations
@@ -93,6 +100,7 @@ test.describe('New dashboard: Debug tab', () => {
     const titles = await page.locator('#dbg-groups section h2').allInnerTexts();
     expect(titles.some((t) => /^Other\b/.test(t))).toBe(false);
     expect(titles.some((t) => /^Plan\b/.test(t))).toBe(true);
+    expect(titles.some((t) => /^Performance\b/.test(t))).toBe(true);
     const cells = await page.locator('#dbg-groups td.mono, #dbg-ev-rows td').allInnerTexts();
     expect(cells.length).toBeGreaterThan(50);
     for (const c of cells) expect(c, c).not.toMatch(/[{[]/);

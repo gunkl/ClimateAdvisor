@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "Natuurlijke ventilatie & gratis koeling",
   "dashboard.debug.group.occupancy": "Aanwezigheid",
   "dashboard.debug.group.plan": "Plan",
+  "dashboard.debug.group.performance": "Prestaties",
   "dashboard.debug.group.units": "Eenheden",
   "dashboard.debug.load_failed": "Laden mislukt: {error}",
   "dashboard.debug.no": "nee",

@@ -649,8 +649,12 @@ def own_thermostat(session: Any) -> None:
         fake_hass.set_action_deadband(session.climate_entity, None)
 
 
-def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
-    """Drive one planned day closed-loop against the production engine; return the record."""
+def run_plan(plan: DayPlan, *, probe: bool = True, extra_scenario: dict | None = None) -> RunRecord:
+    """Drive one planned day closed-loop against the production engine; return the record.
+
+    ``extra_scenario`` (Issue #1730, the perf report's heavy household) adds scenario keys the session understands, such
+    as ``hourly_forecast`` or ``v4_model``, to what the session is built from. ``None`` (every other caller) changes
+    nothing."""
     # Issue #1508: the previous day's FakeHass must not stay reachable from the process-wide HA stubs.
     clear_stub_call_history()
     t_wall = time.perf_counter()
@@ -674,6 +678,8 @@ def run_plan(plan: DayPlan, *, probe: bool = True) -> RunRecord:
     # The session derives its virtual start from the first event; give it one, then feed it for real.
     construct = dict(scenario)
     construct["events"] = [first]
+    if extra_scenario:
+        construct.update(extra_scenario)
     pr = PromiseProbe(scenario_name=scenario["name"]) if probe else None
     session = make_session(construct, engine="fakehass", probe=pr, use_coordinator=plan.use_coordinator)
     try:

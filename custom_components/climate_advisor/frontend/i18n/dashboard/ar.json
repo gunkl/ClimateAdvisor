@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "التهوية الطبيعية ومُوفِّر الهواء",
   "dashboard.debug.group.occupancy": "الوجود في المنزل",
   "dashboard.debug.group.plan": "الخطة",
+  "dashboard.debug.group.performance": "الأداء",
   "dashboard.debug.group.units": "الوحدات",
   "dashboard.debug.load_failed": "تعذّر التحميل: {error}",
   "dashboard.debug.no": "لا",

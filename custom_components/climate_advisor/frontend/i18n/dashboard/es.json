@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "Ventilación natural y economizador",
   "dashboard.debug.group.occupancy": "Ocupación",
   "dashboard.debug.group.plan": "Plan",
+  "dashboard.debug.group.performance": "Rendimiento",
   "dashboard.debug.group.units": "Unidades",
   "dashboard.debug.load_failed": "No se pudo cargar: {error}",
   "dashboard.debug.no": "no",

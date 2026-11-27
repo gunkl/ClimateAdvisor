@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "자연 환기 및 이코노마이저",
   "dashboard.debug.group.occupancy": "재실 상태",
   "dashboard.debug.group.plan": "계획",
+  "dashboard.debug.group.performance": "성능",
   "dashboard.debug.group.units": "단위",
   "dashboard.debug.load_failed": "불러오지 못했습니다: {error}",
   "dashboard.debug.no": "아니요",

@@ -640,6 +640,7 @@
   "dashboard.debug.group.natvent": "Natürliche Lüftung & freie Kühlung",
   "dashboard.debug.group.occupancy": "Anwesenheit",
   "dashboard.debug.group.plan": "Plan",
+  "dashboard.debug.group.performance": "Leistung",
   "dashboard.debug.group.units": "Einheiten",
   "dashboard.debug.load_failed": "Laden fehlgeschlagen: {error}",
   "dashboard.debug.no": "nein",

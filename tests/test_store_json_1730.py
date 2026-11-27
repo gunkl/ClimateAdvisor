@@ -149,8 +149,17 @@ def test_max_hold_no_single_encode_or_decode_call_covers_a_large_member(monkeypa
         parsed.append(len(b))
         return real_loads(b)
 
+    real_stdlib = store_json._STDLIB
+
+    class _SpyStdlib:  # the lossless encoder (one shared JSONEncoder)
+        def encode(self, obj: Any) -> str:
+            out = real_stdlib.encode(obj)
+            sizes.append(len(out))
+            return out
+
     monkeypatch.setattr(orjson, "dumps", spy_orjson)
     monkeypatch.setattr(json, "dumps", spy_json)
+    monkeypatch.setattr(store_json, "_STDLIB", _SpyStdlib())
     for lossless in (False, True):
         sizes.clear()
         data = store_json.dumps(big, depth=3, lossless=lossless)

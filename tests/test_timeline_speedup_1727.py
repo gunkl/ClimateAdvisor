@@ -177,3 +177,19 @@ def test_a_hot_v4_week_build_stays_within_its_step_budget():
 
 
 STEP_BUDGET = 9500
+
+
+def test_the_nearest_step_by_bisection_is_the_nearest_step_by_min():
+    """``predicted_at`` (the band edge a segment arms) finds the nearest step by bisection; the pre-#1727 code took
+    ``min`` over every step, which on a tie keeps the earlier one. Probes before, after, between, on and exactly
+    halfway between steps."""
+    steps = [
+        SimStep(NOW + timedelta(minutes=SIM_STEP_MINUTES * (k + 1)), 60.0 + k, 60.0, 50.0, None, False, 0.0, None, 0.0)
+        for k in range(12)
+    ]
+    times = [s.ts for s in steps]
+    for minutes in range(-20, SIM_STEP_MINUTES * 14, 1):
+        ts = NOW + timedelta(minutes=minutes, seconds=30 * (minutes % 2))
+        ref = min(steps, key=lambda s: abs((s.ts - ts).total_seconds())).temp
+        assert ot._nearest_step_temp(steps, times, ts) == ref, ts
+    assert ot._nearest_step_temp([], [], NOW) is None

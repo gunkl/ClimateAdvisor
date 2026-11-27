@@ -907,3 +907,61 @@ def test_display_pending_reads_the_same_30_days(tmp_path: Path, monkeypatch: pyt
         assert len(seen["entries"]) < len(rows) / 2, "only the last 30 days were handed over"
     else:
         assert len(seen["entries"]) == len(rows)
+
+
+# ---------------------------------------------------------------------- edges of the window reads (verification pass)
+
+
+def _whole_line_series(arc: V4Archive, sensor: str, lead: str) -> dict[int, float]:
+    """Every value by the legacy per-slot path (``_ca_value`` / ``_Line.get`` over every candidate slot)."""
+    if sensor == va.CA_LINE and arc._ca_active():
+        return {e: v for e in arc._ca_slots() if (v := arc._ca_value(e, lead)) is not None}
+    line = arc._lines.get(sensor)
+    return {e: v for e in (line.slots() if line else []) if (v := line.get(e, lead)) is not None}
+
+
+def test_an_empty_line_has_no_window_and_no_slots() -> None:
+    line = _Line(V4_ARCHIVE_LEADS)
+    assert line._window(0.0, 1e12) == (0, 0)
+    assert list(line.iter_slots()) == [] and list(line.iter_slots(reverse=True)) == []
+    assert line.series("1h", -math.inf, math.inf) == {} and line.span("1h") is None
+
+
+def test_a_primary_line_with_no_value_leaves_ca_out_of_the_sensors_with_slots(tmp_path: Path) -> None:
+    arc = V4Archive(tmp_path, entry_id="z")
+    arc.set_ca_source("sensor.hall")
+    line = _Line(V4_ARCHIVE_LEADS)
+    line.base = 1_768_000_000
+    for lead in V4_ARCHIVE_LEADS:
+        line.cols[lead] = array("f", [math.nan]) * 4  # slots allocated, never written
+    arc._lines["sensor.hall"] = line
+    arc._lines[va.CA_LINE] = _Line(V4_ARCHIVE_LEADS)  # a stored _ca line, empty
+    assert arc._ca_active()
+    assert arc.sensors_with_slots() == set()
+    assert {s for s, n in arc.slot_count().items() if n} == set()
+
+
+def test_ca_series_leads_merges_shared_slots_once_and_a_missing_bedroom_line_falls_back(tmp_path: Path) -> None:
+    """A slot both the primary node and a stored ``_ca`` line hold is read once; in the sleep window with no bedroom
+    line the stored ``_ca`` answers (``_ca_value``'s rule), else nothing. Same as the whole-line read."""
+    arc = V4Archive(tmp_path, entry_id="z")
+    arc.set_ca_source(
+        "sensor.hall", sleep="sensor.bed", sleep_time="21:30", wake_time="06:45", tz="America/Los_Angeles"
+    )
+    base = 1_768_000_000 // 1800 * 1800
+    for k in range(96):
+        arc.put("sensor.hall", base + 1800 * k, "1h", 60.0 + k * 0.01)
+        if k % 3 == 0:
+            arc.put(va.CA_LINE, base + 1800 * k, "1h", 50.0 + k * 0.01)  # shares the hall's slots
+            arc.put(va.CA_LINE, base + 1800 * k, "4h", 51.0 + k * 0.01)
+    assert "sensor.bed" not in arc._lines
+    got = arc.series_leads(va.CA_LINE, ("1h", "4h"), -math.inf, math.inf)
+    for lead in ("1h", "4h"):
+        want = _whole_line_series(arc, va.CA_LINE, lead)
+        assert got[lead] == want == arc.series(va.CA_LINE, lead, -math.inf, math.inf), lead
+    assert len(list(arc._ca_candidates(-math.inf, math.inf))) == 96  # merged, each slot once
+
+
+def test_rows_without_a_usable_value_make_no_line() -> None:
+    rows = {"1768000000": [None, "x", True], "1768001800": [math.inf], "1768003600": []}
+    assert va._parse_line(rows, list(V4_ARCHIVE_LEADS), V4_ARCHIVE_LEADS, 0.0) == (None, 0)

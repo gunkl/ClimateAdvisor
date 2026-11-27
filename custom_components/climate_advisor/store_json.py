@@ -41,12 +41,15 @@ import orjson
 _OPTIONS = orjson.OPT_NON_STR_KEYS  # stdlib turns int/float/bool/None dict keys into strings; so do we
 _LARGE = 1024  # a container of plain values (no nested container) is split above this many members
 _MISSING = object()
-_CLOSERS = {b"}": dict, b"]": list}
+_CLOSERS: dict[bytes, type[dict[Any, Any]] | type[list[Any]]] = {b"}": dict, b"]": list}
+
+
+_STDLIB = json.JSONEncoder(separators=(",", ":"))  # json.dumps(value, separators=...) builds one per call
 
 
 def _encode(value: Any, lossless: bool) -> bytes:
     if lossless:
-        return json.dumps(value, separators=(",", ":")).encode()
+        return _STDLIB.encode(value).encode()
     return orjson.dumps(value, option=_OPTIONS)
 
 
@@ -68,13 +71,16 @@ def _emit(value: Any, level: int, depth: int, prefix: bytes, lossless: bool, out
         return
     is_dict = isinstance(value, dict)
     out.append(prefix + (b"{" if is_dict else b"["))
-    first = True
-    for item in value.items() if is_dict else enumerate(value):
-        if not first:
-            out[-1] += b","
-        first = False
-        key, member = item
-        _emit(member, level + 1, depth, _key_prefix(key, lossless) if is_dict else b"", lossless, out)
+    last = len(value) - 1
+    for i, (key, member) in enumerate(value.items() if is_dict else enumerate(value)):
+        if _splits(member, level + 1, depth):
+            _emit(member, level + 1, depth, _key_prefix(key, lossless) if is_dict else b"", lossless, out)
+            if i < last:
+                out[-1] += b","  # its closer
+            continue
+        # a member on one line: one encode call, the key included (``{"k":v}`` less its braces is ``"k":v``)
+        line = _encode({key: member}, lossless)[1:-1] if is_dict else _encode(member, lossless)
+        out.append(line + b"," if i < last else line)
     out.append(b"}" if is_dict else b"]")
 
 

@@ -85,6 +85,13 @@ def _issued(snap: dict[str, Any]) -> datetime | None:
     return _parse_iso(snap["i"])
 
 
+def _issued_in_order(snap: dict[str, Any]) -> datetime:
+    """``_issued`` for a bisection of the verified time-sorted view, where every issue time is readable."""
+    issued = _issued(snap)
+    assert issued is not None  # _time_sorted_snapshots verified it
+    return issued
+
+
 def _floor_hour(dt: datetime) -> datetime:
     return dt.replace(minute=0, second=0, microsecond=0)
 
@@ -353,8 +360,8 @@ class ForecastArchive:
             # Issue #1730 (as ChartStateLog.get_entries, Issue #1598): issue times in order, so the window is found by
             # bisection; exactly the slice the scan below keeps.
             rows, n = view
-            lo = bisect.bisect_left(rows, start_a, 0, n, key=_issued)
-            hi = bisect.bisect_left(rows, end_a, lo, n, key=_issued)
+            lo = bisect.bisect_left(rows, start_a, 0, n, key=_issued_in_order)
+            hi = bisect.bisect_left(rows, end_a, lo, n, key=_issued_in_order)
             return rows[lo:hi]
         out: list[dict[str, Any]] = []
         for snap in list(self._snapshots):  # out of order (a clock stepped back) or an unreadable issue time: the scan

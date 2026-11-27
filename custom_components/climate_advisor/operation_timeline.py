@@ -1050,6 +1050,22 @@ def from_dict(d: Mapping[str, Any]) -> Timeline | None:
 # ---------------------------------------------------------------------------
 
 
+def _nearest_step_temp(steps: Sequence[SimStep], times: Sequence[datetime], ts: datetime) -> float | None:
+    """The temperature of the step nearest ``ts`` (``times`` = the steps' times, strictly increasing); on a tie the
+    earlier step. By bisection: the same answer as ``min(steps, key=|step.ts - ts|)`` (Issue #1727)."""
+    if not steps:
+        return None
+    i = bisect.bisect_left(times, ts)
+    if i == 0:
+        return steps[0].temp
+    if i == len(steps):
+        return steps[-1].temp
+    before, after = steps[i - 1], steps[i]
+    if abs((before.ts - ts).total_seconds()) <= abs((after.ts - ts).total_seconds()):
+        return before.temp
+    return after.temp
+
+
 def _interp(points: Sequence[tuple[float, float]], t: float, keys: Sequence[float] | None = None) -> float | None:
     """Linear interpolation; ``keys`` (the points' x values) may be passed to skip rebuilding them per call."""
     if not points:
@@ -2051,21 +2067,7 @@ def build_timeline(
     final_ts = [s.ts for s in final.steps] if final else []
 
     def predicted_at(ts: datetime) -> float | None:
-        if not final:
-            return None
-        # Nearest step by time (steps are strictly increasing in time); on a tie the earlier step, as ``min`` gave.
-        fsteps = final.steps
-        if not fsteps:
-            return None
-        i = bisect.bisect_left(final_ts, ts)
-        if i == 0:
-            return fsteps[0].temp
-        if i == len(fsteps):
-            return fsteps[-1].temp
-        before, after = fsteps[i - 1], fsteps[i]
-        if abs((before.ts - ts).total_seconds()) <= abs((after.ts - ts).total_seconds()):
-            return before.temp
-        return after.temp
+        return _nearest_step_temp(final.steps, final_ts, ts) if final else None
 
     # --- band-driven steps (every boundary after the first segment, which starts now) ---
     for prev, seg in zip(segments, segments[1:], strict=False):

@@ -106,6 +106,7 @@
     "state.py": 100.0,
     "status_text.py": 100.0,
     "storage_paths.py": 100.0,
+    "store_json.py": 98.4,
     "swing.py": 97.0,
     "switch.py": 100.0,
     "temperature.py": 100.0,

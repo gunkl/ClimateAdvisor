@@ -32,8 +32,9 @@ from tests.test_timeline_outlook_1483 import NOW, _later_day, _week_hourly, _wee
 from tests.timeline_fixtures import DAY_TYPES
 
 
-def _reference_run(self, spans):
-    """The pre-#1727 ``_Simulator.run``, verbatim: nothing precomputed, nothing reused."""
+def _reference_run(self, spans, until=None):
+    """The pre-#1727 ``_Simulator.run``, verbatim: nothing precomputed, nothing reused (plus #1734's ``until``: stop
+    at the last step that ends at or before it)."""
     if self.start_t is None or not self.pts or not self.index.segments:
         return None
     r, snap = self.rates, self.snap
@@ -49,7 +50,7 @@ def _reference_run(self, spans):
     span_pts = [(a.timestamp(), b.timestamp()) for a, b in spans]
     while True:
         ts_next = ts + timedelta(minutes=SIM_STEP_MINUTES)
-        if ts_next > self.end or ts_next.timestamp() > last_fc:
+        if ts_next > self.end or ts_next.timestamp() > last_fc or (until is not None and ts_next > until):
             break
         out = _interp(self.pts, ts_next.timestamp())
         seg = self.index.at(ts)
@@ -168,15 +169,16 @@ def _steps_for(snap) -> int:
 def test_a_hot_v4_week_build_stays_within_its_step_budget():
     """Deterministic work guard (replaces a wall-time test): simulated steps per build, prefix reuse excluded.
 
-    A 7-day hot v4 build with a window period every day measures 8,506 steps with the prefix reuse; re-simulating
-    every candidate from the start measures 12,800. A regression to re-simulating each candidate from the start
-    (or a per-run grid rebuild) pushes this past the bound."""
+    A 7-day hot v4 build with a window period every day measures 4,525 steps with the prefix reuse and the #1734
+    judged horizon (every candidate stops at max(now + 72 h, close + 24 h)); 8,506 before #1734 (judged to the plan's
+    end) and 12,800 re-simulating every candidate from the start. A regression to either (or a per-run grid rebuild)
+    pushes this past the bound."""
     snap = _snap("hot", 7, True)
     n = _steps_for(snap)
     assert 0 < n <= STEP_BUDGET, n
 
 
-STEP_BUDGET = 9500
+STEP_BUDGET = 5000
 
 
 def test_the_nearest_step_by_bisection_is_the_nearest_step_by_min():

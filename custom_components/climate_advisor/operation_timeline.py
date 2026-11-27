@@ -1382,6 +1382,7 @@ class _Simulator:
         self.start_t = snap.indoor_primary if snap.indoor_primary is not None else snap.indoor
         self._grid_cache: list[tuple] | None = None
         self._grid_ends: list[datetime] = []  # the grid's step end times, for ``run(until=...)``
+        self._mids_sorted = True  # False on a DST night: the wall-clock grid repeats epochs (Issue #1734)
         # The first no-window run: (mid-step epochs, its steps, per-step (t, mass, hvac, disc) after each step).
         self._base: tuple[list[float], list[SimStep], list[tuple[float, float, float, float]]] | None = None
         self.steps_simulated = 0  # work counter (tests): grid steps actually computed, prefix reuse excluded
@@ -1428,6 +1429,9 @@ class _Simulator:
             ts = ts_next
         self._grid_cache = grid
         self._grid_ends = [g[0] for g in grid]
+        # The grid steps by wall-clock arithmetic, so on a spring-forward night it walks the nonexistent hour whose
+        # epochs repeat the hour after it: the mid-step epochs are then not sorted and a bisect over them is wrong.
+        self._mids_sorted = all(grid[k][3] <= grid[k + 1][3] for k in range(len(grid) - 1))
         return grid
 
     def run(self, spans: Sequence[Span], until: datetime | None = None) -> Sim | None:
@@ -1454,7 +1458,12 @@ class _Simulator:
             # span (every step, with no span); resume from the base run's state there. A run that stops at ``until``
             # reads only steps before ``i1``, so a first span after it leaves the whole run equal to the base's
             # prefix. Keep this invariant when adding any lookahead to a step.
-            i0 = bisect.bisect_left(base[0], min(a for a, _b in span_pts)) if span_pts else len(grid)
+            if not span_pts:
+                i0 = len(grid)
+            elif self._mids_sorted:
+                i0 = bisect.bisect_left(base[0], min(a for a, _b in span_pts))
+            else:  # the first step the step loop below would open: the same membership test, in grid order
+                i0 = next((k for k, m in enumerate(base[0]) if any(a <= m < b for a, b in span_pts)), len(grid))
             i0 = min(i0, i1)
             if i0 > 0:
                 _mids, base_steps, traj = base
@@ -1812,6 +1821,21 @@ def engine_only_windows(snap: TimelineSnapshot, end: datetime) -> tuple[list[Win
     return results, sorted(accepted)
 
 
+def _judge_window(
+    sim: _Simulator, snap: TimelineSnapshot, ra: datetime, rb: datetime, end: datetime
+) -> tuple[Sim, Sim, float, float, float]:
+    """The window period (ra, rb) against the plan without it, both over one judged horizon (Issue #1734): returns
+    (trial, base, HVAC minutes saved, discomfort F-h saved, largest outdoor-vs-free gap while open)."""
+    judge_end = window_judge_end(snap, rb, end)
+    trial = sim.run([(ra, rb)], until=judge_end)
+    base_j = sim.run([], until=judge_end)
+    assert trial is not None and base_j is not None
+    saved_min = base_j.hvac_minutes - trial.hvac_minutes
+    saved_fh = base_j.discomfort_fh - trial.discomfort_fh
+    delta = max((abs(s.out - s.free) for s in trial.steps if s.window_open), default=0.0)
+    return trial, base_j, saved_min, saved_fh, delta
+
+
 def _until_runner(sim: _Simulator, until: datetime) -> Callable[[Sequence[Span]], Sim | None]:
     """``sim.run`` stopped at ``until``: ``_refine_span`` reads no step past its span's end, so this is exact."""
     return lambda spans: sim.run(spans, until=until)
@@ -1879,13 +1903,7 @@ def evaluate_windows(
                 results.append(WindowCandidate(kind, a, b, False, "direction", None, None, None, "planned_end", grade))
                 continue
             ra, rb, why = refined
-            judge_end = window_judge_end(snap, rb, end)
-            trial = sim.run([(ra, rb)], until=judge_end)
-            base_j = sim.run([], until=judge_end)
-            assert trial is not None and base_j is not None
-            saved_min = base_j.hvac_minutes - trial.hvac_minutes
-            saved_fh = base_j.discomfort_fh - trial.discomfort_fh
-            delta = max((abs(s.out - s.free) for s in trial.steps if s.window_open), default=0.0)
+            trial, base_j, saved_min, saved_fh, delta = _judge_window(sim, snap, ra, rb, end)
             beneficial = (saved_min >= WINDOW_MIN_HVAC_SAVED_MIN or saved_fh >= WINDOW_MIN_DISCOMFORT_SAVED_FH) and (
                 base_j.score() - trial.score() > 0
             )
@@ -1918,13 +1936,7 @@ def evaluate_windows(
             results.append(WindowCandidate(kind, a, b, False, "direction", None, None, None, "planned_end", grade))
             continue
         ra, rb, why = refined
-        judge_end = window_judge_end(snap, rb, end)
-        trial = sim.run([(ra, rb)], until=judge_end)
-        base_j = sim.run([], until=judge_end)
-        assert trial is not None and base_j is not None
-        saved_min = base_j.hvac_minutes - trial.hvac_minutes
-        saved_fh = base_j.discomfort_fh - trial.discomfort_fh
-        delta = max((abs(s.out - s.free) for s in trial.steps if s.window_open), default=0.0)
+        trial, base_j, saved_min, saved_fh, delta = _judge_window(sim, snap, ra, rb, end)
         pending.append((base_j.score() - trial.score(), kind, ra, rb, why, saved_min, saved_fh, delta))
     # accept greedily by net score, re-simulating with already-accepted periods
     accepted: list[Span] = []

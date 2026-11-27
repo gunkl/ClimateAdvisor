@@ -11,15 +11,17 @@ Hass-free (stdlib only), so the tools can share :func:`callable_name`. Measures 
   a reference count), every :data:`LAG_INTERVAL_S`. Lateness is ``loop.time() - scheduled`` (the monotonic clock);
   the last :data:`LAG_SLOTS` samples (about ten minutes) live in a fixed ``array('d')`` ring, so nothing
   grows. A stall shows as ONE large sample (missed ticks are skipped, not replayed).
-* **Overloaded state.** Once a minute the probe's tick asks :meth:`SelfMeasure.evaluate`. A minute counts as "over
-  budget" when at least :data:`LAG_LATE_TICKS` of that minute's own ticks were late by more than
-  :data:`LOOP_BUDGET_MS`, or a loop-thread cost recorded in that minute exceeded :data:`LOOP_BUDGET_MS`, or an
-  executor job's thread CPU recorded in that minute exceeded :data:`EXECUTOR_BUDGET_MS`. The lag verdict reads only
-  the minute's own ticks: the ten-minute p99 on the Debug card would carry one busy minute (Home Assistant starting,
-  a backup) into the next ten verdicts, which alone is the ten over-budget minutes that enter the state. Enter when
-  :data:`ENTER_OVER_MINUTES` of the last :data:`ENTER_WINDOW_MINUTES` minutes were over budget; leave after
-  :data:`CALM_S` without one. One WARNING on entering (the worst offender with its numbers and the machine's figures),
-  one INFO on leaving, one more WARNING if it lasts :data:`PERSIST_S`. Nothing else changes.
+* **Overloaded state.** Once a minute the probe's tick asks :meth:`SelfMeasure.evaluate`. A minute is judged on LOOP
+  LAG ONLY (the real harm): it is "over budget" when at least :data:`LAG_LATE_TICKS` of that minute's own ticks were
+  late by more than :data:`LOOP_BUDGET_MS`. Climate Advisor's own costs (jobs, the timeline build) are still recorded
+  and shown on the Debug card, but never flag a minute by themselves: on a Raspberry Pi routine work (an hourly archive
+  save, a cycle store save) takes seconds of thread CPU and is healthy. The lag verdict reads only the minute's own
+  ticks: the ten-minute p99 on the Debug card would carry one busy minute (Home Assistant starting, a backup) into the
+  next ten verdicts. Enter when :data:`ENTER_OVER_MINUTES` of the last :data:`ENTER_WINDOW_MINUTES` minutes were over
+  budget; leave after :data:`CALM_S` without one. One WARNING on entering, one INFO on leaving, one more WARNING if it
+  lasts :data:`PERSIST_S`. The WARNING names the biggest recent cost of ours as the likely culprit only when it could
+  explain the lag (:data:`OWN_COST_EXPLAINS_MS`); otherwise it says the delay is probably elsewhere in Home Assistant.
+  Nothing else changes.
 
 The clock is injected (``evaluate(now)``), so the state machine is tested with a fake one.
 """
@@ -41,10 +43,12 @@ from typing import Any, Final
 
 _LOGGER = logging.getLogger(__name__)
 
-# Budgets (milliseconds). Loop: the plan's "no loop callback over about 50 ms on a Pi 4". Executor: the registry's
-# short_cpu budget (``tests/test_executor_job_registry_1728.py``), x86 thread CPU.
+# Loop-lag budget (milliseconds): the plan's "no loop callback over about 50 ms on a Pi 4". A late tick is one later
+# than this. Our own costs have no budget here (see the module docstring).
 LOOP_BUDGET_MS: Final = 50.0
-EXECUTOR_BUDGET_MS: Final = 500.0
+# A cost of ours at least this long (loop-thread time or an executor job's thread CPU) could plausibly make the loop
+# late, so the WARNING names it; a smaller one cannot explain the lag.
+OWN_COST_EXPLAINS_MS: Final = 50.0
 
 LAG_INTERVAL_S: Final = 1.0
 LAG_WINDOW_S: Final = 600.0
@@ -65,7 +69,6 @@ OTHER_NAME: Final = "<other>"
 TOP_JOBS: Final = 8  # rows in the debug payload
 
 HASS_DATA_KEY: Final = "climate_advisor_self_measure"
-_LAG_SOURCE: Final = f"loop lag ({LAG_LATE_TICKS} late ticks in a minute)"
 
 
 def callable_name(fn: Any) -> str:
@@ -162,7 +165,7 @@ class SelfMeasure:
         self._due = 0.0
         # overloaded state
         self._last_eval: float | None = None
-        self._flags: deque[tuple[bool, tuple[str, float, float] | None]] = deque(maxlen=ENTER_WINDOW_MINUTES)
+        self._flags: deque[tuple[bool, float, tuple[str, float] | None]] = deque(maxlen=ENTER_WINDOW_MINUTES)
         self.overloaded = False
         self.overloaded_since: float | None = None
         self._last_over_at: float | None = None
@@ -276,22 +279,19 @@ class SelfMeasure:
         # the minute's LAG_LATE_TICKS-th largest lateness: over budget means that many ticks were later than it
         minute_lag_ms = self._minute_top[-1] * 1000.0
         self._minute_top = [0.0] * LAG_LATE_TICKS
-        sources: list[tuple[str, float, float]] = [(_LAG_SOURCE, minute_lag_ms, LOOP_BUDGET_MS)]
+        own: tuple[str, float] | None = None  # the largest cost of ours recorded this minute (never flags it)
         with self._lock:
-            for table, label, budget in (
-                (self.loop_costs, "", LOOP_BUDGET_MS),
-                (self.jobs, "executor job ", EXECUTOR_BUDGET_MS),
-            ):
+            for table, label in ((self.loop_costs, "loop: "), (self.jobs, "executor job ")):
                 for name, st in table.items():
-                    sources.append((label + name, st.interval_max_ms, budget))
+                    if st.interval_max_ms > 0.0 and (own is None or st.interval_max_ms > own[1]):
+                        own = (label + name, st.interval_max_ms)
                     st.interval_max_ms = 0.0
-        over = [s for s in sources if s[1] > s[2]]
-        worst = max(over, key=lambda s: s[1] / s[2]) if over else None
+        over = minute_lag_ms > LOOP_BUDGET_MS
         self._last_eval = now
-        self._flags.append((worst is not None, worst))
-        if worst is not None:
+        self._flags.append((over, minute_lag_ms, own))
+        if over:
             self._last_over_at = now
-        over_minutes = sum(1 for flag, _w in self._flags if flag)
+        over_minutes = sum(1 for flag, _lag, _own in self._flags if flag)
         if not self.overloaded:
             if over_minutes >= ENTER_OVER_MINUTES:
                 self.overloaded = True
@@ -299,8 +299,12 @@ class SelfMeasure:
                 self._persist_logged = False
                 self.episodes += 1
                 self._log.warning(
-                    "Climate Advisor is over its time budget: %s; machine: %s",
-                    self._offender_text(self._worst_recent(), over_minutes),
+                    "Home Assistant's event loop has been running late (%s) for %d of the last %d minutes. "
+                    "%s; machine: %s",
+                    self._lag_text(),
+                    over_minutes,
+                    len(self._flags),
+                    self._culprit_text(),
                     self._machine_text(),
                 )
             return
@@ -309,7 +313,7 @@ class SelfMeasure:
         if now - calm_since >= CALM_S:
             self.overloaded = False
             self._log.info(
-                "Climate Advisor is back within its time budget: calm for %d min after %d min over budget",
+                "Home Assistant's event loop is back to normal: calm for %d min after %d min running late",
                 int((now - calm_since) // 60),
                 int((calm_since - since) // 60),
             )
@@ -318,25 +322,32 @@ class SelfMeasure:
         elif now - since >= PERSIST_S and not self._persist_logged:
             self._persist_logged = True
             self._log.warning(
-                "Climate Advisor is still over its time budget after %d h: %s; machine: %s",
+                "Home Assistant's event loop is still running late after %d h (%s) for %d of the last %d minutes. "
+                "%s; machine: %s",
                 int((now - since) // 3600),
-                self._offender_text(self._worst_recent(), over_minutes),
+                self._lag_text(),
+                over_minutes,
+                len(self._flags),
+                self._culprit_text(),
                 self._machine_text(),
             )
 
-    def _worst_recent(self) -> tuple[str, float, float] | None:
-        worsts = [w for _flag, w in self._flags if w is not None]
-        return max(worsts, key=lambda s: s[1] / s[2]) if worsts else None
+    def _lag_text(self) -> str:
+        return f"p99 {self.lag.percentile(99) * 1000:.0f} ms, max {self.lag.max() * 1000:.0f} ms over the last 10 min"
 
-    def _offender_text(self, worst: tuple[str, float, float] | None, over_minutes: int) -> str:
-        if worst is None:
-            return "no single source stands out"
-        name, value, budget = worst
+    def _culprit_text(self) -> str:
+        """Our biggest cost in the over-budget minutes, named as the likely cause only if it could explain the lag."""
+        costs = [own for flag, _lag, own in self._flags if flag and own is not None]
+        worst = max(costs, key=lambda c: c[1]) if costs else None
+        if worst is not None and worst[1] >= OWN_COST_EXPLAINS_MS:
+            return (
+                f"Climate Advisor's biggest recent cost: {worst[0]} {worst[1]:.0f} ms CPU. "
+                "Climate Advisor only measures and reports this; nothing was changed"
+            )
+        largest = f"{worst[1]:.0f}" if worst is not None else "0"
         return (
-            f"worst={name} {value:.0f} ms against {budget:.0f} ms; over budget in {over_minutes} of the last "
-            f"{min(len(self._flags), ENTER_WINDOW_MINUTES)} minutes; "
-            f"loop lag p99={self.lag.percentile(99) * 1000:.0f} ms max={self.lag.max() * 1000:.0f} ms. "
-            "Climate Advisor only measures and reports this; nothing was changed"
+            f"Climate Advisor's own work was small (largest {largest} ms), so the delay is probably elsewhere in "
+            "Home Assistant (another integration, the recorder, a backup). Nothing was changed"
         )
 
     def _machine_text(self) -> str:
@@ -360,9 +371,9 @@ class SelfMeasure:
                 "p99_ms": round(self.lag.percentile(99.0) * 1000.0, 2),
             },
             "overloaded": self.overloaded,
-            "over_minutes": sum(1 for flag, _w in self._flags if flag),
+            "over_minutes": sum(1 for flag, _lag, _own in self._flags if flag),
             "episodes": self.episodes,
-            "budgets_ms": {"loop": LOOP_BUDGET_MS, "executor_job": EXECUTOR_BUDGET_MS},
+            "budgets_ms": {"loop_lag": LOOP_BUDGET_MS},
         }
 
 

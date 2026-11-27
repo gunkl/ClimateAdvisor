@@ -53,10 +53,10 @@ _SECRET_NAMES: Final = frozenset({"SUPERVISOR_TOKEN", "HASSIO_TOKEN"})
 _SECRET_SUFFIXES: Final = ("_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PASSWD", "_PASS")
 
 #: Issue #1730: at most this many worker processes run at once across every zone of one event loop: cores - 1 (min 1),
-#: so the loop and the rest of Home Assistant keep a core. ``None`` = compute from ``os.cpu_count()`` (tests set it).
+#: so the loop and the rest of Home Assistant keep a core. ``None`` = compute from ``os.process_cpu_count()`` (Python
+#: 3.13+: the cores this process may use) or else ``os.cpu_count()`` (tests set it).
 worker_limit_override: int | None = None
 _SLOTS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
-_SLOTS_FALLBACK: dict[int, asyncio.Semaphore] = {}
 
 # Test-only registry. Production never populates these (see _register_job_for_tests).
 _TEST_JOBS: dict[str, tuple[str, str]] = {}
@@ -80,21 +80,17 @@ def worker_limit() -> int:
     """Concurrent worker processes allowed: cores - 1, at least 1 (:data:`worker_limit_override` wins)."""
     if worker_limit_override is not None:
         return max(1, worker_limit_override)
-    return max(1, (os.cpu_count() or 1) - 1)
+    count = getattr(os, "process_cpu_count", os.cpu_count)()
+    return max(1, (count or 1) - 1)
 
 
 def _slot_semaphore() -> asyncio.Semaphore:
     """The running loop's shared slot semaphore (made on first use; one per loop, so an HA restart or a test loop never
     inherits another's slots). A waiter that is cancelled leaves the queue and takes no slot."""
     loop = asyncio.get_running_loop()
-    try:
-        sem = _SLOTS.get(loop)
-        if sem is None:
-            sem = _SLOTS[loop] = asyncio.Semaphore(worker_limit())
-    except TypeError:  # a loop type that cannot be weakly referenced: one process, one loop, so a plain dict is fine
-        sem = _SLOTS_FALLBACK.get(id(loop))
-        if sem is None:
-            sem = _SLOTS_FALLBACK[id(loop)] = asyncio.Semaphore(worker_limit())
+    sem = _SLOTS.get(loop)
+    if sem is None:
+        sem = _SLOTS[loop] = asyncio.Semaphore(worker_limit())
     return sem
 
 
@@ -254,9 +250,10 @@ async def async_run_job(
     if (mode or default_mode) == "thread":
         return await executor_job(_thread_run, job, payload)
 
-    # Issue #1730: a global cap on concurrent worker processes. A job over the cap waits here (before its payload is
-    # encoded, so a queued job holds no megabytes of bytes). ``async with`` frees the slot on every exit: a result, an
-    # error, a timeout, and a cancellation (unload cancels a waiting job too, which never takes a slot).
+    # Issue #1730: a global cap on concurrent worker processes. A job over the cap waits here. Its payload dict is
+    # already built by the caller (so it still holds that memory); only the encoded bytes are made after the slot is
+    # taken. ``async with`` frees the slot on every exit: a result, an error, a timeout, and a cancellation (unload
+    # cancels a waiting job too, which never takes a slot).
     sem = _slot_semaphore()
     if sem.locked():
         logger.debug("Worker job waiting for a free worker slot: job=%s limit=%d", job, worker_limit())

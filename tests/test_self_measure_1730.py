@@ -174,8 +174,10 @@ T0 = 5000.0
 
 
 def _minute(m: SelfMeasure, i: int, *, over: bool, name: str = "timeline build", cpu_s: float = 0.080) -> None:
-    """One evaluation minute ``i``: a loop cost over (80 ms) or under (5 ms) the 50 ms budget."""
-    m.record_loop_cost(name, cpu_s if over else 0.005)
+    """One evaluation minute ``i``: 60 probe samples, 80 ms late (over the 50 ms budget) or 1 ms; a loop cost too."""
+    m.record_loop_cost(name, cpu_s)
+    for _ in range(60):
+        m.add_lag(0.080 if over else 0.001)
     m.evaluate(T0 + 60.0 * i)
 
 
@@ -189,7 +191,9 @@ def test_overloaded_enters_after_ten_over_budget_minutes_with_exactly_one_warnin
     assert m.overloaded
     (rec,) = _records(caplog, logging.WARNING)
     text = rec.getMessage()
-    assert "timeline build" in text and "80 ms against 50 ms" in text  # the worst offender with its numbers
+    assert "event loop has been running late" in text and "p99 80 ms, max 80 ms over the last 10 min" in text
+    assert "for 10 of the last 10 minutes" in text
+    assert "timeline build 80 ms CPU" in text  # our own 80 ms cost could explain the lag, so it is named
     assert "cpus=4" in text and "arch=" in text and "python=" in text  # the machine's figures
     assert "nothing was changed" in text
     for i in range(10, 60):
@@ -198,15 +202,57 @@ def test_overloaded_enters_after_ten_over_budget_minutes_with_exactly_one_warnin
     assert _records(caplog, logging.INFO) == []
 
 
-def test_the_worst_offender_is_the_biggest_ratio_to_its_own_budget(caplog) -> None:
+def test_the_warning_names_the_biggest_own_cost_when_it_could_explain_the_lag(caplog) -> None:
     caplog.set_level(logging.DEBUG, logger=LOGGER)
     m = SelfMeasure()
     for i in range(10):
-        m.record_loop_cost("timeline build", 0.060)  # 1.2 x its 50 ms budget
-        m.record_job("coordinator.Coordinator._cycle_judge._job", 1.5)  # 3 x its 500 ms budget
+        m.record_loop_cost("timeline build", 0.060)
+        m.record_job("coordinator.Coordinator._cycle_judge._job", 1.5)  # the biggest, thread CPU 1500 ms
+        for _ in range(60):
+            m.add_lag(0.200)
         m.evaluate(T0 + 60.0 * i)
     (rec,) = _records(caplog, logging.WARNING)
-    assert "executor job coordinator.Coordinator._cycle_judge._job 1500 ms against 500 ms" in rec.getMessage()
+    text = rec.getMessage()
+    assert "biggest recent cost: executor job coordinator.Coordinator._cycle_judge._job 1500 ms CPU" in text
+    assert "elsewhere" not in text
+
+
+def test_the_warning_says_the_delay_is_probably_elsewhere_when_our_work_was_small(caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    m = SelfMeasure()
+    for i in range(10):
+        m.record_loop_cost("timeline build", 0.004)
+        m.record_job("v4_archive.V4Archive.save", 0.020)  # 20 ms: too small to make the loop late
+        for _ in range(60):
+            m.add_lag(0.200)
+        m.evaluate(T0 + 60.0 * i)
+    (rec,) = _records(caplog, logging.WARNING)
+    text = rec.getMessage()
+    assert "own work was small (largest 20 ms)" in text and "probably elsewhere" in text
+    assert "biggest recent cost" not in text and "v4_archive" not in text  # never blames Climate Advisor
+
+
+def test_the_warning_with_no_recorded_work_at_all_says_elsewhere(caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    m = SelfMeasure()
+    for i in range(10):
+        _lag_minute(m, i, [0.200] * 60)
+    (rec,) = _records(caplog, logging.WARNING)
+    assert "largest 0 ms" in rec.getMessage() and "probably elsewhere" in rec.getMessage()
+
+
+def test_a_big_own_cost_without_lag_never_makes_a_minute_over_budget(caplog) -> None:
+    """A Pi's hourly archive save (seconds of thread CPU) and a 200 ms loop-thread build, on a loop that keeps up."""
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    m = SelfMeasure()
+    for i in range(3 * 60):
+        m.record_job("v4_archive.V4Archive.save", 1.75)
+        m.record_loop_cost("timeline build", 0.225)
+        for _ in range(60):
+            m.add_lag(0.002)
+        m.evaluate(T0 + 60.0 * i)
+    assert not m.overloaded and m.snapshot()["over_minutes"] == 0 and _records(caplog) == []
+    assert m.jobs["v4_archive.V4Archive.save"].max_ms == pytest.approx(1750.0)  # still recorded for the card
 
 
 def test_it_leaves_after_an_hour_without_an_over_budget_minute_with_one_info(caplog) -> None:
@@ -222,7 +268,7 @@ def test_it_leaves_after_an_hour_without_an_over_budget_minute_with_one_info(cap
     _minute(m, 69, over=False)  # exactly an hour after minute 9
     assert not m.overloaded
     (info,) = _records(caplog, logging.INFO)
-    assert "back within its time budget" in info.getMessage()
+    assert "back to normal" in info.getMessage()
     for i in range(70, 200):
         _minute(m, i, over=False)
     assert len(_records(caplog, logging.INFO)) == 1 and len(_records(caplog, logging.WARNING)) == 1
@@ -249,7 +295,7 @@ def test_a_persisting_overload_warns_once_more_at_24_hours(caplog) -> None:
         _minute(m, i, over=True)
     warns = _records(caplog, logging.WARNING)
     assert len(warns) == 2  # entering + the 24 h reminder; nothing in between or after
-    assert "still over its time budget after 24 h" in warns[1].getMessage()
+    assert "still running late after 24 h" in warns[1].getMessage()
     assert _records(caplog, logging.INFO) == []
 
 
@@ -268,25 +314,12 @@ def test_it_can_enter_again_after_leaving_and_logs_that_episode_too(caplog) -> N
 
 
 def test_sporadic_slow_minutes_are_not_an_overload(caplog) -> None:
-    """One slow build every half hour is a busy minute, not sustained: 2 over-budget minutes an hour never reach 10."""
+    """One late minute every half hour is a busy minute, not sustained: 2 over-budget minutes an hour never reach 10."""
     caplog.set_level(logging.DEBUG, logger=LOGGER)
     m = SelfMeasure()
     for i in range(12 * 60):
         _minute(m, i, over=(i % 30 == 0))
     assert not m.overloaded and _records(caplog) == []
-
-
-def test_a_slow_executor_job_counts_against_the_executor_budget_not_the_loop_one(caplog) -> None:
-    caplog.set_level(logging.DEBUG, logger=LOGGER)
-    m = SelfMeasure()
-    for i in range(30):
-        m.record_job("v4_archive.V4Archive.save", 0.300)  # 300 ms: over the loop's 50 ms, under the executor's 500 ms
-        m.evaluate(T0 + 60.0 * i)
-    assert not m.overloaded
-    for i in range(30, 40):
-        m.record_job("v4_archive.V4Archive.save", 0.700)
-        m.evaluate(T0 + 60.0 * i)
-    assert m.overloaded
 
 
 def _lag_minute(m: SelfMeasure, i: int, late_s: list[float]) -> None:
@@ -303,7 +336,7 @@ def test_a_lagging_loop_for_ten_minutes_enters(caplog) -> None:
         _lag_minute(m, i, [0.080] * 60)  # a loop that is 80 ms late all the time
     assert m.overloaded
     (rec,) = _records(caplog, logging.WARNING)
-    assert "loop lag (3 late ticks in a minute) 80 ms against 50 ms" in rec.getMessage()
+    assert "p99 80 ms, max 80 ms" in rec.getMessage()
 
 
 def test_a_single_loop_hiccup_never_flags_a_minute() -> None:
@@ -432,7 +465,7 @@ def test_snapshot_shape_and_top_jobs_are_ordered_by_max_cpu() -> None:
     assert [j["name"] for j in snap["executor_jobs"]] == [f"job{i}" for i in range(11, 3, -1)]  # top 8, biggest first
     assert set(snap["executor_jobs"][0]) == {"name", "count", "last_ms", "max_ms", "ewma_ms"}
     assert set(snap["loop_lag"]) == {"running", "samples", "window_s", "max_ms", "p99_ms"}
-    assert snap["budgets_ms"] == {"loop": 50.0, "executor_job": 500.0}
+    assert snap["budgets_ms"] == {"loop_lag": 50.0}
     assert snap["overloaded"] is False and snap["loop_lag"]["running"] is False
 
 

@@ -74,10 +74,22 @@ async def _settle() -> None:
 def test_worker_limit_is_cores_minus_one_and_at_least_one(monkeypatch) -> None:
     monkeypatch.setattr(po, "worker_limit_override", None)
     for cores, expect in ((8, 7), (4, 3), (2, 1), (1, 1), (None, 1)):
-        monkeypatch.setattr(po.os, "cpu_count", lambda c=cores: c)
+        monkeypatch.setattr(po.os, "cpu_count", lambda c=cores: c, raising=False)
+        monkeypatch.setattr(po.os, "process_cpu_count", lambda c=cores: c, raising=False)
         assert po.worker_limit() == expect
     monkeypatch.setattr(po, "worker_limit_override", 0)
     assert po.worker_limit() == 1  # never zero: a job would wait forever
+
+
+def test_worker_limit_uses_the_cores_this_process_may_use_when_python_knows_them(monkeypatch) -> None:
+    """Python 3.13+: ``os.process_cpu_count()`` (affinity, cgroup-style limits) wins over the machine's ``cpu_count``;
+    older Pythons fall back to ``os.cpu_count()``."""
+    monkeypatch.setattr(po, "worker_limit_override", None)
+    monkeypatch.setattr(po.os, "cpu_count", lambda: 16, raising=False)
+    monkeypatch.setattr(po.os, "process_cpu_count", lambda: 3, raising=False)
+    assert po.worker_limit() == 2
+    monkeypatch.delattr(po.os, "process_cpu_count")  # an older Python has no such function
+    assert po.worker_limit() == 15
 
 
 def test_the_job_over_the_cap_waits_until_a_slot_frees(procs) -> None:
@@ -229,26 +241,3 @@ def test_two_coordinators_share_the_cap(procs, monkeypatch) -> None:
         assert await ta == 1 and await tb == 1
 
     asyncio.run(go())  # a loop of its own: the shared harness loop would keep this test's limit
-
-
-def test_a_loop_that_cannot_be_weakly_referenced_still_shares_one_cap(procs, monkeypatch) -> None:
-    """The fallback table: a loop type without weak references (not asyncio's own) still gets one semaphore."""
-    monkeypatch.setattr(po, "worker_limit_override", 1)
-
-    class _NoWeakRefs:
-        def get(self, _loop):
-            raise TypeError("cannot create weak reference")
-
-    monkeypatch.setattr(po, "_SLOTS", _NoWeakRefs())
-    monkeypatch.setattr(po, "_SLOTS_FALLBACK", {})
-
-    async def go() -> None:
-        first, second = _run(), _run()
-        await _settle()
-        assert len(procs) == 1 and len(po._SLOTS_FALLBACK) == 1  # one slot, shared: the second job waits
-        procs[0].gate.set()
-        await _settle()
-        procs[1].gate.set()
-        assert await first + await second == 2
-
-    asyncio.run(go())

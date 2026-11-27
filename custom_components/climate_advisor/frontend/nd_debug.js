@@ -58,9 +58,9 @@
     'v3 model': 'v3\u2019s own model version and checks; it drives decisions only when v3 is the primary engine',
     comfort_family_armed: 'Which comfort edge the thermostat is guarding, and the last heat/cool switch',
     comfort_family_hold: 'The thermostat is deliberately not flipping heat/cool yet: the house is only slightly past an edge shortly after the other side ran',
-    'Timeline build': 'CPU time of the plan build on the event loop. Budget 50 ms (a Raspberry Pi runs about 4-6 times slower than a PC)',
+    'Timeline build': 'CPU time of the plan build on the event loop. Shown for information only (a Raspberry Pi runs about 4-6 times slower than a PC)',
     'Loop lag': 'How late a once-a-second timer fires on the Home Assistant event loop, over the last ten minutes. 50 ms is the budget',
-    'Over budget': 'Yes after the loop lag or one of Climate Advisor\u2019s own jobs stayed over budget for 10 of the last 60 minutes; clears after an hour within budget. It is measured and logged only: nothing changes',
+    'Over budget': 'Yes after Home Assistant\u2019s event loop ran late (3 or more ticks over 50 ms in a minute) for 10 of the last 60 minutes; clears after an hour without. Climate Advisor\u2019s own job times above are shown for information and never count by themselves. It is measured and logged only: nothing changes',
     'classification.day_type': 'Drives HVAC strategy', 'classification.windows_recommended': 'Open windows instead of HVAC',
     'classification.pre_condition': 'Pre-heat/cool before peak', 'classification.setback_modifier': 'Trend-based setpoint adjust',
     'classification.today_high': 'The higher of the forecast high and the warmest reading so far today',
@@ -289,7 +289,7 @@
     (p.executor_jobs || []).forEach(function (j) {
       rows.push(['job ' + j.name, 'max ' + ms(j.max_ms) + ' · last ' + ms(j.last_ms) + ' · average ' + ms(j.ewma_ms) + ' · ' + count(j.count, 'run', 'runs')]);
     });
-    rows.push(['Over budget', p.overloaded ? 'yes, over budget in ' + (p.over_minutes || 0) + ' of the last 60 minutes' + (p.episodes > 1 ? ' (' + p.episodes + ' times since start)' : '') : 'no']);
+    rows.push(['Over budget', p.overloaded ? 'yes, loop late in ' + (p.over_minutes || 0) + ' of the last 60 minutes' + (p.episodes > 1 ? ' (' + p.episodes + ' times since start)' : '') : 'no']);
     return rows;
   }
 

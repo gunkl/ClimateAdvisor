@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.88] — 2026-11-27
+
+### Changed
+- #1727, #1730: Climate Advisor's routine work holds up Home Assistant for much shorter stretches, which matters most on slower machines like a Raspberry Pi. Saving and loading its larger history files no longer blocks Home Assistant for one long stretch (the longest single hold fell from up to about 190 ms to under 1 ms on a desktop machine), and the files stay readable by earlier versions. The Status page's prediction chart is much quicker to build: the 24 h view went from about a second to about 40 ms. The plan for the coming days, the prediction accuracy page and the nightly learning's preparation are also faster. Nothing you see changes: the plans, charts and learned values are the same as before.
+
 ## [0.9.87] — 2026-11-27
 
 ### Changed

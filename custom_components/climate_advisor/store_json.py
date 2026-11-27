@@ -139,7 +139,10 @@ def loads(data: bytes | str) -> Any:
     """Parse ``dumps`` output or any other JSON document (see module doc). Raises ``ValueError`` like ``json.loads``."""
     if isinstance(data, str):
         data = data.encode()
-    if data.count(b"\n") > 1:  # one element per line; a one-line file has nothing to split
+    # one element per line (at least two newlines); a one-line file has nothing to split. ``find`` (memchr) stops at
+    # the second newline, where ``count`` scans the whole file in one call (5-10 ms for 4.5 MB on x86)
+    first = data.find(b"\n")
+    if first != -1 and data.find(b"\n", first + 1) != -1:
         try:
             return _loads_lines(data)
         except Exception:  # any other layout (or NaN/Infinity): read whole, below

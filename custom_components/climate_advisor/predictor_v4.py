@@ -39,6 +39,11 @@ _DT_H = V4_STEP_MINUTES / 60.0
 _STEP_S = V4_STEP_MINUTES * 60
 _GAP_BREAK_S = 2 * 3600  # chart_log gaps longer than this break rollout continuity
 _FORECAST_BIAS_LEAD_H = 6.0  # archive lead used to learn the forecast hour-of-day bias
+# Issue #1726: a warm-started fit whose converged LM cut its own starting cost by less than this share skips the cold
+# restart. Evidence (2 real fixture chains, 23 nightly synthetic regime-change chains): saves 25-34 % (real) / about
+# 45 % (nightly, 34-52 % per chain) of fit CPU; pooled MAE change at the 1/4/12 h leads within +0.004 F (per chain
+# within +/-0.02 F); worst training-cost gap 1.3 % nightly / 0.4 % week-apart.
+WARM_RESTART_MIN_GAIN = 0.02
 _COOL_HEAT_RATIO = 6.13 / 5.55  # production's learned cool/heat gain ratio; prior for the unseen mode
 _COOL_SEASON_OUTDOOR_F = 68.0  # idle with no recent action and no hint: mode guess from outdoor temperature
 _OPENNESS_DAYS = 28  # expected-openness prior: look-back of the hour-of-day window / whole-house-fan share
@@ -1950,6 +1955,7 @@ def _fit_problem(
         cost = 0.5 * sum(x * x for x in r)
         if not math.isfinite(cost):
             return None
+        cost0 = cost  # the start's own cost, kept for the warm-restart gain test (#1726)
         lam = 1e-2
         n_free = len(free)
         iterations = 0
@@ -2011,7 +2017,7 @@ def _fit_problem(
             if not accepted or stale >= 2:
                 converged = True
                 break
-        return z, hp, nodes, r, passes, cost, iterations, converged
+        return z, hp, nodes, r, passes, cost, iterations, converged, cost0
 
     def set_start(house: Mapping[str, float], node_params: Sequence[Mapping[str, float]]) -> None:
         hp0.update(house)
@@ -2027,10 +2033,14 @@ def _fit_problem(
         info["reason"] = "non-finite initial cost"
         return base
     restarts = 0
-    # A fit that ran out of iterations, or one that started from the previous night's model, gets a second chance from
-    # a different start; the lower-cost optimum is kept (R1b: 7 of 10 backtest fits hit the 60-iteration cap and two
-    # landed in poor minima). The extra start is the cold defaults (warm-started) or a "light house" variant.
-    if not best[7] or warm_started:
+    # A fit that ran out of iterations gets a second chance from a different start; the lower-cost optimum is kept
+    # (R1b: 7 of 10 backtest fits hit the 60-iteration cap and two landed in poor minima). The extra start is the cold
+    # defaults (warm-started) or a "light house" variant (cold). A warm-started fit that converged and improved its
+    # own starting cost by less than WARM_RESTART_MIN_GAIN was already at an optimum, so the cold restart is skipped
+    # (#1726: R1b's evidence was cold fits; on warm chains the restart won no lasting gain). A warm start that moved a
+    # long way (a regime change, a bad stored model) or did not converge still gets the restart.
+    warm_moved = warm_started and (best[8] - best[5]) >= WARM_RESTART_MIN_GAIN * max(best[8], 1e-12)
+    if not best[7] or warm_moved:
         alt_house = dict(HOUSE_START)
         if not warm_started:
             alt_house.update(a_o=0.08, c_hm=0.25, c_mh=0.1, q_h=12.0, q_c=12.0 * _COOL_HEAT_RATIO)
@@ -2041,7 +2051,7 @@ def _fit_problem(
             best = cand
             info["restart_won"] = True
     set_start(*start_a)  # leave the start dictionaries as the caller passed them
-    z, hp, nodes, r, passes, cost, iterations, converged = best
+    z, hp, nodes, r, passes, cost, iterations, converged, _cost0 = best
     info["iterations"] = iterations
     info["converged"] = converged
     info["restarts"] = restarts

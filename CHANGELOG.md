@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.87] — 2026-11-27
+
+### Changed
+- #1726: the prediction model's nightly learning now uses about a quarter to a third less processor time. Each night it starts from the previous night's model, and until now it also always tried a second search from scratch, which almost never found anything better. That second search now runs only when it can matter: when the night's learning did not settle, or when it moved the model a noticeable amount (for example after a change in the house or the season). Forecasts stay as accurate as before.
+
 ## [0.9.86] — 2026-11-26
 
 ### Internal

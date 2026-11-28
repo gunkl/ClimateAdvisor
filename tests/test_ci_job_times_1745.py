@@ -235,15 +235,29 @@ def test_the_gate_jobs_keep_their_pass_fail_semantics_and_get_the_least_permissi
         verdict = job["steps"][-1]
         assert job["steps"].index(report) < job["steps"].index(verdict)
         assert report["if"] == "always()"
+        # neither the checkout nor the report can stop the verdict step from running (a broken checkout or report
+        # must not turn a required check red on its own)
+        checkout = next(s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout"))
+        assert checkout.get("continue-on-error") is True and report.get("continue-on-error") is True
+        assert "if" not in verdict and "continue-on-error" not in verdict
         for dep in needed:
             assert f"test '${{{{ needs.{dep}.result }}}}' = success" in verdict["run"]
     warn = _VALIDATE["jobs"]["ci-timing"]
     assert warn["if"] == "always()" and warn["permissions"] == {"contents": "read", "actions": "read"}
     assert set(warn["needs"]) == {"lint", "unit", "isolated", "coverage", "typing", "ha-slice"}
+    # the warning jobs never fail a run: not through the script (it always exits 0) and not through the job itself
+    for wf in (_VALIDATE, _NIGHTLY):
+        assert wf["jobs"]["ci-timing"].get("continue-on-error") is True
+    # ... and no other job waits on them, so adding them changed no gate, report or close condition
+    for wf in (_VALIDATE, _NIGHTLY):
+        for job_id, job in wf["jobs"].items():
+            needs = job.get("needs", [])
+            assert "ci-timing" not in ([needs] if isinstance(needs, str) else needs), job_id
     assert set(_NIGHTLY["jobs"]["ci-timing"]["needs"]) == {
         "seeds",
         "generated-days",
         "waiver-ledger",
         "surfaces",
         "ha-lifecycle",
+        "report-failure",  # after it, so this job is never in the failed-jobs list report-failure reads from the API
     }

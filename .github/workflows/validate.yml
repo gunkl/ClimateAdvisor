@@ -187,13 +187,16 @@ jobs:
       actions: read
 
     steps:
+      # The checkout and the report only add information: if either breaks, the verdict step still runs and decides.
       - name: Checkout code
         uses: actions/checkout@v7
+        continue-on-error: true
 
       # A job that hit its timeout-minutes is reported as "cancelled"; this names it and says how long it ran.
       - name: Name any job that timed out
         if: always()
         run: bash scripts/ci_job_times.sh timeouts
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -271,13 +274,16 @@ jobs:
       actions: read
 
     steps:
+      # The checkout and the report only add information: if either breaks, the verdict step still runs and decides.
       - name: Checkout code
         uses: actions/checkout@v7
+        continue-on-error: true
 
       # A slice that hit its 8-minute cap is reported as "cancelled"; this names it and says how long it ran.
       - name: Name any slice that timed out
         if: always()
         run: bash scripts/ci_job_times.sh timeouts
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -303,6 +309,7 @@ jobs:
     needs: [lint, unit, isolated, coverage, typing, ha-slice]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    continue-on-error: true  # a warning job: even a broken checkout or a timeout must not turn the run red
     permissions:
       contents: read
       actions: read

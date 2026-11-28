@@ -348,12 +348,15 @@ jobs:
 
   # Issue #1745: warn (never fail) when a job in this run used more than 75% of its timeout-minutes, so a job that is
   # creeping toward its cap is seen while it still passes. The limits are the jobs' timeout-minutes;
-  # tests/test_ci_job_times_1745.py keeps them equal.
+  # tests/test_ci_job_times_1745.py keeps them equal. It waits for report-failure too: report-failure files every
+  # failed or cancelled job of the run from the jobs API, and this job must never be one of them (it would change the
+  # issue title and signature).
   ci-timing:
-    needs: [seeds, generated-days, waiver-ledger, surfaces, ha-lifecycle]
+    needs: [seeds, generated-days, waiver-ledger, surfaces, ha-lifecycle, report-failure]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    continue-on-error: true  # a warning job: a failure here must not fail the run (and wake nightly-autofix)
     permissions:
       contents: read
       actions: read

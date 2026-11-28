@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.93] — 2026-11-28
+
+### Internal
+- #1743 (the tests only, nothing changes in your house): the real Home Assistant test tier had become two to nine times slower since 0.9.89, enough that the nightly run of it passed its one-hour limit and the per-change runs came close to theirs. Its scenario driver moved the simulated clock in one-second steps because it treated the responsiveness monitor added in 0.9.89 (a timer that fires every second and only measures) as something it had to stop for. It now skips that timer, so scenarios run at their old speed; the monitor still runs and Climate Advisor's own timers still fire on time.
+
 ## [0.9.92] — 2026-11-28
 
 ### Fixed

@@ -6,7 +6,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ## [0.9.92] — 2026-11-28
 
 ### Fixed
-- Fix #1739: a vacation, guest or home/away switch that is shared with HomeKit or another system no longer ends your vacation or sends "Welcome home!" when it drops out or flickers for a moment. A switch that shows "unavailable" or "unknown" now keeps its last on or off value (and after a restart keeps the vacation you were on). A real change now takes effect after about a minute: if the switch flips back inside that minute, nothing happens. Coming home or leaving is acted on a minute later than before, and the 15-minute away timer starts after that minute.
+- Fix #1739: a vacation, guest or home/away switch that is shared with HomeKit or another system no longer ends your vacation or sends "Welcome home!" when it drops out or flickers for a moment. A switch that shows "unavailable" or "unknown" now keeps its last on or off value (and after a restart on the same day keeps the vacation you were on). A real change now takes effect after about a minute: if the switch flips back inside that minute, nothing happens. Coming home or leaving is acted on a minute later than before, and the 15-minute away timer starts after that minute.
 
 ## [0.9.91] — 2026-11-28
 

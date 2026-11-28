@@ -92,6 +92,8 @@ All setpoints accept 40–95°F (4–35°C), in steps of 1°F (0.5°C). If a com
 
 All toggles are optional. Leave one blank if you do not use that feature.
 
+A change to a toggle takes effect after it has held for about a minute, so a switch shared with HomeKit or another system that flickers or drops out for a moment does not end a vacation or send "Welcome home". A toggle that shows `unavailable` or `unknown` keeps its last on or off value.
+
 | Setting | What it does | Default | Values |
 |---|---|---|---|
 | **Home/Away Toggle** `home_toggle_entity` | Tells Climate Advisor whether anyone is home. On means home: comfort temperatures. Off means away: away temperatures. | Blank (always treated as home) | An `input_boolean`, `binary_sensor` or `switch` |

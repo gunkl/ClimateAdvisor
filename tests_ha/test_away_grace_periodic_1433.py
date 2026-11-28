@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from custom_components.climate_advisor.const import OCCUPANCY_TOGGLE_CONFIRM_SECONDS
 from tests_ha.realha_session import RealHASession, async_drive_scenario
 from tests_ha.test_away_band_chart_1425 import _BASE, _drawn, _rows, _set_home
 from tools.sim_harness.outcomes import check_assertion
@@ -132,14 +133,14 @@ async def test_a_vacation_return_keeps_the_home_band(make_house, fan) -> None:
         make_house, fan, ca_config={"vacation_toggle_entity": _VACATION}, extra_states={_VACATION: "off"}
     )
     house.hass.states.async_set(_VACATION, "on")
-    await house.advance(seconds=5)
+    await house.advance(seconds=OCCUPANCY_TOGGLE_CONFIRM_SECONDS + 5)  # Issue #1739: the change is confirmed after 60 s
     vac_heat = house.thermostat.setpoint_f
     assert vac_heat < comfort - 1, "Vacation's deep setback is applied at once"
     await house.advance(minutes=37)  # a cycle on vacation; then come home between cycles
     assert house.thermostat.setpoint_f == pytest.approx(vac_heat, abs=0.6), "a cycle on vacation keeps the setback"
     back_at = _now(house)
     house.hass.states.async_set(_VACATION, "off")
-    await house.advance(seconds=5)
+    await house.advance(seconds=OCCUPANCY_TOGGLE_CONFIRM_SECONDS + 5)  # Issue #1739: the change is confirmed after 60 s
     await house.advance(minutes=65)
     writes = _heat_writes(house, back_at)
     assert writes and {v for _t, v in writes} <= {comfort}, f"#1433: a setback after the vacation return: {writes}"
@@ -153,7 +154,7 @@ async def test_guest_while_the_away_timer_runs_and_guest_to_home(make_house, fan
     left_at = _now(house)
     await _set_home(house, False)
     house.hass.states.async_set(_GUEST, "on")  # a guest arrives inside the away timer
-    await house.advance(seconds=5)
+    await house.advance(seconds=OCCUPANCY_TOGGLE_CONFIRM_SECONDS + 5)  # Issue #1739: the change is confirmed after 60 s
     await house.advance(minutes=40)  # the timer would have fired; periodic cycles as a guest
     assert not [v for _t, v in _heat_writes(house, left_at) if v == pytest.approx(setback)], _heat_writes(
         house, left_at

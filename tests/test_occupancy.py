@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
@@ -889,6 +890,20 @@ def _make_occupancy_event(entity_id: str = "input_boolean.home_mode") -> MagicMo
     return event
 
 
+def _toggle_and_confirm(coord: Any, event: Any) -> None:
+    """Deliver a toggle event and let its 60 s confirmation (Issue #1739) expire at once.
+
+    These tests exercise what a CONFIRMED occupancy change does (away timer, handlers, vacation, home); the
+    confirmation delay itself has its own tests (``TestOccupancyToggleConfirmation``). The delay's timer is armed
+    through its own patched ``async_call_later`` so the test's own capture of the 15-minute away timer is untouched.
+    """
+    with patch("custom_components.climate_advisor.coordinator.async_call_later", return_value=MagicMock()) as armed:
+        asyncio.run(coord._async_occupancy_toggle_changed(event))
+    if armed.called:  # the mode would change: the window passed with the toggles unchanged
+        coord._occupancy_toggle_confirm_cancel = None
+        asyncio.run(coord._apply_confirmed_occupancy_change(event.data["entity_id"]))
+
+
 class TestOccupancyAwayDelay:
     """Tests for the 15-minute occupancy away setback delay."""
 
@@ -918,7 +933,7 @@ class TestOccupancyAwayDelay:
             "custom_components.climate_advisor.coordinator.async_call_later",
             side_effect=fake_async_call_later,
         ):
-            asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event()))
+            _toggle_and_confirm(coord, _make_occupancy_event())
 
         # Timer must have been scheduled with the correct delay
         assert len(captured_delay) == 1
@@ -952,7 +967,7 @@ class TestOccupancyAwayDelay:
             "custom_components.climate_advisor.coordinator.async_call_later",
             side_effect=fake_async_call_later,
         ):
-            asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event()))
+            _toggle_and_confirm(coord, _make_occupancy_event())
 
         # Verify the cancel handle was stored
         assert coord._occupancy_away_timer_cancel is cancel_mock
@@ -960,7 +975,7 @@ class TestOccupancyAwayDelay:
         # Step 2: return home before timer fires — update state map so mode resolves to home
         coord.hass.states.get = lambda eid: _make_state("on") if eid == "input_boolean.home_mode" else None
 
-        asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event()))
+        _toggle_and_confirm(coord, _make_occupancy_event())
 
         # Timer must be cancelled
         cancel_mock.assert_called_once()
@@ -998,7 +1013,7 @@ class TestOccupancyAwayDelay:
                 side_effect=lambda fn: fn,
             ),
         ):
-            asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event()))
+            _toggle_and_confirm(coord, _make_occupancy_event())
 
         assert len(captured_callback) == 1
 
@@ -1033,7 +1048,7 @@ class TestOccupancyAwayDelay:
             "custom_components.climate_advisor.coordinator.async_call_later",
             side_effect=call_later_mock,
         ):
-            asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event("input_boolean.vacation")))
+            _toggle_and_confirm(coord, _make_occupancy_event("input_boolean.vacation"))
 
         # Vacation handler called immediately
         vacation_mock.assert_called_once()
@@ -1074,7 +1089,7 @@ class TestOccupancyAwayDelay:
             "custom_components.climate_advisor.coordinator.async_call_later",
             side_effect=fake_async_call_later,
         ):
-            asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event("input_boolean.home_mode")))
+            _toggle_and_confirm(coord, _make_occupancy_event("input_boolean.home_mode"))
 
         assert len(call_later_calls) == 1  # away timer was started
 
@@ -1090,7 +1105,7 @@ class TestOccupancyAwayDelay:
         with patch(
             "custom_components.climate_advisor.coordinator.async_call_later",
         ):
-            asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event("input_boolean.vacation")))
+            _toggle_and_confirm(coord, _make_occupancy_event("input_boolean.vacation"))
 
         # Away timer was cancelled before vacation handler ran
         cancel_mock.assert_called()
@@ -1160,7 +1175,7 @@ class TestOccupancyAwayDelay:
             "custom_components.climate_advisor.coordinator.async_call_later",
             side_effect=fake_async_call_later,
         ):
-            asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event()))
+            _toggle_and_confirm(coord, _make_occupancy_event())
 
         assert coord._occupancy_away_timer_cancel is cancel_mock
 
@@ -1212,7 +1227,7 @@ class TestOccupancyAwayDelay:
             "custom_components.climate_advisor.coordinator.async_call_later",
             side_effect=fake_async_call_later,
         ):
-            asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event()))
+            _toggle_and_confirm(coord, _make_occupancy_event())
 
         # After timer starts: field should be set (pending)
         assert coord._occupancy_away_timer_cancel is cancel_handle

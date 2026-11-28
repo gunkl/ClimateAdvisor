@@ -37,11 +37,11 @@
     {"at": "2026-01-15T08:59:00", "expect": "commanded_setpoint_at", "value": 70.0, "reason": "precondition: home, cold day, comfort heat 70 F on the thermostat"},
     {"at": "2026-01-15T09:11:59", "expect": "setpoint_writes", "since": "2026-01-15T09:00:00", "values": [], "reason": "THE FIX: inside the 15-minute away timer the periodic cycle sends nothing (before the fix it sent heat 60 F at 09:06)"},
     {"at": "2026-01-15T09:40:00", "expect": "commanded_setpoint_at", "value": 70.0, "reason": "after the first return the thermostat holds comfort heat 70 F"},
-    {"at": "2026-01-15T09:59:00", "expect": "setpoint_writes", "since": "2026-01-15T09:12:30", "values": [70.0], "reason": "after the first return every write is the home 70 F (the 09:36 periodic cycle), never the 60 F setback"},
+    {"at": "2026-01-15T09:59:00", "expect": "setpoint_writes", "since": "2026-01-15T09:13:30", "values": [70.0], "reason": "after the first return every write is the home 70 F (the 09:36 periodic cycle), never the 60 F setback"},
     {"at": "2026-01-15T10:20:00", "expect": "commanded_setpoint_at", "value": 60.0, "reason": "the away timer applied the setback (heat 60 F) at 10:15"},
     {"at": "2026-01-15T10:31:00", "expect": "commanded_setpoint_at", "value": 60.0, "reason": "leaving mirror: the periodic cycle while away keeps the setback, it does not undo Away"},
     {"at": "2026-01-15T10:46:00", "expect": "commanded_setpoint_at", "value": 70.0, "reason": "coming home restores comfort heat 70 F"},
-    {"at": "2026-01-15T11:20:00", "expect": "setpoint_writes", "since": "2026-01-15T10:45:30", "values": [70.0], "reason": "after the second return the periodic cycle writes the home 70 F, never the setback"},
+    {"at": "2026-01-15T11:20:00", "expect": "setpoint_writes", "since": "2026-01-15T10:46:30", "values": [70.0], "reason": "after the second return the periodic cycle writes the home 70 F, never the setback"},
     {"at": "2026-01-15T11:20:00", "expect": "expect_band", "expect_band": {"floor": 70.0}, "reason": "the armed band after the second return is the home band (floor 70 F), not the 60 F setback"}
   ],
   "verdict": {

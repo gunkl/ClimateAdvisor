@@ -6,7 +6,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.9.91"
+VERSION = "0.9.92"
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
 GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
@@ -166,6 +166,10 @@ DEFAULT_AUTOMATION_GRACE_SECONDS = 300  # 5 minutes
 DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS = 3600  # 60 minutes
 DEFAULT_OVERRIDE_CONFIRM_SECONDS = 600  # 10 minutes
 OCCUPANCY_SETBACK_MINUTES = 15
+# Issue #1739: a change to the home/vacation/guest toggle must hold this long before it moves the occupancy mode.
+# Toggles shared with HomeKit glitch (a brief flip, a drop to unavailable); acting on those sent a "Welcome home!"
+# during vacation. Not a user setting: a real arrival or departure simply takes effect this much later.
+OCCUPANCY_TOGGLE_CONFIRM_SECONDS = 60
 MAX_CONTINUOUS_RUNTIME_HOURS = 3
 
 # Issue #444: _apply_comfort_band() has no source-of-truth "did the band actually

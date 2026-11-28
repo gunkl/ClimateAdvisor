@@ -487,9 +487,9 @@ def _capture_hold(coordinator: Any, engine: Any) -> dict[str, Any]:
 
 def sync_coordinator_occupancy(coordinator: Any, mode: str) -> None:
     """Production's occupancy toggle writes the COORDINATOR's mode, hands it to the engine, then regenerates the
-    operation timeline (``coordinator._async_occupancy_toggle_changed``). The Tier A event driver only reached the
-    engine, so a surface the coordinator computes (Next Action, the timeline, the briefing) kept reading ``home``.
-    Shared by the FakeHass and real-HA adapters.
+    operation timeline (``coordinator._apply_confirmed_occupancy_change``, Issue #1739). The Tier A event driver only
+    reached the engine, so a surface the coordinator computes (Next Action, the timeline, the briefing) kept reading
+    ``home``. Shared by the FakeHass and real-HA adapters.
     Semantic justification (Issue #1230 R3b, test-infrastructure rule): the previous driver modelled one half of a
     two-part production step; scenarios that read coordinator surfaces after an occupancy event were therefore
     exercising a state production cannot reach (engine away, coordinator home). Could this let a real failure pass

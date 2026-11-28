@@ -32,7 +32,7 @@ _NAMES = re.compile(
 _WIRING = {
     "__init__": "construct",
     "_async_update_data_impl": "call",
-    "_async_occupancy_toggle_changed": "call",
+    "_apply_confirmed_occupancy_change": "call",
     "_async_thermal_sample_tick": "call",
     "_emit_event": "call",
     "get_debug_state": "debug",

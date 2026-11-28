@@ -577,7 +577,7 @@ _READ_PATHS = (
 )
 _PLANNING_STEPS = {
     "_async_update_data_impl",
-    "_async_occupancy_toggle_changed",
+    "_apply_confirmed_occupancy_change",
     "_async_thermal_sample_tick",
     "_timeline_tick",
     "_async_send_briefing",

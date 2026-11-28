@@ -17,6 +17,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from custom_components.climate_advisor.const import OCCUPANCY_TOGGLE_CONFIRM_SECONDS
+
 pytestmark = pytest.mark.house
 
 _PEAK = {"id": "peak1", "name": "Afternoon Peak", "days": ["all"], "start": "15:00", "end": "19:00", "cost_tag": "high"}
@@ -83,8 +85,10 @@ async def test_coming_home_mid_bank_writes_the_home_bank_without_the_comfort_flo
     assert house.coordinator._occupancy_mode == "away"
     assert house.thermostat.mode == "heat"
 
-    since = len(house.calls)
-    house.hass.states.async_set("input_boolean.home", "on")  # someone comes home (handled at once)
+    house.hass.states.async_set("input_boolean.home", "on")  # someone comes home (acted on after the 60 s, #1739)
+    await house.advance(seconds=OCCUPANCY_TOGGLE_CONFIRM_SECONDS - 1)
+    assert house.coordinator._occupancy_mode == "away", "the arrival is only confirmed after the window (#1739)"
+    since = len(house.calls)  # Issue #1739: any periodic write inside the window is the empty house's, not the change's
     await house.advance(minutes=10)
     assert house.coordinator._occupancy_mode == "home"
 

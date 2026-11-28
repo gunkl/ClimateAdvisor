@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from custom_components.climate_advisor.const import OCCUPANCY_TOGGLE_CONFIRM_SECONDS
+
 pytestmark = pytest.mark.house
 
 _FANS = ["whf", "hvac_fan"]
@@ -69,7 +71,7 @@ async def _settled(make_house, fan: str, *, window_open: bool):
 
 async def _set_home(house, on: bool) -> None:
     house.hass.states.async_set(_HOME, "on" if on else "off")
-    await house.advance(seconds=5)
+    await house.advance(seconds=OCCUPANCY_TOGGLE_CONFIRM_SECONDS + 5)  # Issue #1739: the change is confirmed after 60 s
 
 
 @pytest.mark.parametrize("fan", _FANS)

@@ -24,7 +24,7 @@ home debounce timing), then returns. Nothing decided this call constrains or is
 remembered by the next call. (3) What about the AWAY-pending-vs-AWAY-active split —
 isn't THAT a real lifecycle the FSM should track? No: the 15-minute delay between
 "occupancy toggle flipped to away" and "setback actually applied" is a plain
-``async_call_later`` timer owned by the COORDINATOR (``_async_occupancy_toggle_changed()``
+``async_call_later`` timer owned by the COORDINATOR (``_apply_confirmed_occupancy_change()``
 schedules it, ``_cancel_occupancy_away_timer()`` cancels it on any mode change before
 the delay elapses) — the ENGINE never observes "pending" as a state; it only ever
 sees the timer's eventual callback invoke ``handle_occupancy_away()`` once, the same

@@ -302,3 +302,27 @@ async def test_activity_log_survives_restart_across_midnight(make_house):
     restarts = [e for e in co._event_log if e["type"] == "system_restarted"]
     assert restarts, "no system_restarted entry after the restart"
     assert restarts[-1]["recovered_events"] >= len(before) - sum(e["type"] == "system_restarted" for e in before)
+
+
+async def test_unavailable_vacation_toggle_at_restart_keeps_the_restored_vacation(make_house):
+    """Issue #1739: the vacation switch (shared with HomeKit) is unavailable when Home Assistant comes back: a same-day
+    restored vacation is kept and no "Welcome home" is sent.
+
+    Old behaviour: the unavailable switch counted as OFF, so the mode flipped to home and the welcome went out.
+    """
+    from homeassistant.util import dt as dt_util
+
+    house = await make_house(**_COLD, **_VACATION_TOGGLE)
+    await house.advance(minutes=15)
+    assert house.coordinator._occupancy_mode == "vacation"
+    await house.advance_to(datetime(2026, 1, 15, 23, 30, tzinfo=UTC))
+    house.hass.states.async_set("input_boolean.vacation", "unavailable")
+    await house.restart(down_for_seconds=_SHORT_S, settle=False)
+    assert dt_util.now().date() == datetime(2026, 1, 15).date()
+    house.hass.states.async_set("input_boolean.vacation", "unavailable")  # still unavailable after the restart
+    await house.advance(seconds=300 + 90)
+    await house.advance(minutes=5)
+    co = house.coordinator
+    assert co._occupancy_mode == "vacation"
+    assert co.automation_engine._occupancy_mode == "vacation"
+    assert house.thermostat.setpoint_f < _COMFORT_HEAT_F - 5

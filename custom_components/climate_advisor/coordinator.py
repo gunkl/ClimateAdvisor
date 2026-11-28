@@ -245,6 +245,7 @@ from .const import (
     OCCUPANCY_GUEST,
     OCCUPANCY_HOME,
     OCCUPANCY_SETBACK_MINUTES,
+    OCCUPANCY_TOGGLE_CONFIRM_SECONDS,
     OCCUPANCY_VACATION,
     OUTDOOR_SENSOR_STALE_HOURS,
     PLAN_DAYS_AHEAD,
@@ -1900,6 +1901,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._occupancy_away_since: datetime | None = None
         self._unsub_occupancy_listeners: list[Any] = []
         self._occupancy_away_timer_cancel: Any | None = None
+        # Issue #1739: last real (on/off) effective value per toggle entity, so an unavailable/unknown toggle keeps
+        # it; the 60 s confirmation timer for a toggle change that would move the mode (and the entity that armed it).
+        self._occupancy_toggle_last_known: dict[str, bool] = {}
+        self._occupancy_mode_restored: bool = False  # a same-day occupancy mode was restored from disk
+        self._occupancy_toggle_confirm_cancel: Any | None = None
+        self._occupancy_toggle_confirm_entity: str | None = None
+        self._occupancy_toggle_confirm_mode: str | None = None  # the mode the pending confirmation would move to
 
         # Issue #899: precise T_start guard timer for away/vacation TOU pre-conditioning —
         # stops precool/preheat exactly when the TOU window begins, rather than waiting up
@@ -2162,6 +2170,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #1565: each TOU schedule's enable entity (a change re-resolves the schedules at once)
         self._subscribe_tou_condition_listeners()
         _restored_engine_mode = self.automation_engine._occupancy_mode
+        self._seed_unresolved_toggles_from_restored_mode()  # Issue #1739
         self._occupancy_mode = self._compute_occupancy_mode()
         # Issue #1354: the live toggles win over a restored mode (the engine is single, no shadow engine to sync).
         # A restore from another day no longer carries the mode, and a same-day one may be stale.
@@ -3257,6 +3266,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Occupancy state (same-day only; async_setup() then lets the live toggles win, Issue #1354) —
         # sync to engine so guards are active from startup (Issue #85)
         self._occupancy_mode = state.get("occupancy_mode", OCCUPANCY_HOME)
+        self._occupancy_mode_restored = "occupancy_mode" in state  # Issue #1739: seeds unavailable toggles at startup
         self.automation_engine.set_occupancy_mode(self._occupancy_mode)
         away_since = state.get("occupancy_away_since")
         if away_since:
@@ -3759,18 +3769,60 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     # ── Occupancy toggle methods ─────────────────────────────────────
 
     def _is_toggle_on(self, entity_id: str, invert: bool) -> bool:
-        """Check if a toggle entity is effectively ON, respecting invert."""
+        """Check if a toggle entity is effectively ON, respecting invert.
+
+        Issue #1739: toggles shared with HomeKit drop to ``unavailable``/``unknown`` (or the entity is briefly
+        missing) for reasons that have nothing to do with anyone coming or going. Such a state is not a reading:
+        the toggle keeps its last real on/off value. Only a toggle that never reported one (and was not seeded from
+        the restored mode, see ``_seed_unresolved_toggles_from_restored_mode``) counts as OFF.
+        """
         state = self.hass.states.get(entity_id)
         if not state or is_unavailable_state(state.state):
+            known = self._occupancy_toggle_last_known.get(entity_id)
             if state:
                 _LOGGER.warning(
-                    "Occupancy toggle %s is %s — treating as OFF",
+                    "Occupancy toggle %s is %s — keeping last known value: %s",
                     entity_id,
                     state.state,
+                    "none, treating as OFF" if known is None else ("on" if known else "off"),
                 )
-            return False
+            return bool(known)
         raw_on = state.state == "on"
-        return not raw_on if invert else raw_on
+        effective = not raw_on if invert else raw_on
+        self._occupancy_toggle_last_known[entity_id] = effective
+        return effective
+
+    def _seed_unresolved_toggles_from_restored_mode(self) -> None:
+        """Issue #1739: at startup, a toggle with no real reading takes the value the restored mode implies.
+
+        Without it an unavailable vacation toggle at startup computes OFF and a same-day restored vacation mode would
+        flip to home (and send a welcome). Only a same-day restored mode counts (``_occupancy_mode_restored``); with
+        nothing restored the toggle keeps the old behaviour (OFF). The seed lives in the same last-known store, so a
+        toggle that stays unavailable keeps it until it reports. That store is not persisted itself: the same-day
+        restored mode is what the seed is derived from, and a restore from another day carries no mode at all.
+        """
+        if not self._occupancy_mode_restored:
+            return
+        mode = self._occupancy_mode
+        implied = {
+            CONF_GUEST_TOGGLE: mode == OCCUPANCY_GUEST,
+            CONF_VACATION_TOGGLE: mode == OCCUPANCY_VACATION,
+            CONF_HOME_TOGGLE: mode in (OCCUPANCY_HOME, OCCUPANCY_GUEST),
+        }
+        for conf_key, effective_on in implied.items():
+            entity_id = self.config.get(conf_key)
+            if not entity_id or entity_id in self._occupancy_toggle_last_known:
+                continue
+            state = self.hass.states.get(entity_id)
+            if state is not None and not is_unavailable_state(state.state):
+                continue  # it reports a real value: that is read as usual
+            self._occupancy_toggle_last_known[entity_id] = effective_on
+            _LOGGER.info(
+                "Occupancy toggle %s has no reading at startup — assuming %s from the restored %s mode",
+                entity_id,
+                "on" if effective_on else "off",
+                mode,
+            )
 
     def _compute_occupancy_mode(self) -> str:
         """Compute effective occupancy mode from toggle entities (priority order).
@@ -3929,6 +3981,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _engine = getattr(self, "automation_engine", None)
         if _engine is not None:
             _engine.set_away_setback_pending(False)  # Issue #1433: no timer, nothing waits for it
+
+    def _cancel_occupancy_toggle_confirm(self) -> None:
+        """Cancel a pending occupancy toggle confirmation (Issue #1739; getattr: partially built coordinators)."""
+        if getattr(self, "_occupancy_toggle_confirm_cancel", None):
+            self._occupancy_toggle_confirm_cancel()
+            _LOGGER.debug("Occupancy toggle confirmation cancelled")
+        self._occupancy_toggle_confirm_cancel = None
+        self._occupancy_toggle_confirm_entity = None
+        self._occupancy_toggle_confirm_mode = None
 
     def _cancel_tou_av_stop_timer(self) -> None:
         """Cancel any pending away/vacation TOU T_start guard timer (Issue #899).
@@ -4222,18 +4283,79 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._push_tou_bank_card_status()
 
     async def _async_occupancy_toggle_changed(self, event: Event) -> None:
-        """Handle an occupancy toggle state change."""
+        """Handle an occupancy toggle state change (Issue #1739: a change must hold for 60 s before it acts).
+
+        The mode is recomputed now only to decide whether to arm (or re-arm) the confirmation; the move itself, with
+        all of its side effects, happens in ``_apply_confirmed_occupancy_change`` once the toggles still say so.
+        """
+        entity_id = event.data.get("entity_id", "unknown")
+        new_mode = self._compute_occupancy_mode()
+        pending = getattr(self, "_occupancy_toggle_confirm_cancel", None) is not None
+
+        if new_mode == self._occupancy_mode:
+            if pending:
+                armed_by = self._occupancy_toggle_confirm_entity
+                self._cancel_occupancy_toggle_confirm()
+                _LOGGER.info(
+                    "Occupancy toggle change reverted within %ds — mode stays %s (trigger: %s, first change: %s)",
+                    OCCUPANCY_TOGGLE_CONFIRM_SECONDS,
+                    new_mode,
+                    entity_id,
+                    armed_by,
+                )
+            return  # No effective change
+
+        if pending and getattr(self, "_occupancy_toggle_confirm_mode", None) == new_mode:
+            # An event that leaves the pending target unchanged (an attribute update, a toggle dropping to
+            # unavailable and keeping its last value, a toggle the priority ignores) is no new reading: the window
+            # keeps running, so a chatty entity cannot hold off a real change for ever.
+            _LOGGER.debug(
+                "Occupancy toggle event: confirmation of %s -> %s already pending (trigger: %s)",
+                self._occupancy_mode,
+                new_mode,
+                entity_id,
+            )
+            return
+
+        self._cancel_occupancy_toggle_confirm()  # a change to another mode restarts the window
+        _LOGGER.info(
+            "Occupancy toggle change %s -> %s waiting %ds for confirmation (trigger: %s)",
+            self._occupancy_mode,
+            new_mode,
+            OCCUPANCY_TOGGLE_CONFIRM_SECONDS,
+            entity_id,
+        )
+
+        @callback
+        def _occupancy_toggle_confirm_expired(_now: Any) -> None:
+            self._occupancy_toggle_confirm_cancel = None
+            trigger = self._occupancy_toggle_confirm_entity or "unknown"
+            self._occupancy_toggle_confirm_entity = None
+            self._occupancy_toggle_confirm_mode = None
+            self._spawn(self._apply_confirmed_occupancy_change(trigger))
+
+        self._occupancy_toggle_confirm_entity = entity_id
+        self._occupancy_toggle_confirm_mode = new_mode
+        self._occupancy_toggle_confirm_cancel = _call_later(
+            self,
+            OCCUPANCY_TOGGLE_CONFIRM_SECONDS,
+            self._zone_scoped_sync(_occupancy_toggle_confirm_expired),
+        )
+
+    async def _apply_confirmed_occupancy_change(self, trigger_entity: str) -> None:
+        """Move the occupancy mode if the toggles still differ from it after the confirmation window (Issue #1739)."""
         new_mode = self._compute_occupancy_mode()
 
         if new_mode == self._occupancy_mode:
-            return  # No effective change
+            _LOGGER.debug("Occupancy toggle confirmation: mode already %s — nothing to do", new_mode)
+            return
 
         old_mode = self._occupancy_mode
         _LOGGER.info(
             "Occupancy mode changed: %s -> %s (trigger: %s)",
             old_mode,
             new_mode,
-            event.data.get("entity_id", "unknown"),
+            trigger_entity,
         )
 
         # Track away minutes
@@ -21864,6 +21986,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         The diagnostics write is not latched and still runs.
         """
         self._ha_stopping = True
+        self._cancel_occupancy_toggle_confirm()  # Issue #1739: a pending occupancy change is not applied while stopping
         self._perf_stop()
         engine = getattr(self, "automation_engine", None)
         if engine is not None:
@@ -21980,6 +22103,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._v4_cancel_fit()  # Issue #1230 R1: a running fit's result is dropped; the executor thread just ends
             # Cancel any pending occupancy away setback timer
             self._cancel_occupancy_away_timer()
+            self._cancel_occupancy_toggle_confirm()  # Issue #1739: no late mode change after unload/reload
             # Issue #899: cancel any pending TOU away/vacation T_start guard timer
             self._cancel_tou_av_stop_timer()
             self._cancel_tou_home_end_timer()  # Issue #1405: the Home/Guest mirror

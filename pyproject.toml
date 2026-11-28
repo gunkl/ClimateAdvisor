@@ -12,13 +12,13 @@ test = [
     "pytest-cov>=4.0",
     # optional parallel unit tier: CA_UNIT_WORKERS (scripts/test.py)
     "pytest-xdist>=3.5",
-    "ruff>=0.17.5,<0.18",
+    "ruff>=0.17.6,<0.18",
     "pre-commit>=4.0",
     # zoneinfo needs a tz database; absent on Windows (Issue #906)
     "tzdata>=2024.1",
     "voluptuous>=0.14",
     # property-based random-day generator (Issue #1128 Step 3, I3)
-    "hypothesis>=6.170.15",
+    "hypothesis>=6.170.17",
     # JSON store reads/writes one element per line (store_json.py, Issue #1730). Home Assistant core pins orjson, so
     # production always has it; the stubbed unit tier needs it named here.
     "orjson>=3.10",

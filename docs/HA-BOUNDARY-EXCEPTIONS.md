@@ -76,7 +76,7 @@ The standing allowed scope is in [claude.md, Home Assistant Boundary Rule](../cl
 - **Date**: 2026-11-27 (phase 4 of the loop-budget plan)
 - **What**, and nothing more: `self_measure.SelfMeasure` schedules one self-rescheduling callback with `hass.loop.call_at(when, cb)` every second (one per Home Assistant instance; zones share it by a reference count) and reads `hass.loop.time()` in it. It writes nothing, calls no service and touches no other integration. Unload and HA stop cancel it.
 - **Why raw**: the lateness it measures is `loop.time() - scheduled`, on the loop's monotonic clock. `async_call_later` and `async_track_time_interval` hand the callback a wall-clock `datetime`, which a clock change or a frozen test clock moves, and they add their own scheduling layers; both would make the lateness wrong. A failure to start it (a loop without `call_at`/`time()`) is logged at DEBUG and never stops a zone from setting up.
-- **Risk**: Low. One tiny callback a second (a few microseconds); it never raises into the loop.
+- **Risk**: Low. One tiny callback a second (a few microseconds); it never raises into the loop. Test-side note (Issue #1743): the real-HA scenario driver (`RealHASession._next_due`) does not stop its frozen clock at this timer, or every scenario would step once per simulated second.
 - **Resolution plan**: None needed. Revisit if Home Assistant ships its own loop-lag metric.
 - **Status**: Active. Detail: `claude.md` (Thread-Safety, self-measurement) and `plans/1726-1727-1730-loop-budget.md` phase 4.
 

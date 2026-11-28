@@ -452,12 +452,22 @@ class RealHASession:
         return self.house.thermostat
 
     def _next_due(self) -> float | None:
-        """Seconds until the next live loop timer is due (negative/zero when one is already due)."""
+        """Seconds until the next live loop timer is due (negative/zero when one is already due).
+
+        Issue #1743: the loop-lag probe (#1730) is not a stop. It is a measurement-only timer that re-arms every
+        second and no decision reads it; stopping at it made every scenario step once per simulated second instead of
+        up to every 30 s (goldens up to 9x slower; the nightly real-HA job passed its 60 minutes). It still fires: each
+        step's ``async_fire_time_changed`` runs every due timer, the probe included.
+        """
+        from custom_components.climate_advisor.self_measure import SelfMeasure  # noqa: PLC0415
+
         loop = self.hass.loop
         base = loop.time() + _MONOTONIC_RESOLUTION
         best: float | None = None
         for handle in get_scheduled_timer_handles(loop):
             if not isinstance(handle, asyncio.TimerHandle) or handle.cancelled():
+                continue
+            if isinstance(getattr(handle._callback, "__self__", None), SelfMeasure):  # noqa: SLF001
                 continue
             due = handle.when() - base
             if best is None or due < best:

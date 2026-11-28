@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.94] — 2026-11-28
+
+### Internal
+- #1746 (project tooling only, nothing changes in your house): the automatic submission check no longer runs on the fix pull requests that the nightly auto-diagnosis opens. Its AI review could never run on them and always showed a failure; the maintainer reviews those pull requests directly.
+
 ## [0.9.93] — 2026-11-28
 
 ### Internal

@@ -346,6 +346,36 @@ jobs:
           <!-- nightly-run: $RUN_ID -->"
           fi
 
+  # Issue #1745: warn (never fail) when a job in this run used more than 75% of its timeout-minutes, so a job that is
+  # creeping toward its cap is seen while it still passes. The limits are the jobs' timeout-minutes;
+  # tests/test_ci_job_times_1745.py keeps them equal. It waits for report-failure too: report-failure files every
+  # failed or cancelled job of the run from the jobs API, and this job must never be one of them (it would change the
+  # issue title and signature).
+  ci-timing:
+    needs: [seeds, generated-days, waiver-ledger, surfaces, ha-lifecycle, report-failure]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true  # a warning job: a failure here must not fail the run (and wake nightly-autofix)
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Warn about jobs near their time limit
+        run: bash scripts/ci_job_times.sh warn
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          LIMITS: |
+            generated-days (shard */4)=120
+            waiver-ledger=15
+            surfaces=60
+            ha-lifecycle=60
+
   # Issue #1740: nothing used to close a nightly-failure issue when a later run was green, so a fixed or flaky
   # failure stayed open. After a run in which EVERY job passed (all five results are success: not one skipped,
   # cancelled or failed), the open issues this workflow filed (label nightly-failure plus its hidden

@@ -232,6 +232,7 @@ re-staging files are in [claude.md, Pre-commit Hooks](../claude.md#pre-commit-ho
 | `validate.yml` | `isolated` | Changed unit test files, each alone (`CA_UNIT_WORKERS=4`) | via the gate |
 | `validate.yml` | `ha-real` | The gate: passes only when all four `ha-real (K/4)` slices pass | yes |
 | `validate.yml` | `ha-real (K/4)` | One round-robin quarter of the real-HA tier each (`CA_HA_SHARD=K/4`, `CA_HA_WORKERS=4`, `--durations=15`, 8-minute cap), in parallel, with coverage | via the gate |
+| `validate.yml` | `ci-timing` | Warning only (Issue #1745): after every job, `scripts/ci_job_times.sh warn` emits a `::warning::` annotation for any job in the run that finished having used more than 75% of its `timeout-minutes`. Never fails; not required | no |
 | `hassfest.yml` | `validate` | Home Assistant's Hassfest | yes |
 | `hacs.yml` | `hacs` | HACS validation | no |
 | `nightly.yml` | see [§Nightly](DEVELOPMENT.md#nightly) | Scheduled runs | no |
@@ -240,6 +241,12 @@ re-staging files are in [claude.md, Pre-commit Hooks](../claude.md#pre-commit-ho
 
 If tests pass locally but fail in CI, check that any new test dependency is in the `test` group and that `uv.lock` was
 regenerated, because CI uses `--locked`.
+
+**Timeout guards (Issue #1745).** A job that hits its `timeout-minutes` is reported as "cancelled", and in Issue #1743 that, plus a slow real-HA driver, went unnoticed for three merges (`ha-real` slices grew from about 2 minutes to the 8-minute cap and the gate showed only `ha-slice=cancelled`). Three guards:
+
+* The gates `validate-and-test` and `ha-real` run `scripts/ci_job_times.sh timeouts` before their verdict step. A cancelled job gets an `::error::` annotation, "`ha-real (2/4)` timed out or was cancelled after 8 min (limit 8 min)", read from the run's jobs API (`actions: read`, plus `contents: read` to check out the script). The pass/fail verdict is unchanged: the report step never decides it, and the checkout and the report step are `continue-on-error`, so neither can keep the verdict step from running.
+* `ci-timing` (here and in `nightly.yml`) runs `scripts/ci_job_times.sh warn`: a `::warning::` for any job past 75% of its limit; the job is `continue-on-error` and nothing `needs` it, so it can never fail a run or change a gate. The limits each workflow step passes (`LIMITS`) are the jobs' `timeout-minutes`; `tests/test_ci_job_times_1745.py` fails when they drift apart, so changing a job's cap means changing the step's `LIMITS` too.
+* The real-HA driver counts its own clock steps and fails a scenario that takes far more steps than its simulated time warrants; see `tests_ha/realha_session.py` and [sim-harness-spec](sim-harness-spec.md). If a real-HA test fails with "clock-step budget exceeded", the message names the timer callbacks the driver stopped at most often: a timer that is not a decision (a measurement, a heartbeat) must be skipped in `RealHASession._next_due_handle`, as the loop-lag probe is.
 
 ## Nightly
 
@@ -253,6 +260,7 @@ regenerated, because CI uses `--locked`.
 | `waiver-ledger` | Runs only when every shard passed. Merges the shards' hits (`simulate.py --judge-hits`) and judges the waiver ledger over the whole run, stale entries included. Fails if a shard that had seeds left no hits file. |
 | `surfaces` | Runs `simulate.py --surfaces --generate 50` on the same seeds (P8, ratcheted by `tools/simulations/surface_divergences.json`). |
 | `ha-lifecycle` | Runs the full real-HA tier. |
+| `ci-timing` | Warning only (Issue #1745): a `::warning::` for any job of the run that used more than 75% of its limit (`scripts/ci_job_times.sh warn`). Never fails (`continue-on-error`). Runs after `report-failure`, so it is never one of the failed jobs that job files. |
 | `report-failure` | Runs when any job failed or was cancelled. It files one issue per distinct failure: title "Nightly failure <date>: <jobs>", labels `bug`, `nightly-failure`, `severity: medium`, the failing tests (pytest `FAILED`/`ERROR` lines) and broken household promises (`UNWAIVED <promise> day_seed=<n>`). A job that hit its time limit is "cancelled"; the issue says "`<job>` timed out or was cancelled after 2h 0m 3s" (from the run's jobs API) and the title ends "(timed out)". The signature is the failing tests plus the promise NAMES (seeds change every night) plus `timeout:<job>` for each cancelled job with its ` (shard N/4)` suffix removed, so the same failure on a later night, or a timeout of any shard, comments on the open issue instead of filing a new one, and a timeout never shares an issue with a test failure. Hidden markers `nightly-signature` and `nightly-run` tie the issue to the run. |
 | `close-resolved` | Runs only when all five other jobs succeeded, on the scheduled run (or a manual run of `main` with the default 12 seeds and 250 days). Open issues with the `nightly-failure` label and both hidden markers (so only ones the workflow filed) whose failed jobs (from the issue's "Jobs" line) are all jobs of this run get a comment linking the green run and are closed as completed; each close is logged. An issue for a household-promise hit (seed-specific, so a green night with fresh seeds does not show it fixed) or one labelled `needs-human` stays open, as does anything it cannot read or that was not filed by the workflow. It needs only `issues: write`. |
 

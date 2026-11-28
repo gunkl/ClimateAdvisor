@@ -181,9 +181,34 @@ jobs:
     if: always()
     needs: [lint, unit, isolated, coverage, typing]
     runs-on: ubuntu-latest
-    permissions: {}
+    # Issue #1745: contents to check out the report script, actions to read this run's job times. Reporting only.
+    permissions:
+      contents: read
+      actions: read
 
     steps:
+      # The checkout and the report only add information: if either breaks, the verdict step still runs and decides.
+      - name: Checkout code
+        uses: actions/checkout@v7
+        continue-on-error: true
+
+      # A job that hit its timeout-minutes is reported as "cancelled"; this names it and says how long it ran.
+      - name: Name any job that timed out
+        if: always()
+        run: bash scripts/ci_job_times.sh timeouts
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          LIMITS: |
+            lint=5
+            unit (*/8)=10
+            isolated=15
+            coverage=5
+            typing=10
+            ha-real (*/4)=8
+
       - name: Every lint, unit slice, isolation, coverage and typing job passed
         run: |
           echo 'lint=${{ needs.lint.result }} unit=${{ needs.unit.result }} isolated=${{ needs.isolated.result }}'
@@ -243,10 +268,66 @@ jobs:
     if: always()
     needs: [ha-slice]
     runs-on: ubuntu-latest
-    permissions: {}
+    # Issue #1745: contents to check out the report script, actions to read this run's job times. Reporting only.
+    permissions:
+      contents: read
+      actions: read
 
     steps:
+      # The checkout and the report only add information: if either breaks, the verdict step still runs and decides.
+      - name: Checkout code
+        uses: actions/checkout@v7
+        continue-on-error: true
+
+      # A slice that hit its 8-minute cap is reported as "cancelled"; this names it and says how long it ran.
+      - name: Name any slice that timed out
+        if: always()
+        run: bash scripts/ci_job_times.sh timeouts
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          LIMITS: |
+            lint=5
+            unit (*/8)=10
+            isolated=15
+            coverage=5
+            typing=10
+            ha-real (*/4)=8
+
       - name: Every real-HA slice passed
         run: |
           echo 'ha-slice=${{ needs.ha-slice.result }}'
           test '${{ needs.ha-slice.result }}' = success
+
+  # Issue #1745: warn (never fail) when a job in this run used more than 75% of its timeout-minutes, so a job that is
+  # creeping toward its cap is seen while it still passes (#1743 was found only after slices hit the 8-minute cap).
+  # The limits below are the jobs' timeout-minutes; tests/test_ci_job_times_1745.py keeps them equal.
+  ci-timing:
+    if: always()
+    needs: [lint, unit, isolated, coverage, typing, ha-slice]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true  # a warning job: even a broken checkout or a timeout must not turn the run red
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Warn about jobs near their time limit
+        run: bash scripts/ci_job_times.sh warn
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          LIMITS: |
+            lint=5
+            unit (*/8)=10
+            isolated=15
+            coverage=5
+            typing=10
+            ha-real (*/4)=8

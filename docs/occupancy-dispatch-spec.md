@@ -51,6 +51,7 @@ This spec covers the occupancy toggle listener, mode priority resolution, state-
 | Constant | Value | Purpose |
 |---|---|---|
 | `OCCUPANCY_SETBACK_MINUTES` | `15` | Grace delay before away setback fires |
+| `OCCUPANCY_TOGGLE_CONFIRM_SECONDS` | `60` | A toggle change must hold this long before it moves the occupancy mode (Issue #1739) |
 | `VACATION_SETBACK_EXTRA` | `3` °F | Additional setback depth beyond AWAY for vacation mode, used only when `vacation_heat`/`vacation_cool` are not set (Issue #1347) |
 
 ## Priority Resolution
@@ -119,6 +120,10 @@ Executes whenever any configured toggle entity fires a state-change event:
 | AWAY (pending) | toggle → VACATION | VACATION | None | cancel away timer; `handle_occupancy_vacation()` immediately |
 | Any | toggle → HOME | HOME | None | cancel away timer; `handle_occupancy_home()` |
 | Any | HA restart | (restored) | — | same-day restore reads the mode from `climate_advisor_state.json`; `async_setup()` then syncs the live toggles into the engine (Issue #1354, immediate, no away grace); away timer NOT re-armed |
+
+**A toggle change is confirmed for 60 seconds first (Issue #1739).** Occupant view: a vacation or guest switch shared with HomeKit or another system can drop out, or flip off and on again, for a moment. None of that ends your vacation or sends "Welcome home!". Every transition in the table above is acted on only after the toggles have said the same thing for `OCCUPANCY_TOGGLE_CONFIRM_SECONDS` (60 s, `const.py`, not a setting). `_async_occupancy_toggle_changed()` recomputes the mode and, if it differs from the current one, arms a 60 s `async_call_later` (`_occupancy_toggle_confirm_cancel`; a further change restarts it). When it expires `_apply_confirmed_occupancy_change()` recomputes the mode and, if it still differs, runs the transition (the former body of the toggle handler). A change that reverts inside the window cancels the timer and logs one INFO ("Occupancy toggle change reverted within 60s"); nothing else happens. A real arrival or departure therefore takes effect about 60 s late, and the 15-minute away timer starts after the confirmation (so a departure sets the setback about 16 minutes after the toggle). The pending confirmation is cancelled in `async_shutdown()`, on unload and reload, and when HA stops. It is not persisted.
+
+**`unavailable`/`unknown` keep the last value (Issue #1739).** `_is_toggle_on()` remembers each toggle's last real on/off value (`_occupancy_toggle_last_known`). A toggle that reads `unavailable`/`unknown`, or whose entity is missing, keeps that value (the WARNING stays: "keeping last known value"). A toggle that never reported a value counts as OFF, except at startup: when a same-day occupancy mode was restored, `_seed_unresolved_toggles_from_restored_mode()` seeds each toggle that has no reading with the value that mode implies (vacation toggle on for vacation, guest toggle on for guest, home toggle on for home or guest), so an unavailable vacation switch does not turn a restored vacation into a "Welcome home". A toggle that never gets a value after a restart stays on that seed until it reports.
 
 `_cancel_occupancy_away_timer()` (`coordinator.py:L2951`): calls the stored cancel handle, sets `_occupancy_away_timer_cancel = None` and clears the engine's `_away_setback_pending` (Issue #1433). Safe to call when no timer is running.
 
@@ -273,7 +278,7 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 
 | Failure | Handling | Observable effect |
 |---|---|---|
-| Toggle entity `unavailable` or `unknown` | `_is_toggle_on()` treats it as `False` (OFF); no exception raised | Entity effectively reads as "not toggled on"; may hold incorrect mode if the sensor is persistently unavailable |
+| Toggle entity `unavailable`, `unknown` or missing | Since Issue #1739 `_is_toggle_on()` keeps the toggle's last real on/off value (OFF only if it never reported one and was not seeded from a same-day restored mode); WARNING logged; no exception raised | The occupancy mode does not move because a toggle dropped out; if the toggle is persistently unavailable the mode stays at its last value until it reports again |
 | HA restart while 15-minute away timer is pending | Timer callback lost. Since Issue #1354 `async_setup()` syncs the live Vacation/Away toggles into the engine and starts away-minute counting, so the mode is correct at once; the setback is applied by the normal plan application at the end of the startup window (or the next `apply_classification()` cycle / toggle change) | No 15-minute grace after a restart; setback follows the startup plan application |
 | `set_occupancy_mode()` receives an unrecognized mode string | Logs WARNING at `automation.py:L1129` (inside `set_occupancy_mode()`, `L1126`); defaults to `OCCUPANCY_HOME` | Engine remains in HOME mode; coordinator and engine may briefly be out of sync if coordinator accepted the invalid mode |
 | State file missing, corrupt, or wrong `STATE_VERSION` | `StatePersistence.load()` returns `{}` and logs WARNING; coordinator defaults to `OCCUPANCY_HOME` | Occupancy state is reset to HOME on restart; `_occupancy_away_since` is cleared |

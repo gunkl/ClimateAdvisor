@@ -211,7 +211,7 @@ One day's tracked data: what was recommended, what actually happened, outcomes (
 |--------|-------|---------|
 | Door/window sensors | State change (open/closed) | `_async_door_window_changed` |
 | Climate entity | State change (temp, mode) | `_async_thermostat_changed` |
-| Occupancy toggle entities (home/vacation/guest) | State change (on/off) | `_async_occupancy_changed` |
+| Occupancy toggle entities (home/vacation/guest) | State change (on/off); acted on after it has held 60 s (Issue #1739) | `_async_occupancy_changed` |
 
 ## Event Log Retention (Issue #432)
 

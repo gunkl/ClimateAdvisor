@@ -66,6 +66,11 @@ class TestGate:
             assert sc.classify_event("pull_request_target", _pr_event(action, author="claude[bot]"), OWNER) is None
         bot_reply = _comment_event("claude[bot]", author="claude[bot]", pr=True)
         assert sc.classify_event("issue_comment", bot_reply, OWNER) is None
+        bot_edit = _pr_event("edited", author="claude[bot]")
+        assert sc.classify_event("pull_request_target", bot_edit, OWNER) is None
+        # not even the owner's /recheck starts it on these PRs (the owner reviews them directly)
+        recheck = _comment_event(OWNER, "/recheck", author="claude[bot]", pr=True)
+        assert sc.classify_event("issue_comment", recheck, OWNER) is None
 
     def test_revisions_only_by_the_author(self):
         body_edit = {"body": {"from": "x"}}

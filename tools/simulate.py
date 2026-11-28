@@ -703,6 +703,25 @@ def main() -> int:
     )
     parser.add_argument("--issue-state-file", metavar="FILE", help="offline: JSON {issue: open|closed}")
     parser.add_argument(
+        "--hits-out",
+        metavar="PATH",
+        help="Issue #1740: with --generate, also write this run's hard hits as JSON (one nightly shard's share, to be "
+        "merged by --judge-hits)",
+    )
+    parser.add_argument(
+        "--ledger-defer-stale",
+        action="store_true",
+        help="Issue #1740: with --waiver-ledger, leave the stale-entry verdict to --judge-hits over all shards (a "
+        "shard that did not reach an entry's hit is not proof the entry is stale)",
+    )
+    parser.add_argument(
+        "--judge-hits",
+        nargs="+",
+        metavar="FILE",
+        help="Issue #1740: judge the union of the --hits-out files of a sharded run against --waiver-ledger "
+        "(stale check included); runs no days",
+    )
+    parser.add_argument(
         "--surfaces",
         action="store_true",
         help="Issue #1128 P8 (surfaces_agree): judge every golden (and, with --generate N --seeds ..., generated "
@@ -781,12 +800,17 @@ def _run(args: argparse.Namespace) -> int:
 
         return _surfaces.cli_surfaces(args.seeds, args.generate or 0, args.profile)
 
-    if args.generate or args.generate_day is not None or args.replay_generated:
+    if args.judge_hits or args.generate or args.generate_day is not None or args.replay_generated:
         _repo_root = str(Path(__file__).resolve().parent.parent)
         if _repo_root not in sys.path:
             sys.path.insert(0, _repo_root)
         from tools.sim_harness import replay as _replay  # noqa: PLC0415
 
+        if args.judge_hits:
+            if not args.waiver_ledger:
+                print("--judge-hits needs --waiver-ledger")
+                return 2
+            return _replay.cli_judge_hits(args.judge_hits, args.waiver_ledger, args.issue_state, args.issue_state_file)
         if args.replay_generated:
             return _replay.cli_replay(args.replay_generated, do_shrink=args.shrink)
         if args.generate_day is not None:
@@ -798,6 +822,8 @@ def _run(args: argparse.Namespace) -> int:
             ledger_path=args.waiver_ledger,
             issue_state=args.issue_state,
             issue_state_file=args.issue_state_file,
+            hits_out=args.hits_out,
+            defer_stale=args.ledger_defer_stale,
         )
 
     for d in STATE_DIRS.values():

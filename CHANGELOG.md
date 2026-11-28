@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.91] — 2026-11-28
+
+### Internal
+- #1740 (the nightly checks only, nothing changes in your house): the nightly simulation of generated household days now runs as four parallel jobs instead of one, because the single job reached its two-hour limit on 2026-11-26. The four together run exactly the same households and the same checks. A nightly job that runs out of time is now reported as a timeout, with how long it ran, instead of "no failing test line found", and gets the automatic diagnosis a failure gets. A nightly-failure issue is closed, with a link to the passing run, when a later nightly run is fully green.
+
 ## [0.9.90] — 2026-11-27
 
 ### Changed

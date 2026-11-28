@@ -25,6 +25,12 @@ jobs:
     outputs:
       list: ${{ steps.seeds.outputs.list }}
       days: ${{ steps.seeds.outputs.days }}
+      # Issue #1740: the same seeds dealt round-robin into the 4 generated-days shards (a partition: every seed in
+      # exactly one shard; a shard with no seed is empty and its job does nothing).
+      shard_1: ${{ steps.seeds.outputs.shard_1 }}
+      shard_2: ${{ steps.seeds.outputs.shard_2 }}
+      shard_3: ${{ steps.seeds.outputs.shard_3 }}
+      shard_4: ${{ steps.seeds.outputs.shard_4 }}
     steps:
       - name: Pick fresh master seeds (printed so a failure is replayable)
         id: seeds
@@ -45,6 +51,18 @@ jobs:
           echo "list=${list# }" >> "$GITHUB_OUTPUT"
           echo "days=$days" >> "$GITHUB_OUTPUT"
           echo "Master seeds: ${list# }"
+          # Issue #1740: shard k (1-4) takes the seeds at positions k, k+4, k+8, ... of the list above.
+          shards=("" "" "" "")
+          i=0
+          for seed in ${list# }; do
+            k=$((i % 4))
+            shards[k]="${shards[k]:+${shards[k]} }$seed"
+            i=$((i + 1))
+          done
+          for k in 1 2 3 4; do
+            echo "shard_$k=${shards[k - 1]}" >> "$GITHUB_OUTPUT"
+            echo "Shard $k/4 seeds: ${shards[k - 1]:-none}"
+          done
 
   # Issue #1278: 12 x 250 days took 76 min on a hosted runner (about 1.5 s/day). P8 used to run after it in the
   # same job and would have pushed the job past its cap, so it is its own job now (run in parallel), and the cap
@@ -52,10 +70,20 @@ jobs:
   # Issue #1728: --perf-report defers GC, so peak_rss here reads about 300 MB high; judge memory from a plain run.
   # Issue #1730: the perf report subtracts nested executor spans from the loop/task/callback rows, times scheduler
   # callbacks, and adds a generated heavy household (7-day forecast, v4 model) as household_* rows. Report only.
+  # Issue #1740: the run reached 120 min on 2026-11-26 (and passed in 1:55 the next night), so it is split into 4
+  # parallel shards, each with its own 120-minute cap. The split is by master seed (the seeds job deals the list
+  # round-robin), so the 4 shards together run exactly the seeds x days of one unsharded run and every seed runs
+  # whole. The waiver ledger's stale-entry verdict needs the whole run's hits, so each shard saves its hits and the
+  # waiver-ledger job below judges the union.
   generated-days:
+    name: generated-days (shard ${{ matrix.shard }}/4)
     needs: seeds
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     permissions:
       contents: read
       issues: read  # Issue #1153: the waiver ledger checks each waiver's issue is still open
@@ -71,18 +99,41 @@ jobs:
         run: uv sync --locked --only-group test
 
       # Issue #1153: a known hit is tolerated only through tools/sim_harness/nightly_waivers.json - issue-linked,
-      # expiring, matched on mechanism (never seed). A closed issue, a passed expiry or a waiver whose hit no
-      # longer occurs fails this step. GITHUB_SHA / GITHUB_REPOSITORY are set by Actions; the token reads issues.
+      # expiring, matched on mechanism (never seed). A closed issue, a passed expiry or an unlisted hit fails this
+      # step; a waiver whose hit no longer occurs is judged over all shards by the waiver-ledger job (Issue #1740:
+      # --ledger-defer-stale, --hits-out). GITHUB_SHA / GITHUB_REPOSITORY are set by Actions; the token reads issues.
       - name: Generated days judged by the household promises (P1-P7) and the waiver ledger
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >
-          uv run --locked --only-group test python tools/simulate.py
-          --generate ${{ needs.seeds.outputs.days }}
-          --seeds ${{ needs.seeds.outputs.list }}
-          --waiver-ledger tools/sim_harness/nightly_waivers.json
-          --issue-state github
-          --perf-report perf_report.json
+          DAYS: ${{ needs.seeds.outputs.days }}
+          SHARD: ${{ matrix.shard }}
+          SHARD_SEEDS: ${{ needs.seeds.outputs[format('shard_{0}', matrix.shard)] }}
+        run: |
+          if [ -z "$SHARD_SEEDS" ]; then
+            echo "No master seed falls in shard $SHARD/4 (fewer seeds than shards); nothing to run here."
+            exit 0
+          fi
+          echo "Shard $SHARD/4: master seeds $SHARD_SEEDS x $DAYS days"
+          # shellcheck disable=SC2086  # SHARD_SEEDS is a validated list of integers; it must split into arguments
+          uv run --locked --only-group test python tools/simulate.py \
+            --generate "$DAYS" \
+            --seeds $SHARD_SEEDS \
+            --waiver-ledger tools/sim_harness/nightly_waivers.json \
+            --ledger-defer-stale \
+            --hits-out shard_hits.json \
+            --issue-state github \
+            --perf-report perf_report.json
+
+      # Issue #1740: this shard's hard hits, for the waiver-ledger job. Uploaded only when the step finished (a
+      # missing file from a failed shard is fine: the ledger job only runs when every shard passed).
+      - name: Upload this shard's hits (for the waiver ledger)
+        if: success()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: shard-hits-${{ matrix.shard }}
+          path: shard_hits.json
+          if-no-files-found: ignore
+          retention-days: 3
 
       # Issue #1728: report only. The step above also records thread CPU per executor job and loop callback (GC
       # excluded) and prints the table at the end of its log; this uploads the JSON. It never fails the job, and
@@ -92,7 +143,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: perf-report
+          name: perf-report-${{ matrix.shard }}
           path: perf_report.json
           if-no-files-found: ignore
           retention-days: 30
@@ -101,10 +152,60 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: generated-failures
+          name: generated-failures-${{ matrix.shard }}
           path: tools/simulations/generated/failures/
           if-no-files-found: ignore
           retention-days: 30
+
+  # Issue #1740: the waiver ledger's "no hit matches this entry" (stale) verdict is only true over the whole run, so
+  # it is judged here on the union of the 4 shards' hits. Runs only when every shard passed (a failed shard has
+  # already failed the run, and its partial hits could not prove an entry stale).
+  waiver-ledger:
+    needs: [seeds, generated-days]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up uv (uv reads the Python version from .python-version)
+        uses: astral-sh/setup-uv@v10.4.0
+
+      - name: Install test dependencies
+        run: uv sync --locked --only-group test
+
+      - name: Download the shards' hits
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: shard-hits-*
+          path: shard-hits
+
+      - name: Waiver ledger judged over all shards (stale entries)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHARD_1: ${{ needs.seeds.outputs.shard_1 }}
+          SHARD_2: ${{ needs.seeds.outputs.shard_2 }}
+          SHARD_3: ${{ needs.seeds.outputs.shard_3 }}
+          SHARD_4: ${{ needs.seeds.outputs.shard_4 }}
+        run: |
+          ls -R shard-hits
+          # a shard with seeds must have left its hits file, or the union is incomplete and could call a waiver stale
+          expected=0
+          for v in "$SHARD_1" "$SHARD_2" "$SHARD_3" "$SHARD_4"; do [ -n "$v" ] && expected=$((expected + 1)); done
+          files=(shard-hits/*/shard_hits.json)
+          found=0
+          for f in "${files[@]}"; do [ -f "$f" ] && found=$((found + 1)); done
+          if [ "$found" -ne "$expected" ]; then
+            echo "expected $expected shard hits files, found $found" >&2; exit 1
+          fi
+          uv run --locked --only-group test python tools/simulate.py \
+            --judge-hits shard-hits/*/shard_hits.json \
+            --waiver-ledger tools/sim_harness/nightly_waivers.json \
+            --issue-state github
 
   surfaces:
     needs: seeds
@@ -154,8 +255,11 @@ jobs:
   # when no test line is found); a later run with the same signature comments on that issue instead. The issue is
   # what .github/workflows/nightly-autofix.yml diagnoses (it finds it by the hidden nightly-run marker). A runner
   # killed for memory reports "failure" or "cancelled", so both count.
+  # Issue #1740: a job that hit its time limit is "cancelled" with no test line; it is reported as a timeout (with how
+  # long it ran) and gets its own signature, "timeout:<job name>" with the shard suffix removed, so repeated
+  # timeouts of any shard share one issue and a timeout never shares one with a test failure.
   report-failure:
-    needs: [seeds, generated-days, surfaces, ha-lifecycle]
+    needs: [seeds, generated-days, waiver-ledger, surfaces, ha-lifecycle]
     if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     permissions:
@@ -170,18 +274,29 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SEEDS: ${{ needs.seeds.result }}
           GENERATED: ${{ needs.generated-days.result }}
+          LEDGER: ${{ needs.waiver-ledger.result }}
           SURFACES: ${{ needs.surfaces.result }}
           HA: ${{ needs.ha-lifecycle.result }}
         run: |
           set -euo pipefail
           gh label create nightly-failure --color B60205 --description "Filed automatically by a failed nightly run" 2>/dev/null || true
-          # The failing tests, from the logs of the jobs that failed (this run is still in progress, so per job).
+          # "<id> TAB <name> TAB <conclusion> TAB <seconds the job ran>" for the jobs that failed or were cancelled
+          # (this run is still in progress, so per job). A job that hit timeout-minutes is "cancelled".
           jobs=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
-            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "\(.id) \(.name)"')
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.id, .name, .conclusion, (((.completed_at // .started_at) | fromdateiso8601) - (.started_at | fromdateiso8601))] | @tsv')
           : > failing.txt
           : > promises.txt
-          while read -r id name; do
+          : > timeouts.txt
+          : > timeout_lines.txt
+          while IFS=$'\t' read -r id name conclusion secs; do
             [ -z "$id" ] && continue
+            if [ "$conclusion" = "cancelled" ]; then
+              # a shard's suffix " (shard 2/4)" is dropped so every shard's timeout is the same signature
+              printf '%s\n' "$name" | sed -E 's/ \(shard [0-9]+\/[0-9]+\)$//' >> timeouts.txt
+              # shellcheck disable=SC2016  # the backticks are markdown, not a command substitution
+              printf -- '- `%s` timed out or was cancelled after %dh %dm %ds (the run ended it: a job over its timeout-minutes is cancelled; read the per-seed timings in its log)\n' \
+                "$name" $((secs / 3600)) $((secs % 3600 / 60)) $((secs % 60)) >> timeout_lines.txt
+            fi
             gh run view --job "$id" --log 2>/dev/null > job.log || true
             grep -oE '(FAILED|ERROR) (tests|tests_ha)/[^ ]+' job.log | sed -E 's/^(FAILED|ERROR) //' >> failing.txt || true
             # generated days: an unwaived household-promise hit ("UNWAIVED <promise> day_seed=<seed>: ...")
@@ -190,22 +305,33 @@ jobs:
           done <<< "$jobs"
           sort -u failing.txt -o failing.txt
           sort -u promises.txt -o promises.txt
-          job_names=$(printf '%s\n' "$jobs" | cut -d' ' -f2- | sort -u | paste -sd, -)
-          # The signature: failing tests plus broken promise NAMES (seeds change every night, the mechanism does not).
-          sig_src=$( { grep -v '^promise ' failing.txt || true; sed 's/^/promise:/' promises.txt; } )
+          sort -u timeouts.txt -o timeouts.txt
+          # the failed jobs by name (shard suffix removed, so shards of one job read as one)
+          job_names=$(printf '%s\n' "$jobs" | cut -f2 | sed -E 's/ \(shard [0-9]+\/[0-9]+\)$//' | sort -u | paste -sd, -)
+          # The signature: failing tests plus broken promise NAMES (seeds change every night, the mechanism does not)
+          # plus the jobs that timed out.
+          sig_src=$( { grep -v '^promise ' failing.txt || true; sed 's/^/promise:/' promises.txt; sed 's/^/timeout:/' timeouts.txt; } )
           [ -z "$sig_src" ] && sig_src="jobs:$job_names"
           sig=$(printf '%s' "$sig_src" | sha1sum | cut -c1-12)
+          # shellcheck disable=SC2016  # the backticks are markdown
           tests=$(sed 's/^/- `/; s/$/`/' failing.txt | head -40)
+          if [ -s timeout_lines.txt ]; then
+            tests="${tests:+$tests
+          }$(cat timeout_lines.txt)"
+          fi
           [ -z "$tests" ] && tests="- (no failing test line found; see the failed jobs: $job_names)"
-          summary="seeds=$SEEDS, generated-days=$GENERATED, surfaces=$SURFACES, ha-lifecycle=$HA"
+          title_suffix=""
+          [ -s timeouts.txt ] && title_suffix=" (timed out)"
+          summary="seeds=$SEEDS, generated-days=$GENERATED, waiver-ledger=$LEDGER, surfaces=$SURFACES, ha-lifecycle=$HA"
           num=$(gh issue list --state open --label nightly-failure --search "\"nightly-signature: $sig\" in:body" \
             --json number --jq '.[0].number // empty')
           if [ -n "$num" ]; then
             gh issue comment "$num" --body "The same failure again: $RUN_URL (commit $GITHUB_SHA). $summary.
+          $tests
           <!-- nightly-run: $RUN_ID -->"
           else
             gh issue create --label bug --label nightly-failure --label "severity: medium" \
-              --title "Nightly failure $(date -u +%F): ${job_names:-unknown job}" \
+              --title "Nightly failure $(date -u +%F): ${job_names:-unknown job}$title_suffix" \
               --body "Nightly run failed: $RUN_URL (commit $GITHUB_SHA).
 
           **Jobs:** $summary
@@ -218,3 +344,59 @@ jobs:
           <!-- nightly-signature: $sig -->
           <!-- nightly-run: $RUN_ID -->"
           fi
+
+  # Issue #1740: nothing used to close a nightly-failure issue when a later run was green, so a fixed or flaky
+  # failure stayed open. After a run in which EVERY job passed (all five results are success: not one skipped,
+  # cancelled or failed), the open issues this workflow filed (label nightly-failure plus its hidden
+  # nightly-signature marker) whose failed jobs are all jobs that just passed get a comment linking this run and are
+  # closed as completed. Only the scheduled run counts, or a manual run of main with the default seeds and days (a
+  # run with custom seeds or days proves less). It logs each issue it closes. issues: write is all it needs.
+  close-resolved:
+    needs: [seeds, generated-days, waiver-ledger, surfaces, ha-lifecycle]
+    if: >-
+      ${{ needs.seeds.result == 'success' && needs.generated-days.result == 'success'
+      && needs.waiver-ledger.result == 'success' && needs.surfaces.result == 'success'
+      && needs.ha-lifecycle.result == 'success'
+      && (github.event_name == 'schedule'
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+      && github.event.inputs.seeds == '12' && github.event.inputs.days == '250')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Close the nightly-failure issues this green run resolves
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # the jobs of this run, all of which just passed (a failed job named in an issue body must be one of these)
+          passed=" seeds generated-days waiver-ledger surfaces ha-lifecycle "
+          closed=0
+          for num in $(gh issue list --state open --label nightly-failure --limit 100 --json number --jq '.[].number'); do
+            body=$(gh issue view "$num" --json body --jq .body)
+            # only issues this workflow filed: the hidden signature and run markers
+            if ! grep -q '<!-- nightly-signature: ' <<< "$body" || ! grep -q '<!-- nightly-run: ' <<< "$body"; then
+              echo "#$num: no nightly-signature/nightly-run marker, not filed by this workflow; left open."; continue
+            fi
+            # "**Jobs:** seeds=success, generated-days=failure, ...": the jobs that failed or were cancelled
+            failed=$(grep -oE '^\*\*Jobs:\*\* .*' <<< "$body" | grep -oE '[a-z-]+=(failure|cancelled)' | cut -d= -f1 || true)
+            if [ -z "$failed" ]; then
+              echo "#$num: cannot tell which jobs failed; left open."; continue
+            fi
+            ok=1
+            for j in $failed; do
+              case "$passed" in *" $j "*) ;; *) ok=0; echo "#$num: failed job '$j' is not one that just passed; left open." ;; esac
+            done
+            [ "$ok" = 1 ] || continue
+            failed_list="${failed//$'\n'/, }"
+            gh issue comment "$num" --body "The nightly run is green again: $RUN_URL (commit $GITHUB_SHA). Every job passed, including the failed one(s) here: $failed_list. Closing as resolved; if it comes back, the next failing run files a new issue.
+          <!-- nightly-closed-by: $RUN_ID -->"
+            gh issue close "$num" --reason completed
+            echo "Closed #$num (failed jobs: $failed)"
+            closed=$((closed + 1))
+          done
+          echo "Closed $closed nightly-failure issue(s)."

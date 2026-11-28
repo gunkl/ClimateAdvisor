@@ -93,7 +93,7 @@ Assertions tagged `track: "integration"` are skipped in Tier A without causing a
 
 ## Perf probe (report only, Issue #1728)
 
-`tools/sim_harness/perf_probe.py` measures how much CPU the code under simulation takes, so a slow job shows up before it reaches a home. Run it with `python tools/simulate.py --generate N --seeds S --perf-report [PATH]` (default `perf_report.json`). The nightly `generated-days` job does this and uploads the JSON as the `perf-report` artifact.
+`tools/sim_harness/perf_probe.py` measures how much CPU the code under simulation takes, so a slow job shows up before it reaches a home. Run it with `python tools/simulate.py --generate N --seeds S --perf-report [PATH]` (default `perf_report.json`). The nightly `generated-days` shards (4, Issue #1740) each do this and upload their JSON as the `perf-report-<shard>` artifact.
 
 **Environment (Issue #1730).** The stores read and write through `store_json.py`, which needs `orjson`. `tools/simulate.py` runs under `.venv-test`, whose `test` dependency group now includes `orjson` (Home Assistant core pins it, so production always has it); a venv built before that must be refreshed (`uv sync --locked --only-group test`, or delete and let `scripts/test.py` recreate it).
 

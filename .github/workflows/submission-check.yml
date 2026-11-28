@@ -4,7 +4,8 @@ name: Submission check
 # or says the submission is complete (labels needs-info / submission: complete, and hypothesis when the form
 # says so). It runs at most twice per submission: when it is opened, and after the author's first revision (an
 # edit, a push or a reply). Each round waits 5 minutes for further edits first. The owner can comment /recheck.
-# It skips the owner's own submissions, Dependabot and nightly-failure issues. Rules: CONTRIBUTING.md,
+# It skips the owner's own submissions, Dependabot, the nightly auto-diagnosis bot's fix PRs (claude[bot]) and
+# nightly-failure issues. Rules: CONTRIBUTING.md,
 # "The automatic submission check". Logic and tests: .github/scripts/submission_check.py and
 # tests/test_submission_check_1683.py.
 #

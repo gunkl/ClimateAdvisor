@@ -51,7 +51,7 @@ class TestGate:
         }
         assert sc.classify_event("pull_request_target", _pr_event(), OWNER)["kind"] == "pr"
 
-    @pytest.mark.parametrize("author", [OWNER, "dependabot[bot]", "github-actions[bot]"])
+    @pytest.mark.parametrize("author", [OWNER, "dependabot[bot]", "github-actions[bot]", "claude[bot]"])
     def test_skipped_authors(self, author):
         assert sc.classify_event("issues", _issue_event(author=author), OWNER) is None
         assert sc.classify_event("pull_request_target", _pr_event(author=author), OWNER) is None
@@ -60,8 +60,17 @@ class TestGate:
         assert sc.classify_event("issues", _issue_event(labels=["nightly-failure"]), OWNER) is None
         assert sc.classify_event("issues", _issue_event(state="closed"), OWNER) is None
 
-    def test_the_autofix_bot_pr_is_checked(self):
-        assert sc.classify_event("pull_request_target", _pr_event(author="claude[bot]"), OWNER) is not None
+    def test_the_autofix_bot_pr_is_skipped_on_every_trigger(self):
+        # The nightly auto-diagnosis opens its fix PRs as claude[bot]; neither the form check nor the AI review runs.
+        for action in ("opened", "synchronize"):
+            assert sc.classify_event("pull_request_target", _pr_event(action, author="claude[bot]"), OWNER) is None
+        bot_reply = _comment_event("claude[bot]", author="claude[bot]", pr=True)
+        assert sc.classify_event("issue_comment", bot_reply, OWNER) is None
+        bot_edit = _pr_event("edited", author="claude[bot]")
+        assert sc.classify_event("pull_request_target", bot_edit, OWNER) is None
+        # not even the owner's /recheck starts it on these PRs (the owner reviews them directly)
+        recheck = _comment_event(OWNER, "/recheck", author="claude[bot]", pr=True)
+        assert sc.classify_event("issue_comment", recheck, OWNER) is None
 
     def test_revisions_only_by_the_author(self):
         body_edit = {"body": {"from": "x"}}

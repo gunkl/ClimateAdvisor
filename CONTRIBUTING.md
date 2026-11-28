@@ -88,7 +88,7 @@ A workflow (`.github/workflows/submission-check.yml`) reads every new issue and 
     - does it match a closed `wontfix` issue, or duplicate another issue?
   - **What the AI review knows:** the round, what the previous check said, and the names of the files you attached. Climate Advisor's diagnostics already hold your settings, setpoints, thermostat capabilities and versions, so it doesn't ask for those once the diagnostics are attached. It checks the docs before asking about a setting, and only calls two statements a conflict when it quotes both and they can't both be true.
 - **Limits:** the AI review runs for at most 10 submissions a day across the project. Each contributor gets at most 3 issues and 3 PRs a day, and 30 of each a month. Past a limit, the script checks still run, and the comment says the AI review is paused.
-- **Skipped:** the maintainer's own submissions, Dependabot, and the nightly-failure issues.
+- **Skipped:** the maintainer's own submissions, Dependabot, the nightly auto-diagnosis's fix PRs, and the nightly-failure issues.
 
 ## Branches and where a change goes
 

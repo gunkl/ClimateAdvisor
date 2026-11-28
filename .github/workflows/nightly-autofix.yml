@@ -128,7 +128,7 @@ jobs:
                  "Fixes #${{ steps.find.outputs.issue }}." and fills in every section of
                  .github/pull_request_template.md (what changes for the person at home, evidence, root cause and
                  origin, states covered, blast radius, mirror check, verification with the proof the tests fail
-                 without the fix, housekeeping), so it passes the submission check (CONTRIBUTING.md).
+                 without the fix, housekeeping), so the owner can review it (the submission check skips these PRs, #1746).
                If you cannot demonstrate a fix, open no PR: comment the diagnosis and run
                `gh issue edit ${{ steps.find.outputs.issue }} --add-label needs-human`.
 

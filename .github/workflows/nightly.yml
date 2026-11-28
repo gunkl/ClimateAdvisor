@@ -281,9 +281,10 @@ jobs:
           set -euo pipefail
           gh label create nightly-failure --color B60205 --description "Filed automatically by a failed nightly run" 2>/dev/null || true
           # "<id> TAB <name> TAB <conclusion> TAB <seconds the job ran>" for the jobs that failed or were cancelled
-          # (this run is still in progress, so per job). A job that hit timeout-minutes is "cancelled".
+          # (this run is still in progress, so per job). A job that hit timeout-minutes is "cancelled". A missing or
+          # unreadable timestamp gives 0 seconds rather than an error, so the issue is still filed.
           jobs=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
-            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.id, .name, .conclusion, (((.completed_at // .started_at) | fromdateiso8601) - (.started_at | fromdateiso8601))] | @tsv')
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.id, .name, .conclusion, (try (((.completed_at // .started_at) | fromdateiso8601) - (.started_at | fromdateiso8601)) catch 0)] | @tsv')
           : > failing.txt
           : > promises.txt
           : > timeouts.txt

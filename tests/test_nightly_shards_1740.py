@@ -321,10 +321,12 @@ def test_the_jobs_query_yields_the_duration_the_script_reads():
                 "started_at": "2026-11-26T08:21:00Z",
                 "completed_at": None,
             },
+            # a job with no timestamps must not make jq fail (set -o pipefail would then file no issue at all)
+            {"id": 8, "name": "surfaces", "conclusion": "cancelled", "started_at": None, "completed_at": None},
         ]
     }
     out = subprocess.run(["jq", "-r", m.group(1)], input=json.dumps(sample), capture_output=True, text=True, check=True)
-    assert out.stdout == "5\tgenerated-days (shard 1/4)\tcancelled\t7203\n"
+    assert out.stdout == "5\tgenerated-days (shard 1/4)\tcancelled\t7203\n8\tsurfaces\tcancelled\t0\n"
 
 
 # ── (3) auto-diagnosis accepts a cancelled run ───────────────────────────────────────────────────────────────────
@@ -382,11 +384,54 @@ def test_a_green_run_closes_only_issues_the_workflow_filed_for_jobs_that_just_pa
             12: _FILED.replace("generated-days=failure", "retired-job=failure"),  # a job this run did not pass
             13: _FILED.replace("generated-days=failure", "generated-days=success"),  # cannot tell what failed
             14: _FILED.replace("generated-days=failure", "generated-days=cancelled"),  # a timeout counts
+            # a "Jobs" line copied into a hand-written issue, without the hidden markers: not ours
+            15: _FILED.split("<!--")[0],
         },
     )
     assert sorted(re.findall(r"issue close (\d+) --reason completed", closed)) == ["10", "14"]
     assert "https://example/runs/900" in commented and "nightly-closed-by: 900" in commented
-    assert "10 " in commented and "14 " in commented and "11 " not in commented
+    assert "10 " in commented and "14 " in commented and "11 " not in commented and "15 " not in commented
+
+
+@_SHELL
+@pytest.mark.parametrize(
+    ("shards", "files", "ok"),
+    [
+        (["1 5", "2 6", "3", ""], [1, 2, 3], True),  # an empty shard leaves no file and is not expected to
+        (["1 5", "2 6", "3", "4"], [1, 2, 3], False),  # a shard with seeds left no hits file: the union is incomplete
+    ],
+)
+def test_the_waiver_ledger_job_refuses_an_incomplete_union(tmp_path, shards, files, ok):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    uv = bindir / "uv"
+    uv.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" > "$FAKE_DIR/uv_args.txt"\n', encoding="utf-8")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    work = tmp_path / "work"
+    for k in files:
+        (work / "shard-hits" / f"shard-hits-{k}").mkdir(parents=True)
+        (work / "shard-hits" / f"shard-hits-{k}" / "shard_hits.json").write_text('{"hits": []}', encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_DIR": str(tmp_path),
+        **{f"SHARD_{k}": v for k, v in enumerate(shards, 1)},
+    }
+    run = subprocess.run(
+        ["bash", "-e", "-c", _script("waiver-ledger", "Waiver ledger judged")],
+        env=env,
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (run.returncode == 0) is ok, run.stderr
+    if ok:
+        args = (tmp_path / "uv_args.txt").read_text(encoding="utf-8")
+        assert "--judge-hits" in args and all(f"shard-hits-{k}/shard_hits.json" in args for k in files)
+    else:
+        assert "expected 4 shard hits files, found 3" in run.stderr
+        assert not (tmp_path / "uv_args.txt").exists()
 
 
 def test_close_resolved_runs_only_after_a_fully_green_default_run_and_needs_only_issues_write():

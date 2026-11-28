@@ -52,6 +52,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import sys
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -90,6 +91,14 @@ _SCENARIO_LOG = logging.getLogger("custom_components.climate_advisor.scenario")
 _MONOTONIC_RESOLUTION = 1e-9
 MIN_STEP = timedelta(seconds=1)
 MAX_STEP = timedelta(seconds=30)  # the sim thermostat's own tick: the physics never sees a bigger jump
+# Issue #1745: clock-step budget.  Every ``freezer.tick`` the driver makes is a step; a scenario that needs more than
+# ``max(STEP_BUDGET_FLOOR, STEP_BUDGET_PER_MINUTE * simulated_minutes)`` of them is stopping the clock at something that
+# is not a decision (the #1743 probe did: ~60 steps per simulated minute).  The numbers come from the measured
+# distribution over the goldens and every other real-HA scenario run (``docs/sim-harness-spec.md``, realha_session
+# row): normal scenarios take 4.0-4.5 steps per simulated minute (6.0 at worst, one golden), and one under 30 minutes
+# at most 133 steps; so 8 per minute and a floor of 200 leave 1.3-1.5x headroom and still catch a 60-per-minute timer.
+STEP_BUDGET_PER_MINUTE = 8.0
+STEP_BUDGET_FLOOR = 200
 _SIM_MODES = {"off", "heat", "cool"}
 # Behavioral settings the shared house seed carries but a FakeHass scenario config never had.  Left in, they would
 # change what "no value configured" means (e.g. the seed's sleep_cool=78 replaces production's default 72), so the
@@ -135,6 +144,36 @@ _MODE_BY_TYPE = {
     "occupancy_change": "direct-callback",
     "occupancy_change_with_override": "direct-callback",
 }
+
+
+class ClockStepBudgetExceeded(AssertionError):
+    """The driver stepped the frozen clock far more often than the scenario's simulated time warrants (Issue #1745)."""
+
+
+def _describe_callable(obj: Any, depth: int = 0) -> str:
+    """``Owner.method`` for a callback, looking through HA's job and partial wrappers and the timer helpers that hold
+    the real action (``_TrackTimeInterval.action``, ``Debouncer.function``), so the report names what the timer runs."""
+    obj = getattr(obj, "target", obj)  # HassJob
+    obj = getattr(obj, "func", obj)  # functools.partial
+    name = getattr(obj, "__qualname__", None) or type(obj).__qualname__
+    owner = getattr(obj, "__self__", None)
+    if depth < 2 and owner is not None:
+        for attr in ("action", "function"):
+            inner = getattr(owner, attr, None)
+            if callable(inner) or hasattr(inner, "target"):
+                return f"{name} -> {_describe_callable(inner, depth + 1)}"
+    return name
+
+
+def _callback_name(handle: Any) -> str:
+    """A readable name for the callback a timer handle will run (``SelfMeasure._tick``), for the step report."""
+    callback = getattr(handle, "_callback", None)
+    args = getattr(handle, "_args", ()) or ()
+    if getattr(callback, "__name__", "") == "_run_async_call_action":  # HA's wrapper: the HassJob is its argument
+        job = next((a for a in args if hasattr(a, "job_type") and hasattr(a, "target")), None)
+        if job is not None:
+            return f"{callback.__name__} -> {_describe_callable(job)}"
+    return _describe_callable(callback)
 
 
 class _ErrorCapture(logging.Handler):
@@ -214,6 +253,10 @@ class RealHASession:
         self.leaked_timers: list[str] = []
         self._coalesced_by_timer = False  # Issue #1309: the +300 s timer's refresh already coalesced this window
         self._cancel_coalesce_recheck: Any = None
+        # Issue #1745: the clock-step budget's counters.  ``step_stops`` says why each step ended where it did.
+        self.clock_steps = 0
+        self.simulated_seconds = 0.0
+        self.step_stops: Counter[str] = Counter()
 
     # ------------------------------------------------------------------ build
     @property
@@ -452,7 +495,11 @@ class RealHASession:
         return self.house.thermostat
 
     def _next_due(self) -> float | None:
-        """Seconds until the next live loop timer is due (negative/zero when one is already due).
+        """Seconds until the next live loop timer is due (negative/zero when one is already due)."""
+        return self._next_due_handle()[0]
+
+    def _next_due_handle(self) -> tuple[float | None, Any]:
+        """``(seconds until the next live loop timer is due, that timer's handle)``; ``(None, None)`` when none.
 
         Issue #1743: the loop-lag probe (#1730) is not a stop. It is a measurement-only timer that re-arms every
         second and no decision reads it; stopping at it made every scenario step once per simulated second instead of
@@ -464,6 +511,7 @@ class RealHASession:
         loop = self.hass.loop
         base = loop.time() + _MONOTONIC_RESOLUTION
         best: float | None = None
+        best_handle: Any = None
         for handle in get_scheduled_timer_handles(loop):
             if not isinstance(handle, asyncio.TimerHandle) or handle.cancelled():
                 continue
@@ -471,8 +519,36 @@ class RealHASession:
                 continue
             due = handle.when() - base
             if best is None or due < best:
-                best = due
-        return best
+                best, best_handle = due, handle
+        return best, best_handle
+
+    def _tick(self, step: timedelta, why: str) -> None:
+        """Turn the frozen clock forward by ``step`` and count it (Issue #1745); ``why`` names what ended the step."""
+        self.freezer.tick(step)
+        self.clock_steps += 1
+        self.simulated_seconds += step.total_seconds()
+        self.step_stops[why] += 1
+
+    def step_budget(self) -> float:
+        """The most clock steps this scenario may take for the simulated time it covered."""
+        return max(float(STEP_BUDGET_FLOOR), STEP_BUDGET_PER_MINUTE * self.simulated_seconds / 60.0)
+
+    def step_report(self, top: int = 5) -> str:
+        """One line: steps, simulated minutes, steps per minute, and the callbacks the clock stopped at most often."""
+        minutes = self.simulated_seconds / 60.0
+        rate = self.clock_steps / minutes if minutes else 0.0
+        stops = ", ".join(f"{name} x{n}" for name, n in self.step_stops.most_common(top))
+        return f"{self.clock_steps} clock steps over {minutes:.1f} simulated min ({rate:.1f}/min); stopped at: {stops}"
+
+    def check_step_budget(self) -> None:
+        """Fail when the driver stepped the clock more often than the budget allows (Issue #1745)."""
+        if self.clock_steps > self.step_budget():
+            raise ClockStepBudgetExceeded(
+                f"real-HA driver clock-step budget exceeded: {self.step_report()}; budget "
+                f"max({STEP_BUDGET_FLOOR}, {STEP_BUDGET_PER_MINUTE:g}/min) = {self.step_budget():.0f}. A timer that is "
+                f"not a decision is making the driver stop the frozen clock (see _next_due_handle; Issue #1743 was "
+                f"SelfMeasure._tick)."
+            )
 
     async def _advance(self, span: timedelta) -> None:
         """Turn the clock forward by ``span``, stopping at each timer that comes due (1 s floor, 30 s cap)."""
@@ -480,10 +556,13 @@ class RealHASession:
         remaining = span
         while remaining > timedelta(0):
             step = min(MAX_STEP, remaining)
-            due = self._next_due()
+            why = "<30 s cap or end of span>"
+            due, handle = self._next_due_handle()
             if due is not None:
-                step = min(step, max(timedelta(seconds=max(due, 0.0)), MIN_STEP))
-            self.freezer.tick(step)
+                stop = max(timedelta(seconds=max(due, 0.0)), MIN_STEP)
+                if stop < step:
+                    step, why = stop, _callback_name(handle)
+            self._tick(step, why)
             async_fire_time_changed(self.hass)
             await self._drain()
             remaining -= step
@@ -502,7 +581,7 @@ class RealHASession:
             await quiesce(hass.loop)
             if not hass._tasks:
                 return
-            self.freezer.tick(timedelta(seconds=1))
+            self._tick(timedelta(seconds=1), "<drain: a tracked task is sleeping>")
             async_fire_time_changed(hass)
         await quiesce(hass.loop)
 
@@ -901,6 +980,15 @@ class RealHASession:
         if self._closed:
             return
         self._closed = True
+        try:
+            await self._close_world()
+        finally:
+            # Issue #1745: after the teardown (so the world is always cleaned up), and never over an error already
+            # propagating (that error is the finding; the step report would only bury it).
+            if sys.exc_info()[0] is None:
+                self.check_step_budget()
+
+    async def _close_world(self) -> None:
         self._drop_coalesce_recheck()
         logging.getLogger("custom_components.climate_advisor").removeHandler(self._errors)
         if self.house is not None:

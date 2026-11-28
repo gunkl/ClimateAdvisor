@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.9.94] — 2026-11-28
+
+### Internal
+- #1745 (the tests and checks only, nothing changes in your house): three guards so a slow test run is noticed the way #1743 was not. The real Home Assistant test driver now counts how often it stops the simulated clock and fails a scenario that stops far more often than its simulated time warrants, naming the timers it stopped at most, so a new always-on timer cannot make the tier several times slower unseen. When a check job runs out of time, the summary that gates a merge now says which job, how long it ran and its limit, instead of only "cancelled". Any job in a run that used more than three quarters of its time limit gets a warning annotation (the nightly run too), without ever failing the run.
+
 ## [0.9.93] — 2026-11-28
 
 ### Internal

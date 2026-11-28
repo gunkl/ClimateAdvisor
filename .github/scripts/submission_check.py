@@ -29,7 +29,10 @@ from typing import Any
 
 MARKER_PREFIX = "<!-- submission-check "
 BOT_LOGIN = "github-actions[bot]"
-SKIP_AUTHORS = {"dependabot[bot]", BOT_LOGIN}
+# The nightly auto-diagnosis opens its fix PRs as claude[bot]; the owner reviews those directly (2026-11-28), and the
+# AI review refuses bot authors anyway, so the check stays out of them entirely.
+AUTOFIX_BOT_LOGIN = "claude[bot]"
+SKIP_AUTHORS = {"dependabot[bot]", BOT_LOGIN, AUTOFIX_BOT_LOGIN}
 SKIP_LABELS = {"nightly-failure"}
 MAX_ROUNDS = 2
 

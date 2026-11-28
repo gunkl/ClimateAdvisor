@@ -195,6 +195,21 @@ def test_second_change_within_the_window_re_arms_the_confirmation():
     coord.automation_engine.handle_occupancy_away.assert_not_called()
 
 
+def test_event_that_keeps_the_pending_target_does_not_restart_the_window():
+    """A chatty toggle (attribute updates, a drop to unavailable) cannot hold off a real change for ever."""
+    coord, clock, live = _vacation_house()
+    live[_VAC] = _make_state("off")  # the real change: vacation -> home
+    _event(coord, clock, _VAC)
+    (first,) = clock.live()
+    _event(coord, clock, _VAC)  # an attribute-only update: the state is still off
+    live[_VAC] = _make_state("unavailable")  # the bridge drops out: the toggle keeps its last value (off)
+    _event(coord, clock, _VAC)
+    assert clock.live() == [first], "the window restarted on an event that is no new reading"
+    clock.fire_confirmation(coord)
+    assert coord._occupancy_mode == OCCUPANCY_HOME
+    coord.automation_engine.handle_occupancy_home.assert_called_once()
+
+
 def test_confirmation_recomputes_so_a_change_that_reverted_without_an_event_does_nothing():
     coord, clock, live = _vacation_house()
     live[_VAC] = _make_state("off")

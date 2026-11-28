@@ -89,9 +89,9 @@ Toggle entities may be any binary sensor or input boolean. The integration subsc
 
 ## State Transitions
 
-### Flow of `_async_occupancy_toggle_changed` (`coordinator.py:L2958`)
+### Flow of `_apply_confirmed_occupancy_change` (`coordinator.py`)
 
-Executes whenever any configured toggle entity fires a state-change event:
+Runs when a toggle change has held for the 60 s confirmation (Issue #1739; `_async_occupancy_toggle_changed` only arms that confirmation, see below):
 
 1. Call `_compute_occupancy_mode()` → `new_mode`
 2. If `new_mode == self._occupancy_mode`: **no-op, return immediately**
@@ -102,7 +102,7 @@ Executes whenever any configured toggle entity fires a state-change event:
 5. Set `self._occupancy_mode = new_mode`
 6. Sync to engine: `automation_engine.set_occupancy_mode(new_mode)`
 7. **Dispatch by new mode:**
-   - **VACATION** → `_cancel_occupancy_away_timer()` → `await automation_engine.handle_occupancy_vacation()` (immediate, no grace)
+   - **VACATION** → `_cancel_occupancy_away_timer()` → `await automation_engine.handle_occupancy_vacation()` (no grace beyond the 60 s confirmation)
    - **AWAY** → `_cancel_occupancy_away_timer()` → start 15-minute `async_call_later` timer; callback `_occupancy_away_timer_expired` calls `hass.async_create_task(automation_engine.handle_occupancy_away())`; timer handle stored in `_occupancy_away_timer_cancel`
    - **HOME or GUEST** → `_cancel_occupancy_away_timer()` → `await automation_engine.handle_occupancy_home()`
 8. `await _async_save_state()`
@@ -112,16 +112,16 @@ Executes whenever any configured toggle entity fires a state-change event:
 | From | Event | To | Grace | Side effects |
 |---|---|---|---|---|
 | Any | toggle → GUEST | GUEST | None | cancel away timer; `handle_occupancy_home()` |
-| Any | toggle → VACATION | VACATION | None | cancel away timer; `handle_occupancy_vacation()` immediately |
+| Any | toggle → VACATION | VACATION | None | cancel away timer; `handle_occupancy_vacation()` as soon as the change is confirmed |
 | Any | toggle → AWAY | AWAY (pending) | 15 min | start away timer and `engine.set_away_setback_pending(True)` (Issue #1433); setback fires on expiry via `handle_occupancy_away()` |
 | AWAY (pending) | 15-min timer expires | AWAY (active) | — | `set_away_setback_pending(False)`, then `handle_occupancy_away()` called via `async_create_task` |
 | AWAY (pending) | toggle → HOME | HOME | None | cancel away timer; `handle_occupancy_home()` |
 | AWAY (pending) | toggle → GUEST | GUEST | None | cancel away timer; `handle_occupancy_home()` |
-| AWAY (pending) | toggle → VACATION | VACATION | None | cancel away timer; `handle_occupancy_vacation()` immediately |
+| AWAY (pending) | toggle → VACATION | VACATION | None | cancel away timer; `handle_occupancy_vacation()` as soon as the change is confirmed |
 | Any | toggle → HOME | HOME | None | cancel away timer; `handle_occupancy_home()` |
 | Any | HA restart | (restored) | — | same-day restore reads the mode from `climate_advisor_state.json`; `async_setup()` then syncs the live toggles into the engine (Issue #1354, immediate, no away grace); away timer NOT re-armed |
 
-**A toggle change is confirmed for 60 seconds first (Issue #1739).** Occupant view: a vacation or guest switch shared with HomeKit or another system can drop out, or flip off and on again, for a moment. None of that ends your vacation or sends "Welcome home!". Every transition in the table above is acted on only after the toggles have said the same thing for `OCCUPANCY_TOGGLE_CONFIRM_SECONDS` (60 s, `const.py`, not a setting). `_async_occupancy_toggle_changed()` recomputes the mode and, if it differs from the current one, arms a 60 s `async_call_later` (`_occupancy_toggle_confirm_cancel`; a further change restarts it). When it expires `_apply_confirmed_occupancy_change()` recomputes the mode and, if it still differs, runs the transition (the former body of the toggle handler). A change that reverts inside the window cancels the timer and logs one INFO ("Occupancy toggle change reverted within 60s"); nothing else happens. A real arrival or departure therefore takes effect about 60 s late, and the 15-minute away timer starts after the confirmation (so a departure sets the setback about 16 minutes after the toggle). The pending confirmation is cancelled in `async_shutdown()`, on unload and reload, and when HA stops. It is not persisted.
+**A toggle change is confirmed for 60 seconds first (Issue #1739).** Occupant view: a vacation or guest switch shared with HomeKit or another system can drop out, or flip off and on again, for a moment. None of that ends your vacation or sends "Welcome home!". Every transition in the table above is acted on only after the toggles have said the same thing for `OCCUPANCY_TOGGLE_CONFIRM_SECONDS` (60 s, `const.py`, not a setting). `_async_occupancy_toggle_changed()` recomputes the mode and, if it differs from the current one, arms a 60 s `async_call_later` (`_occupancy_toggle_confirm_cancel`, target `_occupancy_toggle_confirm_mode`). A further event that points to another mode restarts it; an event that leaves the target unchanged (an attribute update, a toggle dropping to `unavailable` and keeping its value) does not, so a chatty entity cannot hold off a real change. When it expires `_apply_confirmed_occupancy_change()` recomputes the mode and, if it still differs, runs the transition (the former body of the toggle handler). A change that reverts inside the window cancels the timer and logs one INFO ("Occupancy toggle change reverted within 60s"); nothing else happens. A real arrival or departure therefore takes effect about 60 s late, and the 15-minute away timer starts after the confirmation (so a departure sets the setback about 16 minutes after the toggle). The pending confirmation is cancelled in `async_shutdown()`, on unload and reload, and when HA stops. It is not persisted.
 
 **`unavailable`/`unknown` keep the last value (Issue #1739).** `_is_toggle_on()` remembers each toggle's last real on/off value (`_occupancy_toggle_last_known`). A toggle that reads `unavailable`/`unknown`, or whose entity is missing, keeps that value (the WARNING stays: "keeping last known value"). A toggle that never reported a value counts as OFF, except at startup: when a same-day occupancy mode was restored, `_seed_unresolved_toggles_from_restored_mode()` seeds each toggle that has no reading with the value that mode implies (vacation toggle on for vacation, guest toggle on for guest, home toggle on for home or guest), so an unavailable vacation switch does not turn a restored vacation into a "Welcome home". A toggle that never gets a value after a restart stays on that seed until it reports.
 
@@ -266,10 +266,10 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 ## Invariants
 
 1. `_occupancy_mode` always contains one of the four valid strings: `"home"`, `"away"`, `"vacation"`, `"guest"`. The `set_occupancy_mode()` validator (`automation.py:L1126`) enforces this — invalid values log a WARNING and default to `OCCUPANCY_HOME`.
-2. The coordinator's `self._occupancy_mode` and the engine's `_occupancy_mode` are always in sync at the end of any transition. `set_occupancy_mode()` is called in the same transaction as the coordinator's own assignment (`coordinator.py:L2936`, alongside `_async_occupancy_toggle_changed()`'s own `self._occupancy_mode = new_mode`).
+2. The coordinator's `self._occupancy_mode` and the engine's `_occupancy_mode` are always in sync at the end of any transition. `set_occupancy_mode()` is called in the same transaction as the coordinator's own assignment (`coordinator.py:L2936`, alongside `_apply_confirmed_occupancy_change()`'s own `self._occupancy_mode = new_mode`). During a pending 60 s toggle confirmation (Issue #1739) both still hold the old mode.
 3. At most one away timer is pending at any time. `_cancel_occupancy_away_timer()` is always called before starting a new timer, and before dispatching VACATION, HOME, or GUEST handlers.
 4. `handle_occupancy_away()` is never called directly by the coordinator — it is always routed through either the timer callback or `apply_classification()`. This preserves the 15-minute grace guarantee.
-5. `handle_occupancy_vacation()` is always called immediately on the vacation toggle (no grace). There is no equivalent grace timer for vacation mode. As of Issue #505, it is also called from `apply_classification()`/`handle_bedtime()`/`handle_pre_cool()`'s `DEFER_OCCUPANCY` branches on every subsequent cycle while vacation mode is active — not just once at toggle time.
+5. `handle_occupancy_vacation()` is called as soon as the vacation toggle change is confirmed (the 60 s toggle confirmation of Issue #1739, no further grace). There is no equivalent of the 15-minute away timer for vacation mode. As of Issue #505, it is also called from `apply_classification()`/`handle_bedtime()`/`handle_pre_cool()`'s `DEFER_OCCUPANCY` branches on every subsequent cycle while vacation mode is active — not just once at toggle time.
 6. GUEST mode is functionally identical to HOME at the automation handler level. The distinction is tracked in `_occupancy_mode` for reporting and briefing, but `handle_occupancy_home()` is the only handler invoked for both.
 7. Away duration (`_today_record.occupancy_away_minutes`) is only incremented on return from a non-home mode. If HA restarts mid-departure, the duration from `_occupancy_away_since` to restart is not counted (timer is not re-armed, so the next toggle change that returns to HOME accumulates from `_occupancy_away_since` which was persisted).
 8. The `_set_temperature_for_mode()` safety net cannot recurse: away and vacation handlers arm the setback band via `select_comfort_band()`/`_apply_comfort_band()` directly (see the "Accuracy correction" note above the handler sections), never routing back through `_set_temperature_for_mode()`.
@@ -298,7 +298,8 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 - [`_is_toggle_on`](../custom_components/climate_advisor/coordinator.py#L2848) — reads toggle entity state with unavailable=OFF and XOR invert
 - [`_compute_occupancy_mode`](../custom_components/climate_advisor/coordinator.py#L2862) — resolves toggle booleans, delegates priority to `occupancy_priority.decide_occupancy_priority()` (Issue #744)
 - [`_cancel_occupancy_away_timer`](../custom_components/climate_advisor/coordinator.py#L2907) — safe timer cancellation
-- [`_async_occupancy_toggle_changed`](../custom_components/climate_advisor/coordinator.py#L3131) — toggle event listener and dispatch orchestrator
+- [`_async_occupancy_toggle_changed`](../custom_components/climate_advisor/coordinator.py) — toggle event listener; arms the 60 s confirmation (Issue #1739)
+- [`_apply_confirmed_occupancy_change`](../custom_components/climate_advisor/coordinator.py) — dispatch orchestrator once a toggle change is confirmed
 - [`OCCUPANCY_HOME/AWAY/VACATION/GUEST`](../custom_components/climate_advisor/const.py#L255) — mode constants
 - [`occupancy_priority.decide_occupancy_priority`](../custom_components/climate_advisor/occupancy_priority.py) — pure priority-resolution leaf, extracted Issue #744 (not flag-gated — see module docstring)
 - [`occupancy_fsm.decide_away_vacation_dispatch`, `decide_home_dispatch`](../custom_components/climate_advisor/occupancy_fsm.py) — stateless dispatch FSM, Issue #744; unconditionally authoritative since Phase 6 Step 6 (Issue #757) removed the `AutomationEngine._occupancy_fsm_authoritative` cutover flag

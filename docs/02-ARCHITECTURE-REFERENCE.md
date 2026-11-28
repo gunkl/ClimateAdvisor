@@ -211,7 +211,7 @@ One day's tracked data: what was recommended, what actually happened, outcomes (
 |--------|-------|---------|
 | Door/window sensors | State change (open/closed) | `_async_door_window_changed` |
 | Climate entity | State change (temp, mode) | `_async_thermostat_changed` |
-| Occupancy toggle entities (home/vacation/guest) | State change (on/off); acted on after it has held 60 s (Issue #1739) | `_async_occupancy_changed` |
+| Occupancy toggle entities (home/vacation/guest) | State change (on/off); acted on after it has held 60 s (Issue #1739) | `_async_occupancy_toggle_changed` → `_apply_confirmed_occupancy_change` |
 
 ## Event Log Retention (Issue #432)
 
@@ -801,7 +801,7 @@ unloads the way HA does via `build_coordinator.async_unload_entry_like_ha()`.
 | `handle_occupancy_guest(active: bool)` | Guest toggle changes | `active=True`: sets comfort setpoint immediately, disables all setback paths. `active=False`: re-evaluates current occupancy state and applies appropriate setpoint. |
 | `handle_occupancy_home(home: bool)` | Home/Away toggle changes | Delegates to existing away/return logic with the configured setback delay. |
 
-Priority enforcement lives in `_async_occupancy_changed` (coordinator): it reads all three toggle states, resolves the winner using Guest > Vacation > Home/Away > default, and dispatches to the appropriate handler above.
+Priority enforcement lives in `_compute_occupancy_mode` (coordinator, via `occupancy_priority.py`): it reads all three toggle states (an `unavailable`/`unknown`/missing toggle keeps its last real value, Issue #1739) and resolves the winner using Guest > Vacation > Home/Away > default. `_async_occupancy_toggle_changed` arms a 60 s confirmation when the winner changes, and `_apply_confirmed_occupancy_change` dispatches to the appropriate handler above once it has held (Issue #1739).
 
 The toggle state is persisted via `StatePersistence` and survives HA restarts. It is also exposed in the dashboard API (`/api/climate_advisor/status`) and debug state.
 

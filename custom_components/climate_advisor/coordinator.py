@@ -1907,6 +1907,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._occupancy_mode_restored: bool = False  # a same-day occupancy mode was restored from disk
         self._occupancy_toggle_confirm_cancel: Any | None = None
         self._occupancy_toggle_confirm_entity: str | None = None
+        self._occupancy_toggle_confirm_mode: str | None = None  # the mode the pending confirmation would move to
 
         # Issue #899: precise T_start guard timer for away/vacation TOU pre-conditioning —
         # stops precool/preheat exactly when the TOU window begins, rather than waiting up
@@ -3988,6 +3989,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Occupancy toggle confirmation cancelled")
         self._occupancy_toggle_confirm_cancel = None
         self._occupancy_toggle_confirm_entity = None
+        self._occupancy_toggle_confirm_mode = None
 
     def _cancel_tou_av_stop_timer(self) -> None:
         """Cancel any pending away/vacation TOU T_start guard timer (Issue #899).
@@ -4303,7 +4305,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             return  # No effective change
 
-        self._cancel_occupancy_toggle_confirm()  # a further event restarts the window
+        if pending and getattr(self, "_occupancy_toggle_confirm_mode", None) == new_mode:
+            # An event that leaves the pending target unchanged (an attribute update, a toggle dropping to
+            # unavailable and keeping its last value, a toggle the priority ignores) is no new reading: the window
+            # keeps running, so a chatty entity cannot hold off a real change for ever.
+            _LOGGER.debug(
+                "Occupancy toggle event: confirmation of %s -> %s already pending (trigger: %s)",
+                self._occupancy_mode,
+                new_mode,
+                entity_id,
+            )
+            return
+
+        self._cancel_occupancy_toggle_confirm()  # a change to another mode restarts the window
         _LOGGER.info(
             "Occupancy toggle change %s -> %s waiting %ds for confirmation (trigger: %s)",
             self._occupancy_mode,
@@ -4317,9 +4331,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._occupancy_toggle_confirm_cancel = None
             trigger = self._occupancy_toggle_confirm_entity or "unknown"
             self._occupancy_toggle_confirm_entity = None
+            self._occupancy_toggle_confirm_mode = None
             self._spawn(self._apply_confirmed_occupancy_change(trigger))
 
         self._occupancy_toggle_confirm_entity = entity_id
+        self._occupancy_toggle_confirm_mode = new_mode
         self._occupancy_toggle_confirm_cancel = _call_later(
             self,
             OCCUPANCY_TOGGLE_CONFIRM_SECONDS,

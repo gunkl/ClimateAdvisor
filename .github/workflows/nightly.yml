@@ -378,7 +378,10 @@ jobs:
           passed=" seeds generated-days waiver-ledger surfaces ha-lifecycle "
           closed=0
           for num in $(gh issue list --state open --label nightly-failure --limit 100 --json number --jq '.[].number'); do
-            body=$(gh issue view "$num" --json body --jq .body)
+            # a failed read leaves the issue open (never closed on what could not be checked) and the loop goes on
+            if ! body=$(gh issue view "$num" --json body --jq .body); then
+              echo "#$num: could not read the issue; left open."; continue
+            fi
             # only issues this workflow filed: the hidden signature and run markers
             if ! grep -q '<!-- nightly-signature: ' <<< "$body" || ! grep -q '<!-- nightly-run: ' <<< "$body"; then
               echo "#$num: no nightly-signature/nightly-run marker, not filed by this workflow; left open."; continue
@@ -387,8 +390,12 @@ jobs:
             if grep -q '^- `promise ' <<< "$body"; then
               echo "#$num: seed-specific promise hit; left open (replay its day_seed to confirm a fix)."; continue
             fi
-            # a person was asked to look at it
-            if gh issue view "$num" --json labels --jq '.labels[].name' | grep -qx 'needs-human'; then
+            # a person was asked to look at it. The labels are read into a variable, not piped into grep -q: under
+            # pipefail a failed read, or gh killed by SIGPIPE when grep -q exits early, would read as "not labelled".
+            if ! labels=$(gh issue view "$num" --json labels --jq '.labels[].name'); then
+              echo "#$num: could not read its labels; left open."; continue
+            fi
+            if grep -qx 'needs-human' <<< "$labels"; then
               echo "#$num: labelled needs-human; left open."; continue
             fi
             # "**Jobs:** seeds=success, generated-days=failure, ...": the jobs that failed or were cancelled

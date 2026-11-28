@@ -6,7 +6,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 ## [0.9.91] — 2026-11-28
 
 ### Internal
-- #1740 (the nightly checks only, nothing changes in your house): the nightly simulation of generated household days now runs as four parallel jobs instead of one, because the single job reached its two-hour limit on 2026-11-26. The four together run exactly the same households and the same checks. A nightly job that runs out of time is now reported as a timeout, with how long it ran, instead of "no failing test line found", and gets the automatic diagnosis a failure gets. A nightly-failure issue is closed, with a link to the passing run, when a later nightly run is fully green.
+- #1740 (the nightly checks only, nothing changes in your house): the nightly simulation of generated household days now runs as four parallel jobs instead of one, because the single job reached its two-hour limit on 2026-11-26. The four together run exactly the same households and the same checks. A nightly job that runs out of time is now reported as a timeout, with how long it ran, instead of "no failing test line found", and gets the automatic diagnosis a failure gets. A nightly-failure issue is closed, with a link to the passing run, when a later nightly run is fully green, unless it is for a household-promise hit (those depend on one generated day, so a green night does not show them fixed) or is labelled needs-human.
 
 ## [0.9.90] — 2026-11-27
 

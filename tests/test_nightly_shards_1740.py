@@ -199,7 +199,12 @@ case "$1 $2" in
   "run view") cat "$d/log_$3_$4.txt" 2>/dev/null || true ;;
   "issue list") cat "$d/issue_list.txt" 2>/dev/null || true ;;
   "issue view")
-    if [ "${5:-}" = labels ]; then cat "$d/labels_$3.txt" 2>/dev/null || true; else cat "$d/body_$3.txt"; fi ;;
+    # fail_<n>_<field>: that read fails like an API error; slow_labels_<n>: one write per label (as gh does), slowly
+    [ -e "$d/fail_$3_$5" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
+    if [ "${5:-}" = labels ]; then
+      while IFS= read -r l; do printf '%s\n' "$l"; [ -e "$d/slow_labels_$3" ] && sleep 0.3; done \
+        < "$d/labels_$3.txt" 2>/dev/null || true
+    else cat "$d/body_$3.txt"; fi ;;
   "issue create") printf '%s\n' "$*" >> "$d/created.txt" ;;
   "issue comment") printf '%s\n' "$*" >> "$d/commented.txt" ;;
   "issue close") printf '%s\n' "$*" >> "$d/closed.txt" ;;
@@ -405,6 +410,22 @@ def test_a_green_run_leaves_seed_specific_promise_hits_and_needs_human_issues_op
     closed, commented = _close(tmp_path, {20: _FILED, 21: promise, 22: _FILED})
     assert re.findall(r"issue close (\d+) --reason completed", closed) == ["20"]
     assert "21 " not in commented and "22 " not in commented
+
+
+@_SHELL
+def test_a_needs_human_label_or_an_unreadable_issue_is_never_closed(tmp_path):
+    # 30: needs-human with gh writing each label separately - a `gh ... | grep -q` under pipefail read SIGPIPE as
+    # "not labelled"; 31: the label read fails; 32: the body read fails. Each is left open, and the loop goes on
+    # to close 33.
+    fake = tmp_path / "fake"
+    fake.mkdir(exist_ok=True)
+    (fake / "labels_30.txt").write_text("bug\nneeds-human\nnightly-failure\n", encoding="utf-8")
+    (fake / "slow_labels_30").write_text("", encoding="utf-8")
+    (fake / "fail_31_labels").write_text("", encoding="utf-8")
+    (fake / "fail_32_body").write_text("", encoding="utf-8")
+    closed, commented = _close(tmp_path, {30: _FILED, 31: _FILED, 32: _FILED, 33: _FILED})
+    assert re.findall(r"issue close (\d+) --reason completed", closed) == ["33"]
+    assert all(f"{n} " not in commented for n in (30, 31, 32))
 
 
 @_SHELL

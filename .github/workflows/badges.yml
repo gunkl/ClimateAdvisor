@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Unit tier with coverage
         continue-on-error: true
@@ -64,7 +64,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Real-HA tier with coverage
         continue-on-error: true
@@ -98,7 +98,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Install test dependencies (coverage)
         run: uv sync --locked --only-group test

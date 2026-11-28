@@ -70,7 +70,7 @@ jobs:
 
       - name: Set up uv (uv reads the Python version from .python-version)
         if: ${{ steps.find.outputs.issue }}
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Install the test environment
         if: ${{ steps.find.outputs.issue }}

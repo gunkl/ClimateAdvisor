@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Install test dependencies
         run: uv sync --locked --only-group test
@@ -75,7 +75,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Run unit tests (slice ${{ matrix.shard }} of 8)
         run: |
@@ -112,7 +112,7 @@ jobs:
           fetch-depth: 0  # diffs against origin/main
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Run changed unit test files in isolation
         run: python3 scripts/test_changed_isolated.py --base "origin/${{ github.base_ref || github.ref_name }}" --strict
@@ -134,7 +134,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Install test dependencies (coverage)
         run: uv sync --locked --only-group test
@@ -170,7 +170,7 @@ jobs:
           fetch-depth: 0  # compares .strict-typing and the module list with the base branch
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Strict typing ratchet (mypy)
         run: >
@@ -223,7 +223,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up uv (uv reads the Python version from .python-version)
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Run real-HA lifecycle tests (slice ${{ matrix.shard }} of 4)
         run: |  # uv run --locked --only-group test-ha (own venv)

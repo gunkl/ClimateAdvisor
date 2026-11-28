@@ -383,6 +383,14 @@ jobs:
             if ! grep -q '<!-- nightly-signature: ' <<< "$body" || ! grep -q '<!-- nightly-run: ' <<< "$body"; then
               echo "#$num: no nightly-signature/nightly-run marker, not filed by this workflow; left open."; continue
             fi
+            # a household-promise hit is seed-specific: tonight's fresh seeds passing does not show it fixed
+            if grep -q '^- `promise ' <<< "$body"; then
+              echo "#$num: seed-specific promise hit; left open (replay its day_seed to confirm a fix)."; continue
+            fi
+            # a person was asked to look at it
+            if gh issue view "$num" --json labels --jq '.labels[].name' | grep -qx 'needs-human'; then
+              echo "#$num: labelled needs-human; left open."; continue
+            fi
             # "**Jobs:** seeds=success, generated-days=failure, ...": the jobs that failed or were cancelled
             failed=$(grep -oE '^\*\*Jobs:\*\* .*' <<< "$body" | grep -oE '[a-z-]+=(failure|cancelled)' | cut -d= -f1 || true)
             if [ -z "$failed" ]; then

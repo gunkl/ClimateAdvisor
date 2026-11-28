@@ -198,7 +198,8 @@ case "$1 $2" in
   "api repos/"*) cat "$d/jobs.tsv" ;;
   "run view") cat "$d/log_$3_$4.txt" 2>/dev/null || true ;;
   "issue list") cat "$d/issue_list.txt" 2>/dev/null || true ;;
-  "issue view") cat "$d/body_$3.txt" ;;
+  "issue view")
+    if [ "${5:-}" = labels ]; then cat "$d/labels_$3.txt" 2>/dev/null || true; else cat "$d/body_$3.txt"; fi ;;
   "issue create") printf '%s\n' "$*" >> "$d/created.txt" ;;
   "issue comment") printf '%s\n' "$*" >> "$d/commented.txt" ;;
   "issue close") printf '%s\n' "$*" >> "$d/closed.txt" ;;
@@ -391,6 +392,19 @@ def test_a_green_run_closes_only_issues_the_workflow_filed_for_jobs_that_just_pa
     assert sorted(re.findall(r"issue close (\d+) --reason completed", closed)) == ["10", "14"]
     assert "https://example/runs/900" in commented and "nightly-closed-by: 900" in commented
     assert "10 " in commented and "14 " in commented and "11 " not in commented and "15 " not in commented
+
+
+@_SHELL
+def test_a_green_run_leaves_seed_specific_promise_hits_and_needs_human_issues_open(tmp_path):
+    promise = _FILED.replace(
+        "<!-- nightly-signature",
+        "**What failed**\n- `promise comfort_kept day_seed=12345`\n\n<!-- nightly-signature",
+    )
+    (tmp_path / "fake").mkdir(exist_ok=True)
+    (tmp_path / "fake" / "labels_22.txt").write_text("bug\nnightly-failure\nneeds-human\n", encoding="utf-8")
+    closed, commented = _close(tmp_path, {20: _FILED, 21: promise, 22: _FILED})
+    assert re.findall(r"issue close (\d+) --reason completed", closed) == ["20"]
+    assert "21 " not in commented and "22 " not in commented
 
 
 @_SHELL

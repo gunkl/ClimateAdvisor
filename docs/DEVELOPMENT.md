@@ -18,7 +18,7 @@ Home Assistant is covered in [SSH Setup](SSH-SETUP.md).
 | How do I run the real-Home-Assistant tier, build the house fixture, prove a test fails without the fix, or update snapshots? | `python scripts/test.py ha` (WSL on Windows). Use the `make_house` fixture in `tests_ha/house/`. `scripts/revert_proof.py` proves an escaped-bug test fails on the pre-fix commit. | [Real-HA tier](DEVELOPMENT.md#real-ha-tier-the-house-markers-revert-proof-snapshots-step-2-issue-1127) |
 | How do I run the simulator and its goldens? | `python tools/simulate.py` drives the real `AutomationEngine` (single-engine harness, #236). Goldens are locked by `MANIFEST.json`, and only `--sign` after human review changes them. | [§Simulator](DEVELOPMENT.md#simulator) |
 | How do I check that background work cannot freeze Home Assistant? | Classify every new executor job in `tests/test_executor_job_registry_1728.py`. Run the loop-lag test with `python3 scripts/test.py ha tests_ha/test_loop_responsiveness_1728.py -n 0 -s -o log_level=WARNING`. Run `python tools/simulate.py --generate 5 --seeds 1 --perf-report` for the CPU report. Issue #1728. | [§Freeze guards](DEVELOPMENT.md#freeze-guards-issue-1728) |
-| What does the nightly run, and how do I hear about a failure? | It runs fresh-seed generated days (P1-P7, then P8) and the full real-HA tier. Each seed prints its timing and `peak_rss`. When any job fails, `report-failure` files an issue for that failure (label `nightly-failure`; a repeat of the same failure comments on it), and `nightly-autofix.yml` has Claude diagnose it and, when it can show a fix, open a draft PR for review. | [§Nightly](DEVELOPMENT.md#nightly) |
+| What does the nightly run, and how do I hear about a failure? | It runs fresh-seed generated days (P1-P7 in four parallel shards, then P8) and the full real-HA tier. Each seed prints its timing and `peak_rss`. When any job fails, `report-failure` files an issue for that failure (label `nightly-failure`; a repeat of the same failure comments on it), and `nightly-autofix.yml` has Claude diagnose it and, when it can show a fix, open a draft PR for review. | [§Nightly](DEVELOPMENT.md#nightly) |
 | Where do the README's test badges come from? | `badges.yml` runs both tiers with coverage and JUnit XML once a day (07:37 UTC) and by hand; `tools/badges.py` turns the reports and the real-HA ledger into shields.io endpoint JSON on the `badges` branch. The nightly badge is GitHub's workflow status. Issue #1343. | [§Test badges](DEVELOPMENT.md#test-badges) |
 | How do I keep a module's coverage from failing the coverage ratchet? | CI job `coverage` combines both tiers' coverage and fails when a module drops below its floor in `tools/coverage_floors.json` (or a new module is under 95 %). Raise floors with `python tools/coverage_ratchet.py update reports/coverage.json`. Issue #1644. | [§Coverage and typing ratchets](DEVELOPMENT.md#coverage-and-typing-ratchets) |
 | How do I pass the strict-typing check? | CI job `typing` runs strict mypy (Home Assistant's settings, `[tool.mypy]`); modules in `.strict-typing` must stay clean, newly clean and new modules must be listed. Run `uv run --locked --only-group test-ha python tools/typing_ratchet.py [--update]`. Issue #1645. | [§Coverage and typing ratchets](DEVELOPMENT.md#coverage-and-typing-ratchets) |
@@ -181,7 +181,7 @@ python tools/simulate.py --generate 5 --seeds 1 --perf-report            # write
 python tools/simulate.py --generate 5 --seeds 1 --perf-report out.json --perf-lines
 ```
 
-It prints a table at the end of the run and writes JSON. The tables are executor jobs (thread CPU, flagged over 500 ms), loop callbacks (flagged over 10 ms, highlighted over 20 ms), scheduler tasks and worker jobs. GC pauses are excluded. `--perf-lines` also counts lines run in a few hot functions (slower). The probe defers GC, so with `--perf-report` the run's `peak_rss` reads about 300 MB high: read memory from a run without it. The nightly `generated-days` job uploads the file as the `perf-report` artifact. See the [Sim Harness Brief](sim-harness-brief.md#perf-probe-report-only-issue-1728).
+It prints a table at the end of the run and writes JSON. The tables are executor jobs (thread CPU, flagged over 500 ms), loop callbacks (flagged over 10 ms, highlighted over 20 ms), scheduler tasks and worker jobs. GC pauses are excluded. `--perf-lines` also counts lines run in a few hot functions (slower). The probe defers GC, so with `--perf-report` the run's `peak_rss` reads about 300 MB high: read memory from a run without it. The nightly `generated-days` shards each upload their file as the `perf-report-<shard>` artifact. See the [Sim Harness Brief](sim-harness-brief.md#perf-probe-report-only-issue-1728).
 
 ## Simulator
 
@@ -195,6 +195,9 @@ python tools/simulate.py -s NAME -v       # one scenario, with its decision time
 python tools/simulate.py --check-integrity
 python tools/simulate.py --generate 20 --seeds 1 2 --waiver-ledger tools/sim_harness/nightly_waivers.json --issue-state offline
 python tools/simulate.py --generate-day <day_seed>   # replay one generated day from a failing run's log
+# one nightly shard's share, then the whole run's ledger verdict (Issue #1740):
+python tools/simulate.py --generate 20 --seeds 1 3 --waiver-ledger tools/sim_harness/nightly_waivers.json --ledger-defer-stale --hits-out shard_hits.json
+python tools/simulate.py --judge-hits shard_hits.json other_shard_hits.json --waiver-ledger tools/sim_harness/nightly_waivers.json
 ```
 
 Goldens in `tools/simulations/golden/` are locked. Each file's hash is signed into `MANIFEST.json`, and the pre-commit
@@ -246,17 +249,19 @@ regenerated, because CI uses `--locked`.
 | Job | What it does |
 |---|---|
 | `seeds` | Picks fresh master seeds once and prints them, so every job judges the same seeds and a failure can be replayed. |
-| `generated-days` | Runs `simulate.py --generate <days> --seeds ...`, judged by the household promises P1-P7 and the waiver ledger (`--issue-state github`). It prints each seed's timing and `peak_rss`: read these before raising the 120-minute cap. Failing scenarios are uploaded as the `generated-failures` artifact. It also writes `perf_report.json` and uploads it as the `perf-report` artifact (report only, #1728). The probe defers GC, so this job's `peak_rss` reads about 300 MB high; to judge memory, run a seed without `--perf-report`. |
+| `generated-days (shard N/4)` | Four parallel jobs (Issue #1740; the single job reached its 120-minute cap on 2026-11-26). The `seeds` job deals the master seeds round-robin into four lists (shard k takes seeds k, k+4, k+8, ... of the list; with the default 12 seeds that is 3 each, and a shard with no seed runs nothing and passes), so the four shards run exactly the seeds x days of one unsharded run and every seed runs whole. Each shard runs `simulate.py --generate <days> --seeds <its seeds>`, judged by the household promises P1-P7 and the waiver ledger (`--issue-state github`), and keeps its own 120-minute cap (about 4x headroom). It prints each seed's timing and `peak_rss`: read these before raising the cap. Failing scenarios are uploaded as `generated-failures-<shard>`; `perf_report.json` as `perf-report-<shard>` (report only, #1728). The probe defers GC, so `peak_rss` reads about 300 MB high; to judge memory, run a seed without `--perf-report`. A shard also saves its hard hits (`--hits-out`, artifact `shard-hits-<shard>`) and defers the ledger's stale-entry verdict (`--ledger-defer-stale`): a shard that did not reach a waiver's hit must not call it stale. |
+| `waiver-ledger` | Runs only when every shard passed. Merges the shards' hits (`simulate.py --judge-hits`) and judges the waiver ledger over the whole run, stale entries included. Fails if a shard that had seeds left no hits file. |
 | `surfaces` | Runs `simulate.py --surfaces --generate 50` on the same seeds (P8, ratcheted by `tools/simulations/surface_divergences.json`). |
 | `ha-lifecycle` | Runs the full real-HA tier. |
-| `report-failure` | Runs when any job failed or was cancelled. It files one issue per distinct failure: title "Nightly failure <date>: <jobs>", labels `bug`, `nightly-failure`, `severity: medium`, the failing tests (pytest `FAILED`/`ERROR` lines) and broken household promises (`UNWAIVED <promise> day_seed=<n>`). The signature is the failing tests plus the promise NAMES (seeds change every night), so the same failure on a later night comments on the open issue instead of filing a new one. Hidden markers `nightly-signature` and `nightly-run` tie the issue to the run. |
+| `report-failure` | Runs when any job failed or was cancelled. It files one issue per distinct failure: title "Nightly failure <date>: <jobs>", labels `bug`, `nightly-failure`, `severity: medium`, the failing tests (pytest `FAILED`/`ERROR` lines) and broken household promises (`UNWAIVED <promise> day_seed=<n>`). A job that hit its time limit is "cancelled"; the issue says "`<job>` timed out or was cancelled after 2h 0m 3s" (from the run's jobs API) and the title ends "(timed out)". The signature is the failing tests plus the promise NAMES (seeds change every night) plus `timeout:<job>` for each cancelled job with its ` (shard N/4)` suffix removed, so the same failure on a later night, or a timeout of any shard, comments on the open issue instead of filing a new one, and a timeout never shares an issue with a test failure. Hidden markers `nightly-signature` and `nightly-run` tie the issue to the run. |
+| `close-resolved` | Runs only when all five other jobs succeeded, on the scheduled run (or a manual run of `main` with the default 12 seeds and 250 days). Open issues with the `nightly-failure` label and both hidden markers (so only ones the workflow filed) whose failed jobs (from the issue's "Jobs" line) are all jobs of this run get a comment linking the green run and are closed as completed; each close is logged. An issue for a household-promise hit (seed-specific, so a green night with fresh seeds does not show it fixed) or one labelled `needs-human` stays open, as does anything it cannot read or that was not filed by the workflow. It needs only `issues: write`. |
 
 To replay a failure, run `python tools/simulate.py --replay-generated <file>` on the downloaded artifact, or
 `--generate-day <day_seed> --profile <profile>` with the values from the log.
 
 ### Automatic diagnosis (`nightly-autofix.yml`)
 
-When the nightly run finishes with a failure, `nightly-autofix.yml` finds that run's `nightly-failure` issue (by its
+When the nightly run finishes with a failure or is cancelled (a job over its time limit cancels the run; Issue #1740), `nightly-autofix.yml` finds that run's `nightly-failure` issue (by its
 `nightly-run` marker; it skips when an open PR already says `Fixes #N`) and runs Claude (`anthropics/claude-code-action`,
 logged in by workload identity federation, see below) with the project's investigation method: docs first, then the failed logs and a
 local reproduction, the root cause with evidence, the regression origin, and the mirror check. Claude posts one
@@ -264,7 +269,10 @@ plain-English diagnosis comment on the issue. Only when it can demonstrate a fix
 without it, the version bump, CHANGELOG, fix_history, translations, `tools/validate.py`) does it open a **draft** PR
 whose body starts "Fixes #N."; otherwise it labels the issue `needs-human`. It never merges, deploys, pushes to `main`,
 edits workflows or goldens, or adds AI attribution: the owner reviews the draft and decides. Run it by hand for one
-issue with **Actions → Nightly failure auto-diagnosis → Run workflow** (the issue number).
+issue with **Actions → Nightly failure auto-diagnosis → Run workflow** (the issue number). For a timeout the prompt
+tells Claude the diagnosis is about runtime: which job and shard, how long it ran against earlier runs (`gh run list` /
+`gh run view --json jobs`), and what grew (per-seed timings, the `perf-report-<shard>` artifact, recent changes). It
+cannot edit workflows, so a raised cap or more shards is a proposal in the comment. Its permissions are unchanged.
 
 **When the diagnosis itself cannot run** (Issue #1625). The action hides Claude's output because the repo is public, so
 a failed Claude step used to leave only "is_error:true" in the log. A follow-up step now runs

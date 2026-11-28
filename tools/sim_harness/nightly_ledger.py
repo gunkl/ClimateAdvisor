@@ -213,8 +213,12 @@ def evaluate(
     *,
     today: date,
     issue_states: IssueStates,
+    check_stale: bool = True,
 ) -> Evaluation:
-    """Judge a run's hard hits (``(day_seed, ProbeHit)``) against the ledger.  Pure apart from ``issue_states``."""
+    """Judge a run's hard hits (``(day_seed, ProbeHit)``) against the ledger.  Pure apart from ``issue_states``.
+
+    ``check_stale=False`` (Issue #1740: one shard of a sharded run) skips the "no hit matches this entry" verdict,
+    which only means something over the whole run; the union of the shards' hits is judged with it on afterwards."""
     ev = Evaluation()
     live: list[dict] = []
     states, lookup_problems = issue_states.states(e["issue"] for e in ledger)
@@ -253,7 +257,7 @@ def evaluate(
         ev.waived.setdefault(covering[0]["id"], []).append((day_seed, hit))
         used.add(covering[0]["id"])
     for e in live:
-        if e["id"] not in used:
+        if check_stale and e["id"] not in used:
             ev.problems.append(
                 f"stale waiver {e['id']} (issue #{e['issue']}): no hit in this run matches it - "
                 "the bug is fixed or this run did not reach it; remove the entry"

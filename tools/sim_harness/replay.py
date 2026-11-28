@@ -22,6 +22,7 @@ import resource
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from tools.sim_harness.generator import (
     FAILURES_DIR,
@@ -154,8 +155,14 @@ def cli_generate(
     ledger_path: str | None = None,
     issue_state: str = "offline",
     issue_state_file: str | None = None,
+    hits_out: str | None = None,
+    defer_stale: bool = False,
 ) -> int:
     """Run ``days`` generated days for each master seed; exit 1 if any hard promise broke or any day crashed.
+
+    Issue #1740 (the nightly runs this in 4 shards, each a subset of the master seeds): ``hits_out`` writes this run's
+    hard hits as JSON for ``cli_judge_hits``, and ``defer_stale`` leaves the ledger's stale-entry verdict to that
+    merge (a shard that did not reach an entry's hit must not call it stale).
 
     Issue #1153: with ``ledger_path`` the hard hits are judged against the strict nightly waiver ledger
     (``nightly_ledger.py``).  A hit a live entry covers is reported, not failed; an unlisted hit, an
@@ -193,9 +200,47 @@ def cli_generate(
             groups[k] = groups.get(k, 0) + 1
         for (promise, fp), n in sorted(groups.items(), key=lambda kv: -kv[1])[:10]:
             print(f"  {n:4d} x {promise}: {fp}")
+    if hits_out:
+        write_hits(all_hits, hits_out)
     if ledger_path is None:
         return 1 if (bad or crashed) else 0
-    return judge_with_ledger(all_hits, ledger_path, issue_state, issue_state_file, crashed)
+    return judge_with_ledger(all_hits, ledger_path, issue_state, issue_state_file, crashed, check_stale=not defer_stale)
+
+
+def write_hits(all_hits: list[tuple[int, object]], path: str) -> None:
+    """Issue #1740: save the hard hits a ledger needs (day seed, promise, mechanism, detail) as JSON."""
+    rows = [
+        {"day_seed": ds, "promise": h.promise, "mechanism": getattr(h, "mechanism", None), "detail": h.detail}  # type: ignore[attr-defined]
+        for ds, h in all_hits
+    ]
+    Path(path).write_text(json.dumps({"hits": rows}, sort_keys=True), encoding="utf-8")
+
+
+def cli_judge_hits(
+    files: list[str],
+    ledger_path: str,
+    issue_state: str = "offline",
+    issue_state_file: str | None = None,
+) -> int:
+    """Issue #1740: judge the UNION of several shards' saved hits against the ledger, stale check included.
+
+    Fails (1) on a missing or unreadable file, so a lost shard file can never turn into a green verdict."""
+    all_hits: list[tuple[int, object]] = []
+    for f in files:
+        try:
+            rows = json.loads(Path(f).read_text(encoding="utf-8"))["hits"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"cannot read hits file {f}: {type(exc).__name__}: {exc}")
+            return 1
+        all_hits.extend(
+            (
+                int(r["day_seed"]),
+                SimpleNamespace(promise=r["promise"], mechanism=r["mechanism"], detail=r["detail"]),
+            )
+            for r in rows
+        )
+    print(f"merged {len(all_hits)} hard hit(s) from {len(files)} shard file(s)")
+    return judge_with_ledger(all_hits, ledger_path, issue_state, issue_state_file, 0)
 
 
 def judge_with_ledger(
@@ -206,6 +251,7 @@ def judge_with_ledger(
     crashed: int,
     *,
     today: date | None = None,
+    check_stale: bool = True,
 ) -> int:
     """Apply the nightly waiver ledger to a whole run and print the verdict; 1 = red."""
     from custom_components.climate_advisor.invariant_watchdog import PROMISES  # noqa: PLC0415
@@ -218,7 +264,9 @@ def judge_with_ledger(
         repo=os.environ.get("GITHUB_REPOSITORY"),
         token=os.environ.get("GITHUB_TOKEN"),
     )
-    ev = nl.evaluate(all_hits, ledger, today=today or datetime.now(UTC).date(), issue_states=states)
+    ev = nl.evaluate(
+        all_hits, ledger, today=today or datetime.now(UTC).date(), issue_states=states, check_stale=check_stale
+    )
     print(f"waiver ledger {ledger_path}: {len(ledger)} entries, issue state={issue_state}")
     for line in nl.format_evaluation(ev, ledger):
         print(line)

@@ -5,6 +5,9 @@ name: Nightly failure auto-diagnosis
 # when it finds a fix it can show is right -- open a DRAFT pull request for review. Nothing merges or deploys
 # automatically: the owner reviews, and approves (or not).
 #
+# Issue #1740: a nightly job that hit its time limit makes the run "cancelled", not "failure"; that is diagnosed too (as a
+# runtime question, see the prompt).
+#
 # Triggered by the nightly run completing (an issue created with GITHUB_TOKEN cannot trigger workflows itself), or
 # by hand for one issue (Actions -> Nightly failure auto-diagnosis -> Run workflow -> the issue number).
 
@@ -24,7 +27,7 @@ concurrency:
 
 jobs:
   diagnose:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'failure' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'cancelled' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -128,6 +131,23 @@ jobs:
                  without the fix, housekeeping), so it passes the submission check (CONTRIBUTING.md).
                If you cannot demonstrate a fix, open no PR: comment the diagnosis and run
                `gh issue edit ${{ steps.find.outputs.issue }} --add-label needs-human`.
+
+            A TIMEOUT is a failure too. If the issue says a job "timed out or was cancelled after <duration>" (the run
+            is then "cancelled", and `--log-failed` may show nothing), the diagnosis is about RUNTIME, not a test:
+            - which job and which shard (the generated-days job is 4 shards, "generated-days (shard N/4)", each with
+              its own 120-minute cap; the per-seed timing lines `master_seed=...: N days in S s` and `peak_rss` are in
+              its log: `gh run view ${{ steps.find.outputs.run_id }} --log --job <job id>`);
+            - how long it ran and how that compares with earlier runs: `gh run list --workflow nightly.yml
+              --limit 14 --json databaseId,conclusion,createdAt` then
+              `gh run view <id> --json jobs --jq '.jobs[] | [.name, .conclusion, .startedAt, .completedAt] | @tsv'`;
+              say whether it is a slow runner (the same seeds took longer than before), a shard that drew
+              unusually slow days, or growth in the code's per-day cost;
+            - what grew: find the change that made a day slower (`git log` over tools/sim_harness/ and
+              custom_components/climate_advisor/ since the last run with normal timings; the perf-report-<shard>
+              artifact lists CPU per executor job and loop callback), and a proposal (a faster path, a fewer-days
+              default, more shards). Raising a timeout or editing the workflow is not yours to do (the hard rules
+              below): propose it in the diagnosis comment for the owner. If the run's time is simply the runner's
+              noise and nothing grew, say so and open no PR.
 
             Hard rules (from claude.md and the owner):
             - NO AI attribution anywhere: no "Co-Authored-By" trailer, no "Generated with Claude Code" line, in
